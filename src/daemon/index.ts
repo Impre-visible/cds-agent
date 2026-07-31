@@ -1,6 +1,6 @@
 import { config } from "../config.ts";
 import { gitlab, GitLabError, resourceKind } from "../gitlab/client.ts";
-import { RequestStore } from "./store.ts";
+import { RequestStore, canProcess } from "./store.ts";
 import type { AgentRequest, GitLabUser, Todo } from "../types.ts";
 import { buildRequest, defuseMentions } from "./request.ts";
 import { authorize } from "./authorize.ts";
@@ -9,9 +9,52 @@ import { runTask } from "../tasks/router.ts";
 
 const store = new RequestStore(config.stateFile);
 let bot: GitLabUser;
-const queue = new TaskQueue(runTask);
+
+/**
+ * Le worker ne connaissait jusqu'ici que sa propre exécution : ni le
+ * démarrage ("running"), ni l'issue ("done"/"failed") n'étaient visibles du
+ * store. On les alimente ici plutôt que dans router.ts, pour que runTask
+ * reste indépendant de la persistance des statuts. runTask avale déjà ses
+ * propres erreurs (elle rapporte l'échec au demandeur puis retourne
+ * normalement) : le chemin "failed" ci-dessous ne se déclenche donc pas en
+ * pratique aujourd'hui, mais reste correct si runTask se met un jour à
+ * relancer une exception.
+ */
+async function trackedWorker(request: AgentRequest): Promise<void> {
+  store.record(request.key, request.todoId, "running");
+  try {
+    await runTask(request);
+    store.record(request.key, request.todoId, "done");
+  } catch (error) {
+    store.record(
+      request.key,
+      request.todoId,
+      "failed",
+      `échec worker : ${(error as Error).message}`,
+    );
+    throw error;
+  }
+}
+
+const queue = new TaskQueue(trackedWorker, (request) => request.key);
 const examined = new Set<number>();
 const attempts = new Map<number, number>();
+
+/**
+ * Porte la clé de la demande jusqu'au catch de poll(), pour que l'abandon
+ * après épuisement des tentatives puisse marquer la demande "failed" dans le
+ * store (voir plus bas) — sans quoi une demande abandonnée resterait à
+ * "claimed"/"acked" et serait rejouée indéfiniment à chaque redémarrage
+ * tombant dans la fenêtre de rattrapage des to-dos "done" récents.
+ */
+class HandleFailure extends Error {
+  readonly key: string | undefined;
+  constructor(message: string, key: string | undefined) {
+    super(message);
+    this.name = "HandleFailure";
+    this.key = key;
+  }
+}
 
 function ackBody(request: AgentRequest, position: number): string {
   const quoted = defuseMentions(request.text)
@@ -85,30 +128,39 @@ async function handle(todo: Todo): Promise<void> {
     return;
   }
 
-  if (store.has(request.key)) {
+  const status = store.statusOf(request.key);
+  if (!canProcess(status)) {
     console.log(
-      `  to-do #${todo.id} → ${request.key} DÉJÀ TRAITÉ (${store.statusOf(request.key)}), aucun repost`,
+      `  to-do #${todo.id} → ${request.key} DÉJÀ TRAITÉ (${status}), aucun repost`,
     );
     await finishTodo(todo.id);
     return;
   }
 
-  // Réservation AVANT toute écriture : en cas de crash, on préfère perdre
-  // une demande plutôt que de la traiter deux fois.
-  store.record(request.key, todo.id, "claimed");
-  console.log(`  to-do #${todo.id} → ${request.key} de @${request.requester}`);
-  const marker = request.kind === "merge_requests" ? "!" : "#";
-  console.log(`    ${request.projectPath} ${marker}${request.iid}`);
-  console.log(`    « ${request.text.replace(/\n/g, " ").slice(0, 100)} »`);
+  try {
+    // Réservation AVANT toute écriture : en cas de crash, on préfère perdre
+    // une demande plutôt que de la traiter deux fois. Sans effet si le
+    // statut est déjà "claimed" ou "acked" (rejeu) : record() est monotone.
+    store.record(request.key, todo.id, "claimed");
+    console.log(`  to-do #${todo.id} → ${request.key} de @${request.requester}`);
+    const marker = request.kind === "merge_requests" ? "!" : "#";
+    console.log(`    ${request.projectPath} ${marker}${request.iid}`);
+    console.log(`    « ${request.text.replace(/\n/g, " ").slice(0, 100)} »`);
 
-  const position = queue.push(request);
-  console.log(`    position dans la file : ${position}`);
+    const position = queue.push(request);
+    console.log(`    position dans la file : ${position}`);
 
-  await acknowledge(request, position);
-  store.record(request.key, todo.id, "acked");
-  console.log(`    accusé de réception posté`);
+    await acknowledge(request, position);
+    store.record(request.key, todo.id, "acked");
+    console.log(`    accusé de réception posté`);
 
-  await finishTodo(todo.id);
+    await finishTodo(todo.id);
+  } catch (error) {
+    // On remonte la clé, pas seulement le message : poll() en a besoin pour
+    // marquer la demande "failed" dans le store si les tentatives s'épuisent
+    // (voir notifyGiveUp plus bas).
+    throw new HandleFailure((error as Error).message, request.key);
+  }
 }
 
 async function collectTodos(): Promise<Todo[]> {
@@ -185,6 +237,14 @@ async function poll(): Promise<void> {
       );
       examined.add(todo.id);
       attempts.delete(todo.id);
+      // Statut terminal explicite : sans lui, la demande resterait à
+      // "claimed"/"acked" et un redémarrage tombant dans la fenêtre de
+      // rattrapage des to-dos "done" récents la rejouerait, malgré
+      // l'abandon. Pas de clé quand l'échec a eu lieu avant buildRequest
+      // (rien à marquer, ce n'était pas encore une demande identifiable).
+      if (error instanceof HandleFailure && error.key) {
+        store.record(error.key, todo.id, "failed", `abandonné après ${count} tentatives`);
+      }
       await notifyGiveUp(todo, message);
       await finishTodo(todo.id);
     }
@@ -202,10 +262,26 @@ async function main(): Promise<void> {
 
   const interrupted = store.interrupted();
   if (interrupted.length > 0) {
+    // running : le worker avait démarré, peut-être en plein push — jamais
+    // rejoué automatiquement (voir canProcess()), à vérifier à la main.
+    // claimed/acked : rien d'irréversible n'a eu lieu, le rejeu se fera tout
+    // seul au prochain sondage si le to-do est toujours ouvert côté GitLab.
+    const stuck = interrupted.filter((entry) => entry.status === "running");
+    const replayable = interrupted.filter((entry) => entry.status !== "running");
+
     console.warn(
-      `⚠︎ ${interrupted.length} demande(s) interrompue(s) par un arrêt brutal, non rejouée(s) :`,
+      `⚠︎ ${interrupted.length} demande(s) interrompue(s) par le précédent arrêt :`,
     );
-    for (const key of interrupted) console.warn(`   ${key}`);
+    for (const entry of stuck) {
+      console.warn(
+        `   ${entry.key} (running) — interrompue en pleine exécution, PAS rejouée automatiquement, à vérifier`,
+      );
+    }
+    for (const entry of replayable) {
+      console.warn(
+        `   ${entry.key} (${entry.status}) — sera rejouée si le to-do est toujours ouvert côté GitLab`,
+      );
+    }
   }
 
   console.log(`Journal : ${config.stateFile}`);
