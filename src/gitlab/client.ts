@@ -10,13 +10,21 @@ import type {
 } from "../types.ts";
 
 export class GitLabError extends Error {
-  constructor(
-    readonly status: number,
-    readonly url: string,
-    readonly payload: string,
-  ) {
+  // Champs déclarés explicitement (plutôt qu'en propriétés de paramètres du
+  // constructeur) : le mode "type stripping" natif de Node n'accepte pas la
+  // syntaxe raccourcie `constructor(readonly x: T)`, seulement les
+  // déclarations de champs classiques — nécessaire pour que `node --test`
+  // puisse charger ce module sans transformation (voir request.test.ts).
+  readonly status: number;
+  readonly url: string;
+  readonly payload: string;
+
+  constructor(status: number, url: string, payload: string) {
     super(`GitLab ${status} sur ${url} — ${payload.slice(0, 400)}`);
     this.name = "GitLabError";
+    this.status = status;
+    this.url = url;
+    this.payload = payload;
   }
 }
 

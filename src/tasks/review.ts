@@ -44,7 +44,8 @@ function buildPrompt(context: TaskContext): string {
 }
 
 /** Le modèle écrit parfois le JSON dans le fichier, parfois sur stdout. */
-function extractJson(text: string): string | null {
+// Exportée pour être testée unitairement (voir review.test.ts).
+export function extractJson(text: string): string | null {
   const fenced = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/.exec(text);
   if (fenced?.[1]) return fenced[1];
 
