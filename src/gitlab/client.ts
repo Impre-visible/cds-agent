@@ -1,4 +1,5 @@
 import { config } from "../config.ts";
+import { performFetch } from "./proxy-fetch.ts";
 import { GITLAB_ERROR_BODY_CHARS, MAX_LIST_PAGES } from "../limits.ts";
 import type {
   GitLabUser,
@@ -116,7 +117,11 @@ async function resilientFetch(
   for (let attempt = 1; ; attempt++) {
     let response: Response;
     try {
-      response = await fetch(url, {
+      // performFetch (§A) : proxy-aware — voir gitlab/proxy-fetch.ts. Retombe
+      // sur le `fetch()` natif tel quel dès qu'aucun proxy ne s'applique à
+      // `url`, donc sans changement de comportement dans le cas nominal
+      // (aucun HTTP_PROXY/HTTPS_PROXY dans l'environnement).
+      response = await performFetch(url, {
         ...init,
         signal: AbortSignal.timeout(config.gitlabRequestTimeoutMs),
       });

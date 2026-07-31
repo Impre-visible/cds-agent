@@ -495,4 +495,36 @@ describe("runAgentInSandbox (§1.7 : réseau restreint à l'inférence)", () => 
       rmSync(metaDir, { recursive: true, force: true });
     }
   });
+
+  // §B (durcissement proxy d'entreprise) : contrairement à runCommand()
+  // (agent/workspace.ts, voir workspace.test.ts), runAgentInSandbox()
+  // n'appelle jamais containerProxyEnv() — le conteneur agent ne doit
+  // connaître que le proxy d'inférence local, jamais le proxy d'entreprise
+  // de l'hôte, qui élargirait sa portée réseau à l'exact opposé de
+  // l'intention de restriction de ce bloc de tests.
+  test("un HTTP_PROXY d'entreprise présent dans l'environnement du daemon n'atteint jamais le conteneur agent", async () => {
+    const metaDir = mkdtempSync(join(tmpdir(), "cds-agent-meta-"));
+    writeFileSync(join(metaDir, "prompt.txt"), "prompt de test", "utf8");
+    const previousHttpProxy = process.env.HTTP_PROXY;
+    process.env.HTTP_PROXY = "http://proxy.corp.example:3128";
+
+    try {
+      await runAgentInSandbox("/repo", metaDir, "groupe/depot", { dockerBin });
+
+      const argvFiles = readdirSync(markerDir).filter((name) => name.startsWith("argv-"));
+      const argv = readFileSync(
+        join(markerDir, argvFiles[argvFiles.length - 1] as string),
+        "utf8",
+      ).split("\n");
+
+      assert.ok(
+        !argv.some((value) => value.startsWith("HTTP_PROXY=")),
+        "le conteneur agent ne doit jamais recevoir le proxy d'entreprise de l'hôte",
+      );
+    } finally {
+      if (previousHttpProxy === undefined) delete process.env.HTTP_PROXY;
+      else process.env.HTTP_PROXY = previousHttpProxy;
+      rmSync(metaDir, { recursive: true, force: true });
+    }
+  });
 });

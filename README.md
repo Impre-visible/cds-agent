@@ -27,6 +27,7 @@ sur un dépôt qui compte.
 - [Scripts npm](#scripts-npm)
 - [Images Docker](#images-docker)
 - [Modèle local](#modèle-local)
+- [Proxy d'entreprise](#proxy-dentreprise)
 - [Journalisation](#journalisation)
 - [Observabilité](#observabilité)
 - [Garde-fous de sécurité](#garde-fous-de-sécurité)
@@ -227,18 +228,31 @@ Quelques variables méritent une lecture attentive avant de démarrer :
   `src/daemon/health.ts`). Activé par défaut sur `127.0.0.1:8090` ;
   `HEALTH_ENABLED=0` le désactive complètement (aucun port n'est alors
   ouvert). Voir la section [Observabilité](#observabilité) ci-dessous.
+- **`CONTAINER_HTTP_PROXY`** / **`CONTAINER_HTTPS_PROXY`** /
+  **`CONTAINER_NO_PROXY`** — échappatoires explicites pour le proxy
+  transmis au conteneur d'installation/tests du dépôt cible (voir
+  [Proxy d'entreprise](#proxy-dentreprise) ci-dessous) : absentes par défaut,
+  auquel cas `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` de l'hôte sont repris
+  automatiquement, avec réécriture vers `host.docker.internal` si le proxy
+  écoute sur le loopback de l'hôte.
 - **`LOG_LEVEL`** / **`LOG_PRETTY`** (§6.4) — ne passent pas par
   `buildConfig()` (lus directement par `src/log.ts`, à chaque appel, pour
   qu'un test puisse les faire varier sans réimporter le module) : niveau
   minimal des lignes émises (`debug`/`info`/`warn`/`error`, défaut `info`) et
   bascule vers une sortie condensée lisible en développement
   (`LOG_PRETTY=1`) au lieu du JSON par ligne par défaut.
+- **`HTTP_PROXY`** / **`HTTPS_PROXY`** / **`NO_PROXY`** (variantes
+  minuscules aussi reconnues) — ne passent pas non plus par `buildConfig()`
+  (lues à chaque requête par `src/gitlab/proxy-fetch.ts` et
+  `src/config.ts::containerProxyEnv()`, comme `LOG_LEVEL`/`LOG_PRETTY`
+  ci-dessus) : voir [Proxy d'entreprise](#proxy-dentreprise) ci-dessous,
+  section à part entière vu l'ampleur du sujet.
 
 Le fichier réel `.env` de ce dépôt (non versionné, voir `.gitignore`) ne
 renseigne aujourd'hui qu'une poignée de ces variables — tout le reste
 tourne sur les valeurs par défaut de `src/config.ts`. `.env.example` liste
-les quarante-six variables lues par `buildConfig()`, plus `LOG_LEVEL`/
-`LOG_PRETTY` lues indépendamment par `src/log.ts`.
+les quarante-neuf variables lues par `buildConfig()`, plus `LOG_LEVEL`/
+`LOG_PRETTY`/`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` lues indépendamment.
 
 ## Capacités de l'agent
 
@@ -324,7 +338,7 @@ attendus).
 | Script | Commande | Rôle |
 |---|---|---|
 | `npm run dev` | `tsx src/daemon/index.ts` | Lance le daemon (polling + traitement des demandes). |
-| `npm test` | `node --test 'src/**/*.test.ts'` | Suite de tests native Node, 374 tests, aucune dépendance externe, aucun modèle ni token GitLab requis. |
+| `npm test` | `node --test 'src/**/*.test.ts'` | Suite de tests native Node, 405 tests, aucune dépendance externe, aucun modèle ni token GitLab requis. |
 | `npm run test:watch` | `node --test --watch ...` | Idem, en mode watch. |
 | `npm run check` | `tsc --noEmit` | Seul filet de typage — voir [CI](#documentation-complémentaire), pas câblé automatiquement avant ce chantier. |
 | `npm run context -- <mr\|issue> <iid>` | `tsx src/tools/dump-context.ts` | Construit le `TaskContext` d'une MR ou d'une issue réelle et l'écrit dans `./context-dump.json` — utile pour inspecter ce que le prompt verra, sans lancer l'agent. |
@@ -392,6 +406,76 @@ Ce qu'il faut avoir en place :
 Aucun modèle n'est fourni ni téléchargé par ce projet : c'est à
 l'opérateur de charger un modèle dans LM Studio (ou tout serveur compatible
 OpenAI) avant de lancer le daemon.
+
+## Proxy d'entreprise
+
+Derrière un proxy d'entreprise, les commandes git côté hôte (clone, push)
+fonctionnaient déjà avant ce chantier : `sanitizedEnv()` transmet `HOME`,
+donc `git` lit son `~/.gitconfig` (`http.<url>.proxy`, scopé par hôte) comme
+sur le poste de l'opérateur. Deux trous restaient ouverts, tous deux comblés
+par `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (variantes minuscules également
+reconnues) dans l'environnement du daemon :
+
+- **Les appels API GitLab** (`src/gitlab/client.ts`, via `fetch()`).
+  Node **n'honore aucune variable de proxy nativement pour `fetch()`** —
+  contrairement à `git`. Node 22.21+/24.5+ propose un mécanisme natif
+  (`--use-env-proxy` / `NODE_USE_ENV_PROXY`) qui, vérifié empiriquement pour
+  ce projet (Node 24.14 et 26.3, via `diagnostics_channel` sur
+  `undici:client:connectError` pour observer l'hôte réellement contacté),
+  s'est révélé **sans aucun effet sur `fetch()`** — seulement sur
+  `node:http`/`node:https`. `src/gitlab/proxy-fetch.ts` réimplémente donc
+  lui-même, sur ces primitives natives (`node:http`/`node:https`/`node:tls`,
+  tunnel `CONNECT` + TLS pour une cible `https:`), le nécessaire pour que
+  `fetch()` reparte bien vers le proxy configuré — **indépendamment de tout
+  flag ou variable Node**, donc que le daemon soit lancé via `npm run dev`
+  ou `tsx src/daemon/index.ts` directement. Sans `HTTP_PROXY`/`HTTPS_PROXY`
+  dans l'environnement, ce mécanisme n'intervient jamais : `fetch()` natif
+  est utilisé tel quel, comportement nominal inchangé.
+- **Le conteneur d'installation/tests du dépôt cible** (`implement.ts`,
+  `network: true` uniquement — un conteneur `--network none` n'a de toute
+  façon aucun moyen d'atteindre un proxy). `containerProxyEnv()`
+  (`src/config.ts`) transmet `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` au
+  conteneur, avec une réécriture automatique : un proxy dont l'hôte est en
+  loopback (`127.0.0.1`/`localhost` — un relais local type cntlm/Kerberos,
+  par exemple) est réécrit vers `host.docker.internal` (avec `--add-host`
+  ajouté automatiquement), sinon injoignable depuis le netns du conteneur.
+  Un proxy sur une adresse réseau normale (le cas courant en entreprise) est
+  transmis tel quel, déjà joignable par le réseau `bridge` du conteneur.
+  `CONTAINER_HTTP_PROXY`/`CONTAINER_HTTPS_PROXY`/`CONTAINER_NO_PROXY`
+  court-circuitent entièrement cette résolution automatique, pour le cas
+  qu'elle ne saurait pas résoudre (voir `.env.example`).
+
+**Le conteneur agent (`runAgentInSandbox`) ne reçoit jamais ce proxy**,
+décision délibérée : son réseau est volontairement restreint au seul proxy
+d'inférence local (voir [Modèle local](#modèle-local) ci-dessus) — lui
+transmettre en plus le proxy d'entreprise élargirait sa portée réseau, à
+l'exact opposé de cette restriction.
+
+**Ce qui reste à la charge de l'opérateur, sans solution automatique** :
+
+- Si le proxy n'est configuré **que** dans `~/.gitconfig` et jamais exporté
+  comme variable d'environnement, `git` en profite déjà mais ni `fetch()`
+  ni le conteneur ci-dessus n'ont quoi que ce soit à lire — il faut
+  explicitement exporter `HTTP_PROXY`/`HTTPS_PROXY` (et `NO_PROXY` si
+  besoin) pour le process du daemon. **Le daemon avertit au démarrage dans
+  ce cas précis** (`src/daemon/proxy-check.ts` : un proxy git est configuré
+  pour `GITLAB_URL` mais aucune variable d'environnement de proxy n'est
+  présente), sans jamais journaliser la valeur du proxy configuré — une URL
+  de proxy authentifié embarque parfois un identifiant dans son userinfo
+  (`http://utilisateur:jeton@proxy`), un secret à part entière.
+- La réécriture automatique loopback → `host.docker.internal` ne couvre que
+  ce cas précis : un proxy sur une adresse ni loopback ni normalement
+  joignable par le réseau `bridge` du conteneur (segmentation réseau
+  particulière, alias propre à l'hôte...) reste un cas à résoudre à la main
+  via `CONTAINER_HTTP_PROXY`/`CONTAINER_HTTPS_PROXY`.
+- Git LFS (`filter.lfs.*`) et `credential.helper`, s'ils sont configurés
+  dans `~/.gitconfig`, restent des commandes exécutées par `git` côté hôte,
+  hors de la portée de ce chantier : `fingerprintGitMeta` n'empreinte que
+  `.git/config` du dépôt **cloné**, jamais la configuration globale de
+  l'opérateur, mais l'agent (conteneurisé, réseau restreint) n'a de toute
+  façon aucun moyen d'atteindre cette configuration globale pour la
+  modifier — angle mort théorique, pas un chemin d'attaque réel dans ce
+  modèle de menace.
 
 ## Journalisation
 
@@ -577,7 +661,7 @@ Honnêtement, dans l'ordre où elles comptent le plus :
 npm test
 ```
 
-374 tests, `node --test` natif, aucune dépendance de test ajoutée. Les tests
+405 tests, `node --test` natif, aucune dépendance de test ajoutée. Les tests
 qui touchent Docker ou git injectent un faux binaire (voir
 `src/agent/sandbox.test.ts`, `src/agent/workspace.test.ts`) : la suite ne
 nécessite ni Docker réellement lancé, ni modèle d'inférence, ni token GitLab
@@ -592,5 +676,5 @@ deux sont câblés dans `.gitlab-ci.yml`.
   webhook, garde-fou par chemin, opencode + inférence locale, contrat de
   fiabilité de la file en mémoire, modèle de capacités par dépôt, frontière
   de confiance (patch vs clone), worker unique et absence de quotas.
-- [`.env.example`](./.env.example) — les quarante-six variables lues par
+- [`.env.example`](./.env.example) — les quarante-neuf variables lues par
   `buildConfig()`, une par une.

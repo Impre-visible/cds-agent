@@ -16,13 +16,16 @@ let buildConfig: (env: NodeJS.ProcessEnv) => Record<string, unknown>;
 let config: { gitlabUrl: string; token: string };
 let gitCredentialEnv: () => NodeJS.ProcessEnv;
 let sanitizedEnv: () => NodeJS.ProcessEnv;
+let computeContainerProxyEnv: (
+  hostEnv: NodeJS.ProcessEnv,
+  overrides?: { httpProxy?: string; httpsProxy?: string; noProxy?: string },
+) => { env: Record<string, string>; hostGateway: boolean };
 
 before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
-  ({ buildConfig, config, gitCredentialEnv, sanitizedEnv } = await import(
-    "./config.ts"
-  ));
+  ({ buildConfig, config, gitCredentialEnv, sanitizedEnv, computeContainerProxyEnv } =
+    await import("./config.ts"));
 });
 
 /** Environnement minimal valide : seules les deux variables obligatoires. */
@@ -598,5 +601,75 @@ describe("buildConfig — testCommands / installCommands par dépôt", () => {
     );
     const testCommands = config.testCommands as Map<string, string>;
     assert.equal(testCommands.get("groupe/depot"), "CI=1 npm test");
+  });
+});
+
+// §B (durcissement proxy d'entreprise) — computeContainerProxyEnv : fonction
+// pure séparée de containerProxyEnv() (qui, elle, lit process.env/config
+// réels — voir agent/workspace.test.ts pour la couverture de ce fil-là,
+// via runCommand).
+describe("computeContainerProxyEnv (§B : proxy transmis au conteneur d'install/test)", () => {
+  test("rien dans l'environnement hôte : aucune variable produite, pas de host-gateway", () => {
+    const result = computeContainerProxyEnv({});
+    assert.deepEqual(result.env, {});
+    assert.equal(result.hostGateway, false);
+  });
+
+  test("HTTP_PROXY/HTTPS_PROXY/NO_PROXY sur une adresse réseau normale (pas loopback) : repris tels quels", () => {
+    const result = computeContainerProxyEnv({
+      HTTP_PROXY: "http://proxy.corp.example:3128",
+      HTTPS_PROXY: "http://proxy.corp.example:3128",
+      NO_PROXY: "localhost,127.0.0.1,.corp.example",
+    });
+    assert.equal(result.env.HTTP_PROXY, "http://proxy.corp.example:3128");
+    assert.equal(result.env.HTTPS_PROXY, "http://proxy.corp.example:3128");
+    assert.equal(result.env.NO_PROXY, "localhost,127.0.0.1,.corp.example");
+    // Variantes minuscules également transmises : certains outils du dépôt
+    // cible (pip, curl...) ne lisent que la forme minuscule.
+    assert.equal(result.env.http_proxy, "http://proxy.corp.example:3128");
+    assert.equal(
+      result.hostGateway,
+      false,
+      "une adresse réseau normale ne nécessite pas host.docker.internal",
+    );
+  });
+
+  test("proxy en loopback (127.0.0.1) : réécrit vers host.docker.internal, host-gateway nécessaire", () => {
+    const result = computeContainerProxyEnv({ HTTP_PROXY: "http://127.0.0.1:3128" });
+    assert.equal(result.env.HTTP_PROXY, "http://host.docker.internal:3128/");
+    assert.equal(result.hostGateway, true);
+  });
+
+  test("proxy en loopback (localhost) : même réécriture", () => {
+    const result = computeContainerProxyEnv({ HTTPS_PROXY: "http://localhost:3129" });
+    assert.equal(result.env.HTTPS_PROXY, "http://host.docker.internal:3129/");
+    assert.equal(result.hostGateway, true);
+  });
+
+  test("NO_PROXY n'est jamais réécrit (une entrée loopback y devient simplement sans effet côté conteneur)", () => {
+    const result = computeContainerProxyEnv({
+      HTTP_PROXY: "http://127.0.0.1:3128",
+      NO_PROXY: "127.0.0.1,corp.example",
+    });
+    assert.equal(result.env.NO_PROXY, "127.0.0.1,corp.example");
+  });
+
+  test("les overrides CONTAINER_HTTP_PROXY/CONTAINER_HTTPS_PROXY/CONTAINER_NO_PROXY court-circuitent l'hôte ET la réécriture automatique", () => {
+    const result = computeContainerProxyEnv(
+      { HTTP_PROXY: "http://127.0.0.1:3128" },
+      {
+        httpProxy: "http://un-alias-special:9999",
+        httpsProxy: "http://un-autre-alias:9998",
+        noProxy: "special.invalid",
+      },
+    );
+    assert.equal(result.env.HTTP_PROXY, "http://un-alias-special:9999");
+    assert.equal(result.env.HTTPS_PROXY, "http://un-autre-alias:9998");
+    assert.equal(result.env.NO_PROXY, "special.invalid");
+    assert.equal(
+      result.hostGateway,
+      false,
+      "un override explicite n'est jamais réécrit, donc ne déclenche jamais host-gateway",
+    );
   });
 });

@@ -1,5 +1,5 @@
 import { dirname, join } from "node:path";
-import { config } from "../config.ts";
+import { config, sanitizedEnv } from "../config.ts";
 import { gitlab, GitLabError, resourceKind } from "../gitlab/client.ts";
 import { RequestStore, canProcess } from "./store.ts";
 import type { AckHandle, AgentRequest, GitLabUser, Todo } from "../types.ts";
@@ -18,6 +18,7 @@ import { InstanceLock } from "./lock.ts";
 import { log, withRequestContext } from "../log.ts";
 import { daemonStatus } from "./status.ts";
 import { startHealthServer, stopHealthServer, type HealthDeps } from "./health.ts";
+import { warnIfGitProxyNotExported } from "./proxy-check.ts";
 import {
   SHUTDOWN_GRACE_MS,
   ABANDON_REASON_CHARS,
@@ -458,6 +459,14 @@ async function main(): Promise<void> {
     port: config.healthPort,
     host: config.healthHost,
   });
+
+  // §A (durcissement proxy d'entreprise) : diagnostic local, avant le
+  // premier appel réseau — voir proxy-check.ts pour ce qu'il couvre
+  // précisément (git a un proxy configuré pour GITLAB_URL, mais ce process
+  // n'a pas HTTP_PROXY/HTTPS_PROXY dans son environnement).
+  await warnIfGitProxyNotExported(config.gitlabUrl, sanitizedEnv(), (message) =>
+    log.warn(`⚠ ${message}`),
+  );
 
   bot = await gitlab.currentUser();
   log.info(`Compte du PAT : @${bot.username} (id ${bot.id})`);

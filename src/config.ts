@@ -485,6 +485,30 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
      * avancé conscient du compromis, pas au défaut.
      */
     inferenceUrl: env.CONTAINER_INFERENCE_URL,
+    /**
+     * §B (durcissement proxy d'entreprise, voir containerProxyEnv plus bas) :
+     * échappatoire explicite pour le proxy transmis au conteneur d'un
+     * install/test réseau (network: true, pas le conteneur agent — voir
+     * containerProxyEnv). Par défaut absente : HTTP_PROXY est repris tel quel
+     * depuis l'environnement du daemon, avec réécriture automatique vers
+     * host.docker.internal si son hôte est en loopback (127.0.0.1/localhost —
+     * injoignable tel quel depuis le netns du conteneur). Cette variable
+     * COURT-CIRCUITE cette réécriture automatique : utile si le proxy vit sur
+     * une adresse que l'heuristique ne sait pas résoudre correctement (ex. un
+     * alias réseau propre à l'hôte, ni loopback ni une adresse LAN normale) —
+     * voir le rapport de la tâche pour le détail des cas qui restent
+     * irrésolubles automatiquement.
+     */
+    containerHttpProxy: env.CONTAINER_HTTP_PROXY,
+    /** Même rôle que containerHttpProxy ci-dessus, pour HTTPS_PROXY. */
+    containerHttpsProxy: env.CONTAINER_HTTPS_PROXY,
+    /**
+     * Même rôle que containerHttpProxy ci-dessus, pour NO_PROXY — jamais
+     * réécrite automatiquement (voir computeContainerProxyEnv), cette
+     * variable ne sert donc qu'à donner au conteneur une liste d'exclusions
+     * différente de celle de l'hôte, si besoin.
+     */
+    containerNoProxy: env.CONTAINER_NO_PROXY,
     // Port d'écoute du proxy filtrant démarré par runAgentInSandbox pour
     // chaque exécution de l'agent (0 = l'OS choisit un port libre, ce qui
     // évite toute collision si un proxy précédent n'a pas fini de se
@@ -627,4 +651,116 @@ export function sanitizedEnv(): NodeJS.ProcessEnv {
     if (allowed.has(key) || key.startsWith("LC_")) clean[key] = value;
   }
   return clean;
+}
+
+/**
+ * §B (durcissement proxy d'entreprise) : hôtes considérés comme "loopback",
+ * donc injoignables tels quels depuis le netns d'un conteneur (le loopback
+ * DU CONTENEUR n'est jamais celui de l'hôte). Un proxy local (ex. un relais
+ * cntlm/kerberos qui n'écoute que sur 127.0.0.1) doit être réécrit vers
+ * host.docker.internal pour rester joignable — voir needsHostGateway dans
+ * agent/sandbox.ts pour la même logique, déjà appliquée au proxy
+ * d'inférence.
+ */
+const LOOPBACK_PROXY_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+interface RewrittenProxyValue {
+  value: string;
+  /** true si l'hôte a été réécrit vers host.docker.internal (donc --add-host nécessaire). */
+  rewritten: boolean;
+}
+
+/**
+ * Réécrit l'hôte d'une URL de proxy en loopback vers host.docker.internal ;
+ * une URL invalide, ou dont l'hôte n'est pas en loopback (le cas normal d'un
+ * proxy d'entreprise sur une adresse réseau réelle, jointe directement par
+ * le réseau bridge du conteneur, sans alias particulier), est renvoyée
+ * telle quelle.
+ */
+function rewriteLoopbackProxyHost(raw: string): RewrittenProxyValue {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { value: raw, rewritten: false };
+  }
+  if (!LOOPBACK_PROXY_HOSTNAMES.has(url.hostname)) return { value: raw, rewritten: false };
+  url.hostname = "host.docker.internal";
+  return { value: url.toString(), rewritten: true };
+}
+
+export interface ContainerProxyEnv {
+  /** Variables à transmettre au conteneur via `docker run -e` (voir agent/workspace.ts::runCommand). */
+  env: Record<string, string>;
+  /** true si --add-host host.docker.internal:host-gateway est nécessaire (au moins une réécriture loopback a eu lieu). */
+  hostGateway: boolean;
+}
+
+/**
+ * Calcule les variables de proxy à transmettre à un conteneur d'install/test
+ * (network: true — jamais le conteneur agent, voir le rapport de la tâche
+ * pour la justification de cette distinction). Fonction pure, séparée de
+ * containerProxyEnv() ci-dessous pour être testable sans dépendre de
+ * `config`/`process.env` (même raison que buildConfig, voir plus haut).
+ *
+ * `overrides` (CONTAINER_HTTP_PROXY/CONTAINER_HTTPS_PROXY/CONTAINER_NO_PROXY,
+ * voir buildConfig) COURT-CIRCUITENT entièrement la valeur de l'hôte ET sa
+ * réécriture automatique : c'est l'échappatoire explicite pour le cas où
+ * cette dernière ne convient pas (voir leur documentation dans buildConfig).
+ * Sans override, HTTP_PROXY/HTTPS_PROXY de l'hôte sont repris avec
+ * réécriture automatique loopback → host.docker.internal ; NO_PROXY n'est
+ * en revanche JAMAIS réécrit (une entrée en loopback y devient simplement
+ * sans effet côté conteneur, ce qui est sans risque — voir rewriteLoopbackProxyHost).
+ */
+export function computeContainerProxyEnv(
+  hostEnv: NodeJS.ProcessEnv,
+  overrides: { httpProxy?: string; httpsProxy?: string; noProxy?: string } = {},
+): ContainerProxyEnv {
+  const containerEnv: Record<string, string> = {};
+  let hostGateway = false;
+
+  const httpProxyRaw = overrides.httpProxy || hostEnv.HTTP_PROXY || hostEnv.http_proxy;
+  if (httpProxyRaw) {
+    const { value, rewritten } = overrides.httpProxy
+      ? { value: overrides.httpProxy, rewritten: false }
+      : rewriteLoopbackProxyHost(httpProxyRaw);
+    containerEnv.HTTP_PROXY = value;
+    containerEnv.http_proxy = value;
+    hostGateway = hostGateway || rewritten;
+  }
+
+  const httpsProxyRaw = overrides.httpsProxy || hostEnv.HTTPS_PROXY || hostEnv.https_proxy;
+  if (httpsProxyRaw) {
+    const { value, rewritten } = overrides.httpsProxy
+      ? { value: overrides.httpsProxy, rewritten: false }
+      : rewriteLoopbackProxyHost(httpsProxyRaw);
+    containerEnv.HTTPS_PROXY = value;
+    containerEnv.https_proxy = value;
+    hostGateway = hostGateway || rewritten;
+  }
+
+  const noProxy = overrides.noProxy || hostEnv.NO_PROXY || hostEnv.no_proxy;
+  if (noProxy) {
+    containerEnv.NO_PROXY = noProxy;
+    containerEnv.no_proxy = noProxy;
+  }
+
+  return { env: containerEnv, hostGateway };
+}
+
+/**
+ * Enveloppe non pure de computeContainerProxyEnv, branchée sur l'environnement
+ * réel du daemon et les échappatoires de `config` — voir agent/workspace.ts
+ * (runCommand), seul appelant : uniquement pour l'install/les tests du dépôt
+ * cible avec accès réseau, jamais pour le conteneur agent (runAgentInSandbox,
+ * agent/sandbox.ts), dont le réseau reste volontairement restreint au seul
+ * proxy d'inférence local — lui transmettre en plus le proxy d'entreprise
+ * élargirait sa portée réseau, à l'exact opposé de cette restriction.
+ */
+export function containerProxyEnv(): ContainerProxyEnv {
+  return computeContainerProxyEnv(process.env, {
+    httpProxy: config.containerHttpProxy,
+    httpsProxy: config.containerHttpsProxy,
+    noProxy: config.containerNoProxy,
+  });
 }

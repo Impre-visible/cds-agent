@@ -1,4 +1,4 @@
-import { test, describe, before, after } from "node:test";
+import { test, describe, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -6,6 +6,8 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -17,11 +19,21 @@ import { join } from "node:path";
 // on renseigne l'environnement avant l'import dynamique du module testé.
 let git: (repo: string, args: string[], authenticated?: boolean) => Promise<string>;
 let fingerprintGitMeta: (repo: string) => string;
+let runCommand: (
+  repo: string,
+  command: string,
+  options: {
+    projectPath: string;
+    network?: boolean;
+    mounts?: { host: string; container: string }[];
+    dockerBin?: string;
+  },
+) => Promise<{ ok: boolean; output: string; timedOut: boolean }>;
 
 before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
-  ({ git, fingerprintGitMeta } = await import("./workspace.ts"));
+  ({ git, fingerprintGitMeta, runCommand } = await import("./workspace.ts"));
 });
 
 /** Un vrai dépôt git jetable, avec une remote "origin" bare locale. */
@@ -314,5 +326,123 @@ describe("§4.5 : maxBuffer explicite, une sortie git de plus de 1 Mo ne lève p
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Faux binaire docker minimal, ne servant qu'à inspecter les arguments reçus
+ * par `docker run` — même principe que sandbox.test.ts::writeFakeDocker,
+ * dupliqué ici en plus petit (pas de simulation de timeout/kill nécessaire
+ * pour ces tests, qui ne portent que sur les `-e` reçus).
+ */
+function writeArgvCapturingDocker(dir: string): string {
+  const path = join(dir, "fake-docker.sh");
+  writeFileSync(
+    path,
+    `#!/bin/bash
+if [ "$1" != "run" ]; then exit 0; fi
+name=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--name" ]; then name="$arg"; fi
+  prev="$arg"
+done
+printf '%s\\n' "$@" > "$FAKE_DOCKER_MARKER_DIR/argv-$name"
+echo "ok"
+exit 0
+`,
+  );
+  chmodSync(path, 0o755);
+  return path;
+}
+
+// §B (durcissement proxy d'entreprise) : runCommand() est le seul appelant
+// de containerProxyEnv() (agent/sandbox.ts::runAgentInSandbox, le conteneur
+// agent, n'y touche jamais — voir sandbox.test.ts pour la vérification de ce
+// côté-là). Ces tests couvrent le fil complet : options.network -> env reçu
+// par `docker run`.
+describe("runCommand + Docker (§B : proxy transmis au conteneur, seulement si network: true)", () => {
+  let dir: string;
+  let dockerBin: string;
+  let markerDir: string;
+  let previousMarkerDir: string | undefined;
+  let previousHttpProxy: string | undefined;
+
+  before(() => {
+    dir = mkdtempSync(join(tmpdir(), "cds-agent-runcommand-fake-docker-"));
+    markerDir = mkdtempSync(join(tmpdir(), "cds-agent-runcommand-fake-docker-markers-"));
+    dockerBin = writeArgvCapturingDocker(dir);
+  });
+
+  after(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(markerDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    previousMarkerDir = process.env.FAKE_DOCKER_MARKER_DIR;
+    process.env.FAKE_DOCKER_MARKER_DIR = markerDir;
+    previousHttpProxy = process.env.HTTP_PROXY;
+  });
+
+  afterEach(() => {
+    if (previousMarkerDir === undefined) delete process.env.FAKE_DOCKER_MARKER_DIR;
+    else process.env.FAKE_DOCKER_MARKER_DIR = previousMarkerDir;
+    if (previousHttpProxy === undefined) delete process.env.HTTP_PROXY;
+    else process.env.HTTP_PROXY = previousHttpProxy;
+    for (const entry of readdirSync(markerDir)) rmSync(join(markerDir, entry));
+  });
+
+  test("network: true + HTTP_PROXY dans l'environnement : le conteneur reçoit HTTP_PROXY en -e", async () => {
+    process.env.HTTP_PROXY = "http://proxy.corp.example:3128";
+
+    await runCommand("/repo", "npm install", {
+      projectPath: "groupe/depot",
+      network: true,
+      dockerBin,
+    });
+
+    const [argvFile] = readdirSync(markerDir).filter((name) => name.startsWith("argv-"));
+    const argv = readFileSync(join(markerDir, argvFile as string), "utf8").split("\n");
+    const httpProxyIndex = argv.findIndex((value) => value === "HTTP_PROXY=http://proxy.corp.example:3128");
+    assert.notEqual(httpProxyIndex, -1, "HTTP_PROXY doit être passé en -e au conteneur");
+  });
+
+  test("network: false : HTTP_PROXY n'est PAS transmis, même s'il est présent dans l'environnement", async () => {
+    process.env.HTTP_PROXY = "http://proxy.corp.example:3128";
+
+    await runCommand("/repo", "npm test", {
+      projectPath: "groupe/depot",
+      network: false,
+      dockerBin,
+    });
+
+    const [argvFile] = readdirSync(markerDir).filter((name) => name.startsWith("argv-"));
+    const argv = readFileSync(join(markerDir, argvFile as string), "utf8").split("\n");
+    assert.ok(
+      !argv.some((value) => value.startsWith("HTTP_PROXY=")),
+      "un conteneur --network none n'a aucun moyen d'atteindre un proxy : ne rien transmettre",
+    );
+  });
+
+  test("proxy en loopback (127.0.0.1) : réécrit vers host.docker.internal ET --add-host ajouté", async () => {
+    process.env.HTTP_PROXY = "http://127.0.0.1:3128";
+
+    await runCommand("/repo", "npm install", {
+      projectPath: "groupe/depot",
+      network: true,
+      dockerBin,
+    });
+
+    const [argvFile] = readdirSync(markerDir).filter((name) => name.startsWith("argv-"));
+    const argv = readFileSync(join(markerDir, argvFile as string), "utf8").split("\n");
+    assert.ok(
+      argv.includes("HTTP_PROXY=http://host.docker.internal:3128/"),
+      "un proxy en loopback sur l'hôte doit être réécrit, sinon injoignable depuis le conteneur",
+    );
+    assert.ok(
+      argv.includes("host.docker.internal:host-gateway"),
+      "--add-host doit accompagner la réécriture, sinon l'alias ne résout à rien dans le conteneur",
+    );
   });
 });

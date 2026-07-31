@@ -1,6 +1,6 @@
-import { test, describe, before, after, beforeEach } from "node:test";
+import { test, describe, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import type { Todo } from "../types.ts";
 
@@ -279,5 +279,101 @@ describe("pagination", () => {
     // MAX_TODO_PAGES dans gitlab/client.ts : 20 pages × 100 éléments.
     assert.equal(calls, 20);
     assert.equal(result.length, 2000);
+  });
+});
+
+// §A (durcissement proxy d'entreprise) : GITLAB_URL est http: dans toute
+// cette suite (voir before() plus haut), donc HTTP_PROXY est la variable
+// pertinente ici — voir gitlab/proxy-fetch.test.ts pour la couverture
+// dédiée du cas https:/tunnel CONNECT et de la sélection HTTP_PROXY vs
+// HTTPS_PROXY. Ce describe vérifie l'intégration réelle avec api()/
+// resilientFetch, pas seulement performFetch en isolation.
+describe("résilience réseau — proxy d'entreprise (§A)", () => {
+  let proxy: Server;
+  let proxyPort: number;
+  let proxyHits: number;
+  let previousHttpProxy: string | undefined;
+  let previousNoProxy: string | undefined;
+
+  before(async () => {
+    proxyHits = 0;
+    proxy = createServer((req, res) => {
+      proxyHits += 1;
+      // Relaie tel quel vers la vraie cible (une URI absolue, puisqu'on
+      // reçoit bien une requête de proxy — voir requestOverHttpProxy) : le
+      // faux serveur GitLab (`server`, plus haut) répond alors comme si la
+      // requête lui était arrivée directement, preuve que le relais
+      // fonctionne de bout en bout, pas seulement que le proxy a été appelé.
+      const target = new URL(req.url ?? "/", "http://placeholder.invalid");
+      const upstream = httpRequest(
+        { host: target.hostname, port: target.port, path: target.pathname + target.search, method: req.method, headers: req.headers },
+        (upstreamRes) => {
+          res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+          upstreamRes.pipe(res);
+        },
+      );
+      req.pipe(upstream);
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", () => resolve()));
+    const address = proxy.address();
+    proxyPort = address && typeof address === "object" ? address.port : 0;
+  });
+
+  after(async () => {
+    proxy.closeAllConnections();
+    await new Promise<void>((resolve) => proxy.close(() => resolve()));
+  });
+
+  beforeEach(() => {
+    proxyHits = 0;
+    previousHttpProxy = process.env.HTTP_PROXY;
+    previousNoProxy = process.env.NO_PROXY;
+  });
+
+  afterEach(() => {
+    if (previousHttpProxy === undefined) delete process.env.HTTP_PROXY;
+    else process.env.HTTP_PROXY = previousHttpProxy;
+    if (previousNoProxy === undefined) delete process.env.NO_PROXY;
+    else process.env.NO_PROXY = previousNoProxy;
+  });
+
+  test("avec HTTP_PROXY configuré, un appel api() part bien vers le proxy (compté), qui relaie vers GitLab", async () => {
+    routes.set("/api/v4/test/via-proxy", (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, via: "gitlab-direct" }));
+    });
+    process.env.HTTP_PROXY = `http://127.0.0.1:${proxyPort}`;
+
+    const result = await api<{ ok: boolean }>("/test/via-proxy");
+
+    assert.deepEqual(result, { ok: true, via: "gitlab-direct" });
+    assert.equal(proxyHits, 1, "la requête doit être passée par le proxy");
+  });
+
+  test("sans HTTP_PROXY, rien ne change : la requête part directement vers GitLab, jamais vers le proxy", async () => {
+    routes.set("/api/v4/test/no-proxy-configured", (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    delete process.env.HTTP_PROXY;
+
+    const result = await api<{ ok: boolean }>("/test/no-proxy-configured");
+
+    assert.deepEqual(result, { ok: true });
+    assert.equal(proxyHits, 0, "le proxy ne doit recevoir aucune connexion");
+  });
+
+  test("NO_PROXY couvrant 127.0.0.1 fait ignorer HTTP_PROXY pour l'appel GitLab (loopback de test)", async () => {
+    routes.set("/api/v4/test/no-proxy-bypass", (_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    process.env.HTTP_PROXY = `http://127.0.0.1:${proxyPort}`;
+    process.env.NO_PROXY = "127.0.0.1";
+
+    const result = await api<{ ok: boolean }>("/test/no-proxy-bypass");
+
+    assert.deepEqual(result, { ok: true });
+    assert.equal(proxyHits, 0, "NO_PROXY doit empêcher tout passage par le proxy");
   });
 });

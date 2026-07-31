@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { config, gitCredentialEnv, sanitizedEnv } from "../config.ts";
+import { config, containerProxyEnv, gitCredentialEnv, sanitizedEnv } from "../config.ts";
 import { imageFor, runInSandbox } from "./sandbox.ts";
 
 const execFileAsync = promisify(execFile);
@@ -241,6 +241,8 @@ export interface RunOptions {
   projectPath: string;
   network?: boolean;
   mounts?: { host: string; container: string }[];
+  /** Nom du binaire docker à invoquer ; injectable pour les tests (faux docker) — voir sandbox.ts::SandboxOptions.dockerBin. */
+  dockerBin?: string;
 }
 
 export async function runCommand(
@@ -249,9 +251,24 @@ export async function runCommand(
   options: RunOptions,
 ): Promise<CommandResult> {
   if (config.useDocker) {
+    // §B (durcissement proxy d'entreprise) : uniquement quand le réseau est
+    // ouvert (options.network) — un conteneur --network none n'a de toute
+    // façon aucun moyen d'atteindre un proxy, transmettre ces variables ne
+    // ferait rien de plus qu'ajouter du bruit. Ce chemin sert l'installation
+    // et les tests du dépôt cible (implement.ts) ; le conteneur agent
+    // (runAgentInSandbox, agent/sandbox.ts) ne passe jamais par ici et ne
+    // reçoit donc jamais le proxy d'entreprise — son réseau reste restreint
+    // au seul proxy d'inférence local, une portée volontairement plus
+    // étroite qu'un accès proxifié au réseau de l'entreprise.
+    const proxy = options.network
+      ? containerProxyEnv()
+      : { env: {}, hostGateway: false };
     return runInSandbox(repo, imageFor(options.projectPath), command, {
       network: options.network,
       mounts: options.mounts,
+      env: proxy.env,
+      hostGateway: proxy.hostGateway,
+      dockerBin: options.dockerBin,
     });
   }
 
