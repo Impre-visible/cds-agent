@@ -55,10 +55,10 @@ const TEST_FILENAME_PATTERNS: RegExp[] = [
  * Python, Go, Java/Kotlin, Scala, Ruby).
  *
  * `extraDirectories` permet à un dépôt donné de déclarer ses propres noms de
- * répertoire de test (voir config.testDirectoryOverrides, résolu par le
- * projet dans tasks/implement.ts) sans élargir la détection par défaut pour
- * tous les autres dépôts : sans configuration, seule TEST_DIRECTORY_NAMES
- * s'applique.
+ * répertoire de test (voir `testDirectories` dans projects.json, résolu par
+ * src/projects.ts::resolveProject et propagé par tasks/implement.ts) sans
+ * élargir la détection par défaut pour tous les autres dépôts : sans
+ * configuration, seule TEST_DIRECTORY_NAMES s'applique.
  *
  * Hors périmètre, volontairement — pour ne pas transformer ce garde-fou en
  * passoire au nom de la couverture multi-écosystème :
@@ -129,8 +129,9 @@ export function isTestPath(
 // dont la réponse était éparpillée : isTestPath ci-dessus (en dur), plus
 // checkHeadIntegrity et le refus de branche protégée dans implement.ts, plus
 // deux intentions figées dans router.ts. RepoCapabilities rassemble ça en UN
-// point de configuration par dépôt (voir config.ts::parseCapabilitiesMap
-// pour le format AGENT_CAPABILITIES), et isWritablePath ci-dessous est
+// point de configuration par dépôt (voir src/projects.ts::repoCapabilitiesFor,
+// qui traduit les capacités "mergeRequest" de projects.json), et
+// isWritablePath ci-dessous est
 // désormais LE point unique qui répond à « l'agent avait-il le droit de
 // modifier ce chemin ? » — implement.ts (collectChanges) et router.ts
 // (rapport) s'y réfèrent tous les deux plutôt que de réévaluer la question
@@ -148,14 +149,26 @@ export function isTestPath(
 export interface RepoCapabilities {
   /**
    * "tests-only" (défaut, comportement historique) : seuls les chemins
-   * reconnus par isTestPath (plus testDirectoryOverrides) sont modifiables —
-   * le code source reste intouchable, sans exception.
+   * reconnus par isTestPath (plus testDirectories, voir projects.json) sont
+   * modifiables — le code source reste intouchable, sans exception.
    * "all" : tout chemin du dépôt est modifiable, y compris le code source.
+   * "none" : aucun chemin n'est modifiable, pas même un chemin de test —
+   * chantier "projects.json" (voir src/projects.ts::repoCapabilitiesFor) :
+   * un dépôt dont ni writeTests ni writeBusinessCode n'est accordé se
+   * traduit par cette valeur. En pratique, tasks/router.ts refuse l'intention
+   * "implement" avant même d'atteindre isWritablePath dans ce cas (message
+   * utile au demandeur) — cette valeur est le filet de sécurité qui rendrait
+   * de toute façon tout chemin refusé si ce garde-fou amont était un jour
+   * contourné par erreur.
    * string[] : motifs glob supplémentaires (voir globToRegExp plus bas),
    * modifiables EN PLUS des chemins de test — un élargissement ciblé, sans
-   * aller jusqu'à "all".
+   * aller jusqu'à "all". N'a plus de source de configuration depuis le
+   * chantier "projects.json" (le schéma validé par le propriétaire n'expose
+   * que des booléens, voir le rapport de la tâche) : conservé ici pour ne
+   * pas casser un appelant direct de isWritablePath/collectChanges qui
+   * construirait encore ce genre de capacité à la main.
    */
-  writablePaths: "tests-only" | "all" | string[];
+  writablePaths: "tests-only" | "all" | "none" | string[];
   /**
    * "source-branch" (défaut, comportement historique) : push direct sur la
    * branche source de la MR une fois tous les contrôles passés.
@@ -198,6 +211,8 @@ export function describeCapabilities(capabilities: RepoCapabilities): string {
   const parts: string[] = [];
   if (capabilities.writablePaths === "all") {
     parts.push("tout le dépôt modifiable (code source compris)");
+  } else if (capabilities.writablePaths === "none") {
+    parts.push("aucune écriture autorisée");
   } else if (Array.isArray(capabilities.writablePaths)) {
     parts.push(
       `motifs supplémentaires modifiables : ${capabilities.writablePaths.join(", ")}`,
@@ -275,6 +290,10 @@ export function isWritablePath(
   if (hasUnsafeSegments(path)) return false;
 
   if (capabilities.writablePaths === "all") return true;
+  // "none" : même un chemin de test reste refusé, contrairement à
+  // "tests-only" ci-dessous qui s'appuie justement sur le fallthrough
+  // isTestPath — voir le commentaire de RepoCapabilities.writablePaths.
+  if (capabilities.writablePaths === "none") return false;
   if (isTestPath(path, extraTestDirectories)) return true;
   if (Array.isArray(capabilities.writablePaths)) {
     return capabilities.writablePaths.some((pattern) =>

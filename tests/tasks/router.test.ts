@@ -18,6 +18,7 @@ const BOT_USERNAME = "cds-bot";
 
 let detectIntent: typeof import("../../src/tasks/router.ts").detectIntent;
 let report: typeof import("../../src/tasks/router.ts").report;
+let intentRefusalReason: typeof import("../../src/tasks/router.ts").intentRefusalReason;
 
 function respondJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
@@ -59,7 +60,7 @@ before(async () => {
   process.env.GITLAB_REQUEST_TIMEOUT_MS = "500";
   process.env.GITLAB_MAX_RETRIES = "0";
 
-  ({ detectIntent, report } = await import("../../src/tasks/router.ts"));
+  ({ detectIntent, report, intentRefusalReason } = await import("../../src/tasks/router.ts"));
 });
 
 after(async () => {
@@ -149,6 +150,64 @@ describe("detectIntent (§6.9)", () => {
     // review, sans exclusion mutuelle), ce texte aurait été classé
     // "implement" — c'est justement ce que fallbackIntent() ne fait plus.
     assert.ok(oldTestsRe.test(normalized) && oldImplementRe.test(normalized));
+  });
+});
+
+// Chantier "projects.json" : intentRefusalReason est le remplacement du
+// détecteur d'intention historique — qui ne savait pas ce qui était permis —
+// par un vrai contrôle de capacité, avant même de cloner le dépôt.
+describe("intentRefusalReason (chantier « projects.json »)", () => {
+  const ALL_GRANTED = {
+    issue: { review: true, createMergeRequest: true, writeTests: true, writeBusinessCode: true },
+    mergeRequest: { review: true, writeTests: true, writeBusinessCode: true, pushToSourceBranch: true },
+  };
+  const NOTHING_GRANTED = {
+    issue: { review: false, createMergeRequest: false, writeTests: false, writeBusinessCode: false },
+    mergeRequest: { review: false, writeTests: false, writeBusinessCode: false, pushToSourceBranch: false },
+  };
+
+  test("review permise pour une MR : null (aucun refus)", () => {
+    assert.equal(intentRefusalReason("merge_requests", "review", ALL_GRANTED), null);
+  });
+
+  test("review absente pour une MR : refusée avec un message utile qui nomme la capacité", () => {
+    const reason = intentRefusalReason("merge_requests", "review", NOTHING_GRANTED);
+    assert.notEqual(reason, null);
+    assert.match(reason ?? "", /revue/);
+    assert.match(reason ?? "", /review/);
+  });
+
+  test("implement permis dès que writeTests OU writeBusinessCode est accordé", () => {
+    assert.equal(
+      intentRefusalReason("merge_requests", "implement", {
+        issue: NOTHING_GRANTED.issue,
+        mergeRequest: { ...NOTHING_GRANTED.mergeRequest, writeTests: true },
+      }),
+      null,
+    );
+    assert.equal(
+      intentRefusalReason("merge_requests", "implement", {
+        issue: NOTHING_GRANTED.issue,
+        mergeRequest: { ...NOTHING_GRANTED.mergeRequest, writeBusinessCode: true },
+      }),
+      null,
+    );
+  });
+
+  test("implement refusé, message utile, quand ni writeTests ni writeBusinessCode n'est accordé", () => {
+    const reason = intentRefusalReason("merge_requests", "implement", NOTHING_GRANTED);
+    assert.notEqual(reason, null);
+    assert.match(reason ?? "", /writeTests/);
+    assert.match(reason ?? "", /writeBusinessCode/);
+  });
+
+  test("la capacité vérifiée dépend bien du TYPE DE CIBLE (issue vs mergeRequest), pas d'un seul bloc global", () => {
+    const onlyIssueGranted = {
+      issue: ALL_GRANTED.issue,
+      mergeRequest: NOTHING_GRANTED.mergeRequest,
+    };
+    assert.notEqual(intentRefusalReason("merge_requests", "review", onlyIssueGranted), null);
+    assert.equal(intentRefusalReason("issues", "review", onlyIssueGranted), null);
   });
 });
 

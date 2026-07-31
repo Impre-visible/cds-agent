@@ -219,28 +219,57 @@ describe("buildConfig — cloneDepth (§4.7)", () => {
   });
 });
 
-describe("buildConfig — testDirectoryOverrides (dossiers de test par projet)", () => {
-  test("absent, la map est vide (comportement par défaut sûr)", () => {
+// Chantier "projects.json" — remplace les tests ci-dessus (testDirectoryOverrides,
+// agentCapabilities, testCommands/installCommands) : la résolution par dépôt
+// vit désormais dans src/projects.ts (voir tests/projects.test.ts). Ce qui
+// reste ici, propre à config.ts, c'est le chemin du fichier et le refus des
+// variables d'environnement périmées.
+describe("buildConfig — projectsFile (chantier « projects.json »)", () => {
+  test("absent, retombe sur le défaut documenté (./projects.json)", () => {
     const config = buildConfig(baseEnv());
-    assert.equal((config.testDirectoryOverrides as Map<string, string[]>).size, 0);
+    assert.equal(config.projectsFile, "./projects.json");
   });
 
-  test("un dépôt peut déclarer plusieurs dossiers séparés par '|'", () => {
-    const config = buildConfig(
-      baseEnv({
-        TEST_DIRECTORY_OVERRIDES: "Groupe/Depot=e2e|acceptance,autre/depot=fixtures",
-      }),
-    );
-    const overrides = config.testDirectoryOverrides as Map<string, string[]>;
-    assert.deepEqual(overrides.get("groupe/depot"), ["e2e", "acceptance"]);
-    assert.deepEqual(overrides.get("autre/depot"), ["fixtures"]);
+  test("PROJECTS_FILE personnalisé est repris tel quel", () => {
+    const config = buildConfig(baseEnv({ PROJECTS_FILE: "/etc/cds-agent/projects.json" }));
+    assert.equal(config.projectsFile, "/etc/cds-agent/projects.json");
   });
+});
 
-  test("une entrée mal formée (sans '=' ou sans valeur) est ignorée", () => {
-    const config = buildConfig(
-      baseEnv({ TEST_DIRECTORY_OVERRIDES: "sans-egal,groupe/depot=" }),
-    );
-    assert.equal((config.testDirectoryOverrides as Map<string, string[]>).size, 0);
+// Chantier "projects.json" — coupure franche avec l'environnement : sept
+// variables ont migré vers ce fichier (voir src/projects.ts) et leur seule
+// présence (même vide) fait échouer le démarrage, avec un message qui nomme
+// la variable ET dit où le réglage a migré — jamais un simple avertissement.
+describe("buildConfig — variables d'environnement périmées (chantier « projects.json »)", () => {
+  const legacyVars = [
+    "ALLOWED_PROJECTS",
+    "ALLOWED_USERS",
+    "AGENT_CAPABILITIES",
+    "DOCKER_IMAGES",
+    "TEST_COMMANDS",
+    "INSTALL_COMMANDS",
+    "TEST_DIRECTORY_OVERRIDES",
+  ];
+
+  for (const name of legacyVars) {
+    test(`${name} encore présente fait échouer le démarrage, message nommant la variable et "projects.json"`, () => {
+      assert.throws(
+        () => buildConfig(baseEnv({ [name]: "quelque-chose" })),
+        (error: Error) => {
+          assert.match(error.message, new RegExp(name));
+          assert.match(error.message, /projects\.json/);
+          return true;
+        },
+      );
+    });
+
+    test(`${name} présente mais VIDE fait aussi échouer (la présence de la clé compte, pas sa valeur)`, () => {
+      assert.throws(() => buildConfig(baseEnv({ [name]: "" })), new RegExp(name));
+    });
+  }
+
+  test("aucune variable périmée : le démarrage n'est pas affecté", () => {
+    assert.doesNotThrow(() => buildConfig(baseEnv()));
   });
 });
 
@@ -472,135 +501,24 @@ describe("gitCredentialEnv (§4.9 : en-tête restreint à l'instance GitLab)", (
   });
 });
 
-// Chantier "capacités" (§A) — voir tasks/guard.ts pour RepoCapabilities.
-describe("buildConfig — agentCapabilities (AGENT_CAPABILITIES)", () => {
-  test("absent, la map est vide : chaque dépôt retombe sur DEFAULT_CAPABILITIES (comportement par défaut sûr)", () => {
+// Chantier "projects.json" : les anciennes capacités par dépôt
+// (AGENT_CAPABILITIES) et les commandes par dépôt (TEST_COMMANDS/
+// INSTALL_COMMANDS) sont désormais dans projects.json, testées dans
+// tests/projects.test.ts. testCommand/installCommand (globaux, inchangés)
+// restent couverts ci-dessous en tant que simples valeurs par défaut.
+describe("buildConfig — testCommand / installCommand (défauts globaux, inchangés)", () => {
+  test("absents, retombent sur les défauts documentés", () => {
     const config = buildConfig(baseEnv());
-    assert.equal((config.agentCapabilities as Map<string, unknown>).size, 0);
-  });
-
-  test('"write-all" élargit writablePaths à "all" pour le dépôt déclaré, sans toucher aux autres', () => {
-    const config = buildConfig(
-      baseEnv({ AGENT_CAPABILITIES: "Groupe/Depot=write-all" }),
-    );
-    const capabilities = config.agentCapabilities as Map<
-      string,
-      { writablePaths: unknown; publishMode: unknown }
-    >;
-    assert.deepEqual(capabilities.get("groupe/depot"), {
-      writablePaths: "all",
-      publishMode: "source-branch",
-    });
-    assert.equal(capabilities.get("autre/depot"), undefined);
-  });
-
-  test('"write:motif1|motif2" déclare une liste de motifs', () => {
-    const config = buildConfig(
-      baseEnv({ AGENT_CAPABILITIES: "groupe/depot=write:src/generated/**|docs/**" }),
-    );
-    const capabilities = config.agentCapabilities as Map<
-      string,
-      { writablePaths: unknown }
-    >;
-    assert.deepEqual(capabilities.get("groupe/depot")?.writablePaths, [
-      "src/generated/**",
-      "docs/**",
-    ]);
-  });
-
-  test('"dedicated-mr" bascule publishMode, indépendamment de writablePaths', () => {
-    const config = buildConfig(
-      baseEnv({ AGENT_CAPABILITIES: "groupe/depot=dedicated-mr" }),
-    );
-    const capabilities = config.agentCapabilities as Map<
-      string,
-      { writablePaths: unknown; publishMode: unknown }
-    >;
-    assert.deepEqual(capabilities.get("groupe/depot"), {
-      writablePaths: "tests-only",
-      publishMode: "dedicated-mr",
-    });
-  });
-
-  test("plusieurs capacités combinées (\";\") sur un même dépôt, plusieurs dépôts (\",\")", () => {
-    const config = buildConfig(
-      baseEnv({
-        AGENT_CAPABILITIES: "groupe/depot-a=write-all;dedicated-mr,groupe/depot-b=write:e2e/**",
-      }),
-    );
-    const capabilities = config.agentCapabilities as Map<
-      string,
-      { writablePaths: unknown; publishMode: unknown }
-    >;
-    assert.deepEqual(capabilities.get("groupe/depot-a"), {
-      writablePaths: "all",
-      publishMode: "dedicated-mr",
-    });
-    assert.deepEqual(capabilities.get("groupe/depot-b"), {
-      writablePaths: ["e2e/**"],
-      publishMode: "source-branch",
-    });
-  });
-
-  test("une capacité inconnue ou mal orthographiée fait échouer le démarrage avec un message clair", () => {
-    assert.throws(
-      () => buildConfig(baseEnv({ AGENT_CAPABILITIES: "groupe/depot=write-al" })),
-      (error: Error) => {
-        assert.match(error.message, /AGENT_CAPABILITIES/);
-        assert.match(error.message, /write-al/);
-        assert.match(error.message, /capacité inconnue/);
-        return true;
-      },
-    );
-  });
-
-  test('"write:" sans aucun motif est rejeté', () => {
-    assert.throws(
-      () => buildConfig(baseEnv({ AGENT_CAPABILITIES: "groupe/depot=write:" })),
-      /AGENT_CAPABILITIES/,
-    );
-  });
-
-  test("une entrée sans '=' fait échouer le démarrage", () => {
-    assert.throws(
-      () => buildConfig(baseEnv({ AGENT_CAPABILITIES: "sans-egal" })),
-      /AGENT_CAPABILITIES/,
-    );
-  });
-});
-
-// Chantier "capacités" (§B) — TEST_COMMANDS/INSTALL_COMMANDS par dépôt, avec
-// repli sur le défaut global TEST_COMMAND/INSTALL_COMMAND (résolution testée
-// dans tasks/implement.test.ts::resolveCommand, ici seulement le parsing).
-describe("buildConfig — testCommands / installCommands par dépôt", () => {
-  test("absents, les maps sont vides : tous les dépôts utilisent le défaut global", () => {
-    const config = buildConfig(baseEnv());
-    assert.equal((config.testCommands as Map<string, string>).size, 0);
-    assert.equal((config.installCommands as Map<string, string>).size, 0);
     assert.equal(config.testCommand, "npm test");
     assert.equal(config.installCommand, "npm install");
   });
 
-  test("une commande par dépôt est lue telle quelle, casse préservée", () => {
+  test("personnalisables comme avant ce chantier", () => {
     const config = buildConfig(
-      baseEnv({
-        TEST_COMMANDS: "Groupe/Depot=pytest -q,autre/depot=mvn test",
-        INSTALL_COMMANDS: "groupe/depot=pip install -r requirements.txt",
-      }),
+      baseEnv({ TEST_COMMAND: "pytest -q", INSTALL_COMMAND: "pip install -r requirements.txt" }),
     );
-    const testCommands = config.testCommands as Map<string, string>;
-    const installCommands = config.installCommands as Map<string, string>;
-    assert.equal(testCommands.get("groupe/depot"), "pytest -q");
-    assert.equal(testCommands.get("autre/depot"), "mvn test");
-    assert.equal(installCommands.get("groupe/depot"), "pip install -r requirements.txt");
-  });
-
-  test("une valeur de commande contenant elle-même un '=' n'est pas tronquée (splitOnce, pas split)", () => {
-    const config = buildConfig(
-      baseEnv({ TEST_COMMANDS: "groupe/depot=CI=1 npm test" }),
-    );
-    const testCommands = config.testCommands as Map<string, string>;
-    assert.equal(testCommands.get("groupe/depot"), "CI=1 npm test");
+    assert.equal(config.testCommand, "pytest -q");
+    assert.equal(config.installCommand, "pip install -r requirements.txt");
   });
 });
 

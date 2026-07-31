@@ -1,0 +1,39 @@
+{
+  "defaults": {
+    "capabilities": {
+      "issue": {
+        "review": false,
+        "createMergeRequest": false,
+        "writeTests": false,
+        "writeBusinessCode": false
+      },
+      "mergeRequest": {
+        "review": true,
+        "writeTests": false,
+        "writeBusinessCode": false,
+        "pushToSourceBranch": false
+      }
+    },
+    "commands": { "install": "npm install", "test": "npm test" },
+    "docker": { "image": "node:22-bookworm-slim" }
+  },
+  "projects": {
+    "groupe/depot-a": {
+      "users": ["alice", "bob"],
+      "capabilities": {
+        "issue": {
+          "createMergeRequest": true,
+          "writeBusinessCode": true,
+          "writeTests": true
+        },
+        "mergeRequest": { "review": true, "writeTests": true }
+      },
+      "commands": { "test": "pytest -q" },
+      "docker": { "image": "python:3.12-slim" },
+      "testDirectories": ["e2e", "acceptance"]
+    },
+    "groupe/depot-b": {
+      "users": ["alice"]
+    }
+  }
+}

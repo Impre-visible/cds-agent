@@ -3,10 +3,11 @@ import { config } from "../config.ts";
 import { gitlab } from "../gitlab/client.ts";
 import { publishReview } from "./publish.ts";
 import { runReview } from "./review.ts";
-import { runImplement, resolveCapabilities } from "./implement.ts";
+import { runImplement } from "./implement.ts";
 import { describeCapabilities, isDefaultCapabilities } from "./guard.ts";
+import { repoCapabilitiesFor, type ResolvedCapabilities } from "../projects.ts";
 import { defuseMentions } from "../daemon/request.ts";
-import type { AckHandle, AgentRequest } from "../types.ts";
+import type { AckHandle, AgentRequest, ResourceKind } from "../types.ts";
 import { TESTS_RED_REPORT_TAIL_CHARS } from "../limits.ts";
 import { log } from "../log.ts";
 
@@ -80,6 +81,36 @@ export function detectIntent(text: string, botUsername: string): Intent {
   const explicit = explicitCommand(text, botUsername);
   if (explicit) return explicit;
   return fallbackIntent(text.toLowerCase());
+}
+
+/**
+ * Chantier "projects.json" : refuse une intention détectée si la capacité
+ * correspondante n'est pas accordée POUR LE TYPE DE CIBLE de la demande
+ * (issue ou merge request — voir src/projects.ts::ResolvedCapabilities).
+ * Remplace le comportement précédent, où seul writablePaths="tests-only"
+ * par défaut limitait ce que l'agent pouvait PRODUIRE une fois lancé : ici,
+ * l'intention est refusée AVANT même de cloner le dépôt ou de lancer
+ * l'agent, avec un message qui dit pourquoi. `null` : l'intention est
+ * permise. Fonction pure, testée directement (voir router.test.ts) sans
+ * dépendance réseau.
+ */
+export function intentRefusalReason(
+  kind: ResourceKind,
+  intent: Exclude<Intent, "unknown">,
+  capabilities: ResolvedCapabilities,
+): string | null {
+  const forTarget = kind === "merge_requests" ? capabilities.mergeRequest : capabilities.issue;
+
+  if (intent === "review") {
+    return forTarget.review
+      ? null
+      : 'la revue n\'est pas activée pour ce dépôt (capacité "review" absente de projects.json)';
+  }
+
+  // intent === "implement"
+  return forTarget.writeTests || forTarget.writeBusinessCode
+    ? null
+    : 'aucune capacité d\'écriture n\'est accordée pour ce dépôt (ni "writeTests" ni "writeBusinessCode" dans projects.json)';
 }
 
 /**
@@ -205,8 +236,27 @@ export async function runTask(request: AgentRequest): Promise<void> {
       return;
     }
 
+    // Chantier "projects.json" : `request.project` a été résolu et figé par
+    // daemon/index.ts::handle() avant même la mise en file — garanti présent
+    // ici, authorize() n'ayant jamais laissé passer une demande dont le
+    // projet est absent de projects.json (voir authorize.ts). Le garde-fou
+    // ci-dessous protège le vérificateur de types, pas un cas réellement
+    // atteignable en production.
+    const project = request.project;
+    if (!project) {
+      throw new Error(
+        "contexte incohérent : demande sans configuration de projet résolue (authorize() aurait dû la refuser)",
+      );
+    }
+
+    const refusal = intentRefusalReason(request.kind, intent, project.capabilities);
+    if (refusal) {
+      await report(request, `🤖 Demande refusée : ${refusal}.`, false);
+      return;
+    }
+
     if (intent === "implement") {
-      const result = await runImplement(context, context.sourceBranch);
+      const result = await runImplement(context, context.sourceBranch, project);
       const seconds = Math.round(result.durationMs / 1000);
 
       // result.detail republie parfois du texte non maîtrisé : une sortie de
@@ -224,19 +274,16 @@ export async function runTask(request: AgentRequest): Promise<void> {
         "no-change": `🤷 L'agent n'a produit aucune modification en ${seconds} s.`,
       };
 
-      // Chantier "capacités" : si ce dépôt a des capacités élargies par
+      // Chantier "projects.json" : si ce dépôt a des capacités élargies par
       // rapport au défaut (tests-only, source-branch), le rapport le dit
       // explicitement — quelqu'un qui relit la MR/l'issue doit pouvoir
       // savoir que l'agent avait le droit d'aller au-delà du périmètre
       // habituel, pas seulement le déduire en constatant qu'un fichier
-      // source a changé. resolveCapabilities() est la même fonction que
-      // celle utilisée par runImplement() ci-dessus : un seul calcul du
-      // "que peut faire l'agent sur ce dépôt", jamais deux qui pourraient
-      // diverger.
-      const capabilities = resolveCapabilities(
-        context.projectPath,
-        config.agentCapabilities,
-      );
+      // source a changé. repoCapabilitiesFor() est la même traduction que
+      // celle utilisée par runImplement() ci-dessus, à partir du même
+      // `project.capabilities.mergeRequest` : un seul calcul du "que peut
+      // faire l'agent sur ce dépôt", jamais deux qui pourraient diverger.
+      const capabilities = repoCapabilitiesFor(project.capabilities.mergeRequest);
       const capabilityNote = isDefaultCapabilities(capabilities)
         ? ""
         : `\n\n🔓 Capacités élargies pour ce dépôt : ${describeCapabilities(capabilities)}.`;

@@ -1,9 +1,20 @@
 # ADR 0005 — Modèle de capacités de l'agent, déclaratif et par dépôt
 
+> **Mise à jour (chantier "projects.json")** : le modèle de capacités
+> lui-même (`RepoCapabilities` dans `src/tasks/guard.ts`, `isWritablePath`,
+> `publishMode` source-branch/dedicated-mr) décrit ci-dessous reste
+> d'actualité. Ce qui a changé, c'est sa **source de configuration** :
+> `AGENT_CAPABILITIES` (variable d'environnement) a été remplacée par le
+> fichier versionné `projects.json` (voir `src/projects.ts`,
+> `projects.example.json`, et la section "Capacités de l'agent" du README) —
+> un fichier relu par des humains plutôt qu'une chaîne dans `.env`. Le
+> raisonnement ci-dessous sur le modèle lui-même n'est pas remis en cause.
+
 ## Statut
 
 Acceptée (`src/tasks/guard.ts`, `src/config.ts`, `src/tasks/implement.ts` —
-commit `883d74c`).
+commit `883d74c`). Source de configuration migrée vers `projects.json` par
+la suite (voir `src/projects.ts`).
 
 ## Contexte
 

@@ -2,6 +2,7 @@ import { writeFileSync } from "node:fs";
 import { config } from "../config.ts";
 import { gitlab, resourceKind } from "../gitlab/client.ts";
 import { buildContext } from "../tasks/context.ts";
+import { loadProjectsFile, firstProjectPath } from "../projects.ts";
 import type { AgentRequest } from "../types.ts";
 
 const [kindArg, iidArg] = process.argv.slice(2);
@@ -13,8 +14,10 @@ if (!kindArg || !iidArg) {
 const kind = resourceKind(kindArg === "mr" ? "MergeRequest" : "Issue");
 if (!kind) throw new Error("type invalide");
 
-const projectPath = config.allowedProjects[0];
-if (!projectPath) throw new Error("ALLOWED_PROJECTS vide");
+// Chantier "projects.json" : premier dépôt déclaré, comme ALLOWED_PROJECTS[0] avant ce chantier.
+const projectsFile = loadProjectsFile(config.projectsFile);
+const projectPath = firstProjectPath(projectsFile);
+if (!projectPath) throw new Error(`${config.projectsFile} ne déclare aucun projet`);
 
 const project = await gitlab.project(projectPath);
 

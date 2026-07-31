@@ -238,7 +238,14 @@ export interface CommandResult {
 }
 
 export interface RunOptions {
-  projectPath: string;
+  /**
+   * Image Docker à utiliser pour ce dépôt — résolue par projects.json (voir
+   * src/projects.ts::resolveProject, appelé une seule fois par le worker,
+   * voir tasks/implement.ts) et transmise ici telle quelle plutôt que
+   * redérivée depuis un chemin de dépôt et un registre global : chantier
+   * "projects.json", remplace l'ancien `projectPath` + config.dockerImages.
+   */
+  docker: { image: string };
   network?: boolean;
   mounts?: { host: string; container: string }[];
   /** Nom du binaire docker à invoquer ; injectable pour les tests (faux docker) — voir sandbox.ts::SandboxOptions.dockerBin. */
@@ -263,7 +270,7 @@ export async function runCommand(
     const proxy = options.network
       ? containerProxyEnv()
       : { env: {}, hostGateway: false };
-    return runInSandbox(repo, imageFor(options.projectPath), command, {
+    return runInSandbox(repo, imageFor(options.docker), command, {
       network: options.network,
       mounts: options.mounts,
       env: proxy.env,

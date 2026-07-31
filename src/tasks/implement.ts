@@ -1,6 +1,7 @@
 import { config } from "../config.ts";
 import { runAgent } from "../agent/runner.ts";
 import { collectChanges, DEFAULT_CAPABILITIES, type RepoCapabilities } from "./guard.ts";
+import { repoCapabilitiesFor, type ResolvedProject } from "../projects.ts";
 import { gitlab } from "../gitlab/client.ts";
 import {
   createWorkspace,
@@ -28,39 +29,6 @@ export interface ImplementResult {
    * y compris "pushed" (push direct : pas de MR à référencer ici).
    */
   mrUrl?: string;
-}
-
-/**
- * Résout la capacité effective d'un dépôt : sa propre entrée dans
- * `overrides` (config.agentCapabilities), sinon DEFAULT_CAPABILITIES —
- * même mécanique que resolveCommand ci-dessous et que
- * config.dockerImages/testDirectoryOverrides ailleurs dans le projet.
- * Fonction pure (Map + defaut passés en paramètres, pas de lecture directe
- * de `config`) : testable avec une Map fabriquée, sans dépendre du process
- * réellement chargé — voir implement.test.ts. Réutilisée telle quelle par
- * tasks/router.ts pour savoir si le rapport doit mentionner une capacité
- * élargie.
- */
-export function resolveCapabilities(
-  projectPath: string,
-  overrides: Map<string, RepoCapabilities>,
-): RepoCapabilities {
-  return overrides.get(projectPath.toLowerCase()) ?? DEFAULT_CAPABILITIES;
-}
-
-/**
- * Résout une commande (test ou installation) par dépôt, avec repli sur le
- * défaut global (§B du chantier "capacités" : TEST_COMMAND/INSTALL_COMMAND
- * restent le réglage global, testCommands/installCommands l'affinent par
- * dépôt). Même remarque que resolveCapabilities ci-dessus sur le choix
- * d'une fonction pure plutôt que d'une lecture directe de `config`.
- */
-export function resolveCommand(
-  projectPath: string,
-  overrides: Map<string, string>,
-  fallback: string,
-): string {
-  return overrides.get(projectPath.toLowerCase()) ?? fallback;
 }
 
 /**
@@ -306,8 +274,8 @@ export async function rollbackAgentChanges(repo: string): Promise<void> {
  * chaque prompt lisible indépendamment, plutôt que de factoriser un texte
  * qui devrait rester légèrement différent selon l'appelant. La demande de
  * @requester et la description du ticket lié entrent brutes dans le prompt,
- * concaténées aux instructions ; ALLOWED_USERS ne filtre que qui déclenche
- * la commande, pas qui a rédigé ce texte.
+ * concaténées aux instructions ; authorize() (projects.json) ne filtre que
+ * qui déclenche la commande, pas qui a rédigé ce texte.
  *
  * Portée honnête, comme côté review : ceci réduit la surface d'injection, ne
  * la supprime pas. Le vrai filet ici est en aval et ne dépend d'aucune
@@ -385,6 +353,17 @@ function writeScopeInstructions(
         "Le dépôt entier est modifiable pour cette demande (capacité élargie) : reste néanmoins discipliné, ne modifie que ce que la demande justifie.",
     };
   }
+  if (capabilities.writablePaths === "none") {
+    // Ne devrait pas être atteint en pratique : tasks/router.ts refuse
+    // l'intention "implement" avant même d'appeler runImplement quand ni
+    // writeTests ni writeBusinessCode n'est accordé (voir
+    // intentRefusalReason). Texte de repli honnête si ce garde-fou amont
+    // était malgré tout contourné.
+    return {
+      write: "Aucune capacité d'écriture n'est accordée pour ce dépôt.",
+      forbidden: "INTERDIT : ne modifie ni ne crée aucun fichier, quel qu'il soit.",
+    };
+  }
   if (Array.isArray(capabilities.writablePaths)) {
     const patterns = capabilities.writablePaths.join(", ");
     return {
@@ -444,27 +423,19 @@ export function buildPrompt(
 export async function runImplement(
   context: TaskContextBase,
   branch: string,
+  project: ResolvedProject,
 ): Promise<ImplementResult> {
   const started = Date.now();
-  // Chantier "capacités" (§A/§B) : résolus une seule fois ici, propagés
+  // Chantier "projects.json" : `project` est résolu UNE SEULE FOIS, au début
+  // du traitement de la demande (daemon/index.ts::handle(), figé dans
+  // AgentRequest.project) — jamais relu ici depuis un registre qui pourrait
+  // avoir été rechargé entre-temps. capabilities/testCommand/
+  // installCommandBase en sont dérivés une seule fois ci-dessous, propagés
   // explicitement à ce qui en a besoin plus bas (buildPrompt, collectChanges,
-  // le choix push direct / MR dédiée) plutôt que relus depuis `config` à
-  // chaque usage — un seul calcul, une seule source de vérité pour cette
-  // exécution.
-  const capabilities = resolveCapabilities(
-    context.projectPath,
-    config.agentCapabilities,
-  );
-  const testCommand = resolveCommand(
-    context.projectPath,
-    config.testCommands,
-    config.testCommand,
-  );
-  const installCommandBase = resolveCommand(
-    context.projectPath,
-    config.installCommands,
-    config.installCommand,
-  );
+  // le choix push direct / MR dédiée) plutôt que relus à chaque usage.
+  const capabilities = repoCapabilitiesFor(project.capabilities.mergeRequest);
+  const testCommand = project.commands.test;
+  const installCommandBase = project.commands.install;
 
   // §4.7 : clone superficiel par défaut (config.cloneDepth) — voir
   // safeMergeBase plus haut pour le repli quand merge-base a besoin de plus
@@ -484,7 +455,7 @@ export async function runImplement(
       config.installIgnoreScripts,
     );
     const install = await runCommand(repo, installCommand, {
-      projectPath: context.projectPath,
+      docker: project.docker,
       network: true,
     });
     if (!install.ok) {
@@ -498,7 +469,7 @@ export async function runImplement(
 
     // Référence : si la suite est déjà rouge, on ne saura rien conclure ensuite.
     const baseline = await runCommand(repo, testCommand, {
-      projectPath: context.projectPath,
+      docker: project.docker,
     });
 
     if (!baseline.ok) {
@@ -533,7 +504,7 @@ export async function runImplement(
       }
 
       const fake = await runCommand(repo, command, {
-        projectPath: context.projectPath,
+        docker: project.docker,
         mounts,
       });
       // Flux brut (sortie du script simulé), pas un événement applicatif —
@@ -584,7 +555,7 @@ export async function runImplement(
     // du strict isTestPath d'avant ce chantier.
     const { paths, offending, deletedTests } = collectChanges(
       await git(repo, ["status", "--porcelain=v1", "-uall", "-z"]),
-      config.testDirectoryOverrides.get(context.projectPath.toLowerCase()),
+      project.testDirectories,
       capabilities,
     );
 
@@ -622,7 +593,7 @@ export async function runImplement(
 
     // On ne croit pas l'agent sur parole : on relance la suite nous-mêmes.
     const verdict = await runCommand(repo, testCommand, {
-      projectPath: context.projectPath,
+      docker: project.docker,
     });
     if (!verdict.ok) {
       return {

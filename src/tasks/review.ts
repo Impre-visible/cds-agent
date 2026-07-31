@@ -27,8 +27,8 @@ const OUTPUT_FILE = ".cds-review.json";
  * §1.1 : rien, dans le prompt d'avant ce chantier, ne distinguait "ce qu'on
  * demande à l'agent" de "ce qu'un tiers a écrit" — la demande de
  * @requester, le ticket lié et le diff lui-même entraient bruts, concaténés
- * aux instructions. ALLOWED_USERS ne filtre que qui déclenche la commande,
- * pas qui a rédigé ce contenu : un mainteneur autorisé qui relaie "@bot fais
+ * aux instructions. authorize() (projects.json) ne filtre que qui déclenche
+ * la commande, pas qui a rédigé ce contenu : un mainteneur autorisé qui relaie "@bot fais
  * une review" sur une MR hostile suffit à faire lire au modèle du texte
  * conçu pour lui.
  *

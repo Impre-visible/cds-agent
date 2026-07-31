@@ -23,7 +23,7 @@ let runCommand: (
   repo: string,
   command: string,
   options: {
-    projectPath: string;
+    docker: { image: string };
     network?: boolean;
     mounts?: { host: string; container: string }[];
     dockerBin?: string;
@@ -397,7 +397,7 @@ describe("runCommand + Docker (§B : proxy transmis au conteneur, seulement si n
     process.env.HTTP_PROXY = "http://proxy.corp.example:3128";
 
     await runCommand("/repo", "npm install", {
-      projectPath: "groupe/depot",
+      docker: { image: "node:22-bookworm-slim" },
       network: true,
       dockerBin,
     });
@@ -412,7 +412,7 @@ describe("runCommand + Docker (§B : proxy transmis au conteneur, seulement si n
     process.env.HTTP_PROXY = "http://proxy.corp.example:3128";
 
     await runCommand("/repo", "npm test", {
-      projectPath: "groupe/depot",
+      docker: { image: "node:22-bookworm-slim" },
       network: false,
       dockerBin,
     });
@@ -429,7 +429,7 @@ describe("runCommand + Docker (§B : proxy transmis au conteneur, seulement si n
     process.env.HTTP_PROXY = "http://127.0.0.1:3128";
 
     await runCommand("/repo", "npm install", {
-      projectPath: "groupe/depot",
+      docker: { image: "node:22-bookworm-slim" },
       network: true,
       dockerBin,
     });

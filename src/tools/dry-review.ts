@@ -2,6 +2,7 @@ import { config } from "../config.ts";
 import { gitlab, resourceKind } from "../gitlab/client.ts";
 import { buildContext } from "../tasks/context.ts";
 import { runReview } from "../tasks/review.ts";
+import { loadProjectsFile, firstProjectPath } from "../projects.ts";
 import type { AgentRequest } from "../types.ts";
 
 const iid = Number(process.argv[2]);
@@ -10,8 +11,10 @@ if (!iid) {
   process.exit(1);
 }
 
-const projectPath = config.allowedProjects[0];
-if (!projectPath) throw new Error("ALLOWED_PROJECTS vide");
+// Chantier "projects.json" : premier dépôt déclaré, comme ALLOWED_PROJECTS[0] avant ce chantier.
+const projectsFile = loadProjectsFile(config.projectsFile);
+const projectPath = firstProjectPath(projectsFile);
+if (!projectPath) throw new Error(`${config.projectsFile} ne déclare aucun projet`);
 const project = await gitlab.project(projectPath);
 
 const request: AgentRequest = {

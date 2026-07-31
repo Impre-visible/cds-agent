@@ -5,6 +5,7 @@ import { RequestStore, canProcess } from "./store.ts";
 import type { AckHandle, AgentRequest, GitLabUser, Todo } from "../types.ts";
 import { buildRequest } from "./request.ts";
 import { authorize } from "./authorize.ts";
+import { ProjectsRegistry, type ProjectsBaseline } from "../projects.ts";
 import { TaskQueue } from "./queue.ts";
 import { ShutdownController, drain } from "./shutdown.ts";
 import { runTask } from "../tasks/router.ts";
@@ -27,6 +28,26 @@ import {
 
 const store = new RequestStore(config.stateFile);
 let bot: GitLabUser;
+
+/**
+ * Chantier "projects.json" : chargé au démarrage (fatal si absent/invalide,
+ * voir main()) puis rechargé à chaque cycle de polling par poll() ci-dessous
+ * — voir src/projects.ts::ProjectsRegistry pour le mécanisme de rechargement
+ * (jamais fatal une fois le daemon en marche : la dernière configuration
+ * valide reste en vigueur, erreur journalisée bruyamment).
+ */
+let projectsRegistry: ProjectsRegistry;
+
+/**
+ * Défauts globaux (TEST_COMMAND/INSTALL_COMMAND/DOCKER_DEFAULT_IMAGE, restés
+ * dans l'environnement — voir config.ts) injectés dans la résolution par
+ * projet : le repli ultime quand ni "projects.<chemin>" ni le bloc
+ * "defaults" de projects.json ne précisent une commande ou une image.
+ */
+const PROJECT_BASELINE: ProjectsBaseline = {
+  commands: { install: config.installCommand, test: config.testCommand },
+  docker: { image: config.dockerDefaultImage },
+};
 
 /**
  * Fichier de verrou d'instance (§3.9), rangé à côté du fichier d'état
@@ -218,7 +239,14 @@ async function handle(todo: Todo): Promise<void> {
   await withRequestContext(
     { key: request.key, projectPath: request.projectPath, iid: request.iid },
     async () => {
-      const auth = authorize(request);
+      // Chantier "projects.json" : résolu UNE SEULE FOIS ici, au tout début
+      // du traitement de cette demande — figé dans `enqueued.project`
+      // ci-dessous, jamais relu par la suite même si projects.json est
+      // rechargé pendant que la demande patiente en file ou s'exécute (voir
+      // projects.ts::ProjectsRegistry et le rapport de la tâche : "règle du
+      // rechargement à chaud").
+      const project = projectsRegistry.resolve(request.projectPath, PROJECT_BASELINE);
+      const auth = authorize(request, project);
       if (!auth.allowed) {
         log.info(`to-do #${todo.id} REFUSÉ : ${auth.reason}`);
         daemonStatus.recordRefused();
@@ -226,7 +254,7 @@ async function handle(todo: Todo): Promise<void> {
         // périmètre reste silencieux (ne pas révéler l'existence du bot, ni
         // permettre d'énumérer les dépôts surveillés) ; un auteur refusé sur un
         // dépôt AUTORISÉ reçoit une réponse explicite (c'est peut-être un
-        // collègue légitime qu'il suffit d'ajouter à ALLOWED_USERS).
+        // collègue légitime qu'il suffit d'ajouter à la liste "users" du dépôt).
         if (!auth.silent) {
           await notifyUnauthorized(request, auth.reason);
         }
@@ -274,7 +302,9 @@ async function handle(todo: Todo): Promise<void> {
         // l'a autorisée plus haut) donc jamais dédupliquée au push.
         const position = queue.depth + 1;
         const ack = await acknowledge(request, position);
-        const enqueued: AgentRequest = { ...request, ack };
+        // `project!` : garanti non-null ici — authorize() n'a autorisé la
+        // demande que parce que `project` n'était pas null (voir plus haut).
+        const enqueued: AgentRequest = { ...request, ack, project: project! };
 
         const actualPosition = queue.push(enqueued);
         log.info(`position dans la file : ${actualPosition}`);
@@ -309,8 +339,9 @@ function collectTodos(): Promise<Todo[]> {
  * demandeur (voir authorize.ts pour la distinction avec le cas silencieux,
  * §3.11) : sans elle, un collègue légitime sur un dépôt autorisé croirait le
  * bot en panne au lieu de comprendre qu'il lui suffit de se faire ajouter à
- * ALLOWED_USERS. Best-effort comme notifyGiveUp ci-dessous : un échec de
- * cette notification ne doit pas empêcher de classer le to-do comme traité.
+ * la liste "users" du dépôt dans projects.json. Best-effort comme
+ * notifyGiveUp ci-dessous : un échec de cette notification ne doit pas
+ * empêcher de classer le to-do comme traité.
  */
 async function notifyUnauthorized(
   request: AgentRequest,
@@ -352,7 +383,28 @@ async function notifyGiveUp(todo: Todo, reason: string): Promise<void> {
   }
 }
 
+/**
+ * Règle "Rechargement à chaud" du chantier "projects.json" : projects.json
+ * est relu à CHAQUE cycle de polling, juste avant collectTodos() — pas
+ * seulement au démarrage. Relit seulement si le fichier a changé (empreinte
+ * de contenu, voir ProjectsRegistry). Un fichier devenu invalide en cours de
+ * route ne fait PAS tomber le daemon : journalisé bruyamment, la dernière
+ * configuration valide reste en vigueur — différent du chargement initial
+ * (main() ci-dessous), fatal, lui.
+ */
+function reloadProjectsIfChanged(): void {
+  const result = projectsRegistry.reloadIfChanged(config.projectsFile);
+  if (result.error) {
+    log.error(
+      `⚠ projects.json invalide (${config.projectsFile}), configuration précédente conservée : ${result.error.message}`,
+    );
+  } else if (result.reloaded) {
+    log.info(`projects.json rechargé (${config.projectsFile}) : changement détecté.`);
+  }
+}
+
 async function poll(): Promise<void> {
+  reloadProjectsIfChanged();
   const todos = (await collectTodos()).filter((todo) => !seen.hasExamined(todo.id));
   const stamp = new Date().toLocaleTimeString("fr-FR");
 
@@ -447,6 +499,22 @@ async function main(): Promise<void> {
     log.error(
       `ARRÊT : une autre instance tourne déjà (PID ${lockResult.heldByPid}, verrou ${LOCK_FILE}). ` +
         `Si ce PID n'existe plus, le verrou sera repris automatiquement au prochain démarrage.`,
+    );
+    process.exit(1);
+  }
+
+  // Chantier "projects.json", règle 1 (fail-closed) : fichier absent,
+  // illisible ou invalide ⇒ le daemon NE DÉMARRE PAS — à la différence du
+  // rechargement à chaud plus tard (reloadProjectsIfChanged(), voir poll()),
+  // où la même erreur est journalisée sans faire tomber un daemon déjà en
+  // marche. Vérifié avant tout appel réseau, comme le verrou d'instance
+  // ci-dessus : aucune raison de contacter GitLab avec une configuration
+  // qu'on sait déjà invalide.
+  try {
+    projectsRegistry = ProjectsRegistry.loadFromPath(config.projectsFile);
+  } catch (error) {
+    log.error(
+      `ARRÊT : configuration des projets invalide (${config.projectsFile}) : ${(error as Error).message}`,
     );
     process.exit(1);
   }

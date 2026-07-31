@@ -1,5 +1,4 @@
 import { existsSync, readFileSync } from "node:fs";
-import type { RepoCapabilities } from "./tasks/guard.ts";
 
 function loadDotEnv(path = ".env"): void {
   if (!existsSync(path)) return;
@@ -30,172 +29,45 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
-function list(env: NodeJS.ProcessEnv, name: string): string[] {
-  return (env[name] ?? "")
-    .split(",")
-    .map((entry) => entry.trim().toLowerCase())
-    .filter(Boolean);
-}
-
 /**
- * Coupe `text` à la PREMIÈRE occurrence de `separator` seulement (contrairement
- * à `String.split`, qui les coupe toutes) : `null` si absent. Sert à
- * parseStringMap ci-dessous, où la valeur d'une entrée peut légitimement
- * contenir elle-même un "=" (une commande comme "CI=1 npm test") — un simple
- * `entry.split("=")` la tronquerait silencieusement à la première occurrence
- * trouvée dans la valeur, pas seulement à celle qui sépare le chemin de
- * dépôt de sa valeur.
+ * Chantier "projects.json" : sept variables d'environnement ont migré vers ce
+ * fichier versionné (voir src/projects.ts) — la liste des dépôts/auteurs
+ * autorisés, les capacités de l'agent, les commandes et l'image Docker par
+ * dépôt, les répertoires de test maison. Un .env hérité qui en garderait une
+ * ferait courir exactement le risque que ce chantier corrige ailleurs
+ * (USE_DOCKER=0, voir resolveUseDocker plus bas) : un réglage périmé qui
+ * n'autorise plus rien en silence, ou pire, qu'on croit encore actif. On
+ * refuse donc de démarrer tant que l'une d'elles traîne encore dans
+ * l'environnement, avec un message qui dit explicitement où le réglage a
+ * migré — jamais un simple avertissement ignorable.
  */
-function splitOnce(text: string, separator: string): [string, string] | null {
-  const index = text.indexOf(separator);
-  if (index === -1) return null;
-  return [text.slice(0, index), text.slice(index + separator.length)];
-}
+const LEGACY_ENV_MIGRATIONS: Record<string, string> = {
+  ALLOWED_PROJECTS:
+    'la liste des dépôts autorisés est désormais la clé "projects" de projects.json — un dépôt qui n\'y figure pas est refusé, exactement comme une liste ALLOWED_PROJECTS vide auparavant.',
+  ALLOWED_USERS:
+    'les auteurs autorisés sont désormais "projects.<dépôt>.users" dans projects.json, dépôt par dépôt (il n\'y a plus de liste globale unique).',
+  AGENT_CAPABILITIES:
+    'les capacités de l\'agent sont désormais "capabilities" (issue/mergeRequest, dans "defaults" et par dépôt) dans projects.json — voir tasks/guard.ts et projects.example.json.',
+  DOCKER_IMAGES:
+    'l\'image Docker par dépôt est désormais "docker.image" (dans "defaults" et par dépôt) dans projects.json.',
+  TEST_COMMANDS:
+    'la commande de test par dépôt est désormais "commands.test" (dans "defaults" et par dépôt) dans projects.json.',
+  INSTALL_COMMANDS:
+    'la commande d\'installation par dépôt est désormais "commands.install" (dans "defaults" et par dépôt) dans projects.json.',
+  TEST_DIRECTORY_OVERRIDES:
+    'les répertoires de test maison par dépôt sont désormais "testDirectories" (dans "defaults" et par dépôt) dans projects.json.',
+};
 
-/**
- * Format générique "groupe/depot=valeur,autre/depot=autre-valeur" : une
- * entrée par dépôt, chemin insensible à la casse, valeur prise telle quelle
- * (espaces de bord retirés). Sert à DOCKER_IMAGES, TEST_COMMANDS et
- * INSTALL_COMMANDS (voir buildConfig) — même forme pour les trois,
- * contrairement à parseTestDirectoryMap ci-dessous qui a en plus le
- * séparateur "|" pour une liste de valeurs par dépôt.
- *
- * Une entrée malformée (sans "=", ou chemin/valeur vide) est ignorée en
- * silence : configuration de commodité par dépôt, pas un réglage de
- * sécurité — contrairement à AGENT_CAPABILITIES plus bas, qui échoue
- * bruyamment sur une entrée invalide.
- */
-function parseStringMap(raw: string): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const rawEntry of raw.split(",")) {
-    const split = splitOnce(rawEntry.trim(), "=");
-    if (!split) continue;
-    const path = split[0].trim().toLowerCase();
-    const value = split[1].trim();
-    if (path && value) map.set(path, value);
-  }
-  return map;
-}
-
-/**
- * Format : "groupe/depot=dossier1|dossier2,autre/depot=dossier3" — même
- * syntaxe que DOCKER_IMAGES, avec un "|" en plus pour séparer les
- * plusieurs noms de dossier d'un même dépôt. Sert à déclarer, dépôt par
- * dépôt, des répertoires de test maison en plus des conventions standard
- * reconnues par tasks/guard.ts (tests/, test/, __tests__/, spec/) : un
- * monorepo qui range ses tests sous "e2e/" par exemple, sans élargir la
- * détection par défaut de tous les autres dépôts. Absent de la config, la
- * détection reste strictement celle des conventions standard.
- */
-function parseTestDirectoryMap(raw: string): Map<string, string[]> {
-  const map = new Map<string, string[]>();
-  for (const entry of raw.split(",")) {
-    const [path, directories] = entry.split("=").map((part) => part.trim());
-    if (!path || !directories) continue;
-    const names = directories
-      .split("|")
-      .map((name) => name.trim())
-      .filter(Boolean);
-    if (names.length) map.set(path.toLowerCase(), names);
-  }
-  return map;
-}
-
-/**
- * Format : "groupe/depot=capacite1;capacite2,autre/depot=capacite3" — repos
- * séparés par ",", capacités d'un même dépôt séparées par ";" (voir
- * tasks/guard.ts pour la sémantique de RepoCapabilities). Jetons reconnus :
- *
- * - "write-all" : tout le dépôt est modifiable (writablePaths: "all") ;
- * - "write:motif1|motif2" : motifs glob supplémentaires modifiables, en plus
- *   des chemins de test reconnus par isTestPath (writablePaths: motifs) ;
- * - "dedicated-mr" : push sur une branche cds-agent/... dédiée et ouverture
- *   d'une merge request, au lieu d'un push direct sur la branche source
- *   (publishMode: "dedicated-mr").
- *
- * Une entrée sans "capacités" du tout (absente d'AGENT_CAPABILITIES, ou
- * "groupe/depot=" sans rien après le "=") retombe sur DEFAULT_CAPABILITIES
- * pour ce dépôt — comportement historique.
- *
- * Contrairement à parseStringMap/parseTestDirectoryMap ci-dessus
- * (silencieusement permissifs sur une entrée malformée — une simple
- * commodité de configuration), un jeton absent de la liste ci-dessus, mal
- * orthographié ("write-al", "dedicate-mr"...), ou une entrée sans "=" fait
- * échouer le démarrage avec un message explicite : AGENT_CAPABILITIES
- * décide ce que l'agent a le droit de produire, une faute de frappe ici ne
- * doit jamais se traduire par un périmètre silencieusement différent de
- * celui qu'on croit avoir configuré — dans un sens (élargissement non
- * voulu) comme dans l'autre (élargissement qu'on croyait accordé et qui ne
- * l'est pas).
- *
- * Limite assumée, comme pour les autres maps par dépôt ci-dessus : un motif
- * glob contenant lui-même une virgule casserait le découpage par dépôt —
- * utiliser "|" pour lister plusieurs motifs plutôt qu'une virgule.
- */
-function parseCapabilitiesMap(raw: string): Map<string, RepoCapabilities> {
-  const map = new Map<string, RepoCapabilities>();
-  if (!raw.trim()) return map;
-
-  for (const rawEntry of raw.split(",")) {
-    const entry = rawEntry.trim();
-    if (!entry) continue;
-
-    const split = splitOnce(entry, "=");
-    if (!split) {
+/** Voir LEGACY_ENV_MIGRATIONS ci-dessus. Appelée en tout premier dans buildConfig(). */
+function assertNoLegacyEnvVars(env: NodeJS.ProcessEnv): void {
+  for (const [name, migration] of Object.entries(LEGACY_ENV_MIGRATIONS)) {
+    if (name in env) {
       throw new Error(
-        `Variable d'environnement invalide : AGENT_CAPABILITIES contient une entrée sans "=" ("${entry}") — voir .env`,
+        `Variable d'environnement périmée : ${name} n'est plus lue par le daemon — ${migration} ` +
+          `Retirez ${name} de .env (voir projects.example.json et le README, section Configuration des projets).`,
       );
     }
-    const path = split[0].trim().toLowerCase();
-    if (!path) {
-      throw new Error(
-        `Variable d'environnement invalide : AGENT_CAPABILITIES contient une entrée sans chemin de dépôt ("${entry}") — voir .env`,
-      );
-    }
-
-    let writablePaths: RepoCapabilities["writablePaths"] = "tests-only";
-    let publishMode: RepoCapabilities["publishMode"] = "source-branch";
-
-    for (const rawToken of split[1].split(";")) {
-      const token = rawToken.trim();
-      if (!token) continue;
-
-      if (token === "write-all") {
-        writablePaths = "all";
-        continue;
-      }
-      if (token === "dedicated-mr") {
-        publishMode = "dedicated-mr";
-        continue;
-      }
-      if (token.startsWith("write:")) {
-        const patterns = token
-          .slice("write:".length)
-          .split("|")
-          .map((pattern) => pattern.trim())
-          .filter(Boolean);
-        if (patterns.length === 0) {
-          throw new Error(
-            `Variable d'environnement invalide : AGENT_CAPABILITIES="${entry}" — ` +
-              `"write:" doit lister au moins un motif (ex. "write:src/**") — voir .env`,
-          );
-        }
-        // "write-all" (tout le dépôt) l'emporte s'il apparaît par ailleurs
-        // dans la même entrée : pas d'ordre de jetons imposé.
-        writablePaths = writablePaths === "all" ? "all" : patterns;
-        continue;
-      }
-
-      throw new Error(
-        `Variable d'environnement invalide : AGENT_CAPABILITIES="${entry}" — capacité inconnue "${token}" ` +
-          `(attendu : "write-all", "write:<motif1>|<motif2>", "dedicated-mr") — voir .env`,
-      );
-    }
-
-    map.set(path, { writablePaths, publishMode });
   }
-
-  return map;
 }
 
 interface NumberBounds {
@@ -334,6 +206,10 @@ function matchingFormat(
  * config.test.ts.
  */
 export function buildConfig(env: NodeJS.ProcessEnv) {
+  // Chantier "projects.json" : en tout premier, avant toute autre lecture —
+  // voir LEGACY_ENV_MIGRATIONS ci-dessus.
+  assertNoLegacyEnvVars(env);
+
   return {
     gitlabUrl: (env.GITLAB_URL ?? "https://gitlab.com").replace(/\/+$/, ""),
     token: required(env, "GITLAB_TOKEN"),
@@ -346,8 +222,15 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     }),
     stateFile: env.STATE_FILE ?? "./state/processed.jsonl",
     skipMarkDone: env.SKIP_MARK_DONE === "1",
-    allowedProjects: list(env, "ALLOWED_PROJECTS"),
-    allowedUsers: list(env, "ALLOWED_USERS"),
+    /**
+     * Chantier "projects.json" : chemin du fichier de configuration par
+     * projet (voir src/projects.ts) — remplace ALLOWED_PROJECTS/
+     * ALLOWED_USERS/AGENT_CAPABILITIES/DOCKER_IMAGES/TEST_COMMANDS/
+     * INSTALL_COMMANDS/TEST_DIRECTORY_OVERRIDES. Chargé et validé par
+     * daemon/index.ts au démarrage (fatal si absent/invalide) et rechargé à
+     * chaud à chaque cycle de polling — voir ProjectsRegistry.
+     */
+    projectsFile: env.PROJECTS_FILE ?? "./projects.json",
     // Exprimé en minutes côté env : borné à [1, 1440] (une journée) avant
     // conversion en ms.
     lookbackMs:
@@ -367,24 +250,18 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     maxRemarks: finiteNumber(env, "MAX_REMARKS", 5, { min: 1, max: 50 }),
     gitAuthorName: env.GIT_AUTHOR_NAME ?? "cds-agent",
     gitAuthorEmail: env.GIT_AUTHOR_EMAIL ?? "cds-agent@local.invalid",
-    // Défauts globaux — repli quand un dépôt n'a pas sa propre entrée dans
-    // testCommands/installCommands ci-dessous (§B du chantier "capacités" :
-    // TEST_COMMAND/INSTALL_COMMAND restent le réglage global, comme avant ce
-    // chantier, mais ne sont plus les seuls leviers disponibles).
+    /**
+     * Défauts GLOBAUX (n'ont pas migré vers projects.json, à la différence
+     * des variantes par-dépôt TEST_COMMANDS/INSTALL_COMMANDS/DOCKER_IMAGES) :
+     * repli ultime quand ni "projects.<chemin>" ni le bloc "defaults" du
+     * fichier ne précisent une commande ou une image — voir
+     * projects.ts::ProjectsBaseline, injecté par daemon/index.ts au moment
+     * de résoudre chaque dépôt (`projectsRegistry.resolve(path, { commands:
+     * {install: config.installCommand, test: config.testCommand}, docker:
+     * {image: config.dockerDefaultImage} })`).
+     */
     testCommand: env.TEST_COMMAND ?? "npm test",
     installCommand: env.INSTALL_COMMAND ?? "npm install",
-    /**
-     * Commande de test par dépôt, en plus du défaut global ci-dessus — même
-     * format et même raison d'être que DOCKER_IMAGES/TEST_DIRECTORY_OVERRIDES
-     * (voir parseStringMap) : un système multi-écosystème n'a pas qu'une
-     * seule commande de test pertinente pour tous les dépôts surveillés
-     * (npm test, pytest, mvn test...). Résolue par tasks/implement.ts
-     * (resolveCommand) : `testCommands.get(projectPath) ?? testCommand`.
-     * Vide par défaut (tous les dépôts utilisent testCommand).
-     */
-    testCommands: parseStringMap(env.TEST_COMMANDS ?? ""),
-    /** Commande d'installation par dépôt — même mécanique que testCommands ci-dessus. */
-    installCommands: parseStringMap(env.INSTALL_COMMANDS ?? ""),
     /**
      * §1.6 : par défaut, l'installation se fait avec les scripts du dépôt
      * cible désactivés (`--ignore-scripts` ajouté par implement.ts). Sans ce
@@ -415,22 +292,10 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
       60_000,
     fakeAgentScript: env.FAKE_AGENT_SCRIPT ?? "",
     useDocker: resolveUseDocker(env),
-    dockerImages: parseStringMap(env.DOCKER_IMAGES ?? ""),
-    testDirectoryOverrides: parseTestDirectoryMap(
-      env.TEST_DIRECTORY_OVERRIDES ?? "",
-    ),
-    /**
-     * Modèle de capacités de l'agent (chantier "capacités"), par dépôt —
-     * voir tasks/guard.ts (RepoCapabilities, DEFAULT_CAPABILITIES,
-     * isWritablePath) pour la sémantique complète et parseCapabilitiesMap
-     * ci-dessus pour le format AGENT_CAPABILITIES. Vide par défaut : chaque
-     * dépôt retombe alors sur DEFAULT_CAPABILITIES (tests-only,
-     * source-branch) — comportement strictement identique à avant ce
-     * chantier. Résolu par dépôt via `agentCapabilities.get(projectPath) ??
-     * DEFAULT_CAPABILITIES` (voir tasks/implement.ts::resolveCapabilities),
-     * même mécanique que dockerImages/testDirectoryOverrides ci-dessus.
-     */
-    agentCapabilities: parseCapabilitiesMap(env.AGENT_CAPABILITIES ?? ""),
+    // Défaut global (voir le commentaire sur testCommand/installCommand plus
+    // haut) : repli quand ni le dépôt ni le bloc "defaults" de projects.json
+    // ne précisent d'image — remplace DOCKER_DEFAULT_IMAGE + DOCKER_IMAGES,
+    // ce dernier ayant entièrement migré vers "docker.image" par projet.
     dockerDefaultImage: env.DOCKER_DEFAULT_IMAGE ?? "node:22-bookworm-slim",
     // Format docker --memory : un nombre suivi d'une unité optionnelle
     // (b/k/m/g).

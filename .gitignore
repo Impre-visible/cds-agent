@@ -3,3 +3,10 @@ node_modules/
 state/
 todo-dumps/
 context-dump.json
+
+# projects.json (configuration par projet — dépôts/auteurs autorisés,
+# capacités, commandes, image Docker) N'EST PAS gitignoré, contrairement à
+# .env : il ne contient aucun secret (le token GitLab reste dans
+# l'environnement) et doit au contraire être versionné, pour être relu par
+# des humains comme tout autre fichier de configuration du dépôt — voir la
+# section "Capacités de l'agent" du README.

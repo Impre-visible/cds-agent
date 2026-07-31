@@ -2,6 +2,7 @@ import { config } from "../config.ts";
 import { gitlab, resourceKind } from "../gitlab/client.ts";
 import { buildContext } from "../tasks/context.ts";
 import { runImplement } from "../tasks/implement.ts";
+import { loadProjectsFile, firstProjectPath, resolveProject } from "../projects.ts";
 import type { AgentRequest } from "../types.ts";
 
 const iid = Number(process.argv[2]);
@@ -11,7 +12,18 @@ if (!iid || !branch) {
   process.exit(1);
 }
 
-const projectPath = config.allowedProjects[0]!;
+// Chantier "projects.json" : ces outils dry-run agissent sur le premier
+// dépôt déclaré dans le fichier, comme ils prenaient auparavant
+// ALLOWED_PROJECTS[0]. Chargement fatal si le fichier est absent/invalide,
+// même exigence qu'au démarrage du daemon (voir projects.ts).
+const projectsFile = loadProjectsFile(config.projectsFile);
+const projectPath = firstProjectPath(projectsFile);
+if (!projectPath) throw new Error(`${config.projectsFile} ne déclare aucun projet`);
+const resolvedProject = resolveProject(projectsFile, projectPath, {
+  commands: { install: config.installCommand, test: config.testCommand },
+  docker: { image: config.dockerDefaultImage },
+})!;
+
 const project = await gitlab.project(projectPath);
 
 const request: AgentRequest = {
@@ -28,7 +40,7 @@ const request: AgentRequest = {
 };
 
 const context = await buildContext(request);
-const result = await runImplement(context, branch);
+const result = await runImplement(context, branch, resolvedProject);
 
 console.log(`\nstatut  : ${result.status}`);
 console.log(`détail  : ${result.detail}`);

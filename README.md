@@ -40,7 +40,7 @@ sur un dépôt qui compte.
 ```mermaid
 flowchart TD
     A[Polling GitLab toutes les POLL_INTERVAL_MS] --> B{to-do pending ou\ndone récent, non vu}
-    B -->|mention @bot valide| C[authorize: ALLOWED_PROJECTS / ALLOWED_USERS]
+    B -->|mention @bot valide| C[authorize: projects.json]
     C -->|autorisé, pas déjà traité| D[claimed: réservation dans le store]
     D --> E[file en mémoire, FIFO, 1 worker]
     E --> F[note d'accusé de réception + réaction 👀, to-do marqué done]
@@ -64,11 +64,13 @@ Déroulé, dans l'ordre :
    `mentioned`/`directly_addressed`, la cible une issue ou une MR, et le
    texte (commentaire ou description) contient littéralement `@BOT_USERNAME`.
    Une note système, ou écrite par le bot lui-même, est ignorée.
-3. **Autorisation** — `ALLOWED_PROJECTS` puis `ALLOWED_USERS` : listes
-   blanches, *fail-closed* (vides par défaut ⇒ rien n'est autorisé). Un dépôt
-   hors périmètre est refusé silencieusement (pas de commentaire, pour ne pas
-   révéler l'existence du bot) ; un auteur refusé sur un dépôt autorisé reçoit
-   une réponse explicite.
+3. **Autorisation** — un dépôt doit avoir sa propre entrée dans `projects.json`
+   (voir [Configuration des projets](#configuration-des-projets)), avec
+   l'auteur dans sa liste `users` : *fail-closed* (dépôt absent ou `users`
+   vide ⇒ rien n'est autorisé). Un dépôt hors périmètre est refusé
+   silencieusement (pas de commentaire, pour ne pas révéler l'existence du
+   bot) ; un auteur refusé sur un dépôt présent dans le fichier reçoit une
+   réponse explicite.
 4. **Réservation** — la demande est enregistrée `claimed` dans un journal
    append-only (`STATE_FILE`) avant toute autre écriture, pour qu'un crash à
    ce stade ne rejoue jamais une demande déjà accusée.
@@ -86,7 +88,11 @@ Déroulé, dans l'ordre :
    un repli par mots-clés reconnaît « review/revue/relis » ou
    « tests… implémente/écris/ajoute/crée ». Le repli teste `review` en
    premier : en cas d'ambiguïté, mieux vaut se tromper du côté qui n'écrit
-   rien dans le dépôt.
+   rien dans le dépôt. L'intention détectée est ensuite comparée à la
+   capacité correspondante pour ce type de cible (`mergeRequest.review` /
+   `mergeRequest.writeTests` ou `writeBusinessCode` dans `projects.json`) :
+   si elle n'est pas accordée, la demande est refusée avec un message qui le
+   dit, avant même de cloner le dépôt.
 9. **Exécution en sandbox** — clone superficiel du dépôt, prompt construit
    avec délimiteurs explicites autour de tout texte non fiable (demande,
    ticket, diff), agent lancé dans un conteneur Docker durci (réseau limité à
@@ -98,11 +104,11 @@ Déroulé, dans l'ordre :
     général. Pour une implémentation de tests : vérification que le
     daemon reste seul committeur (`checkHeadIntegrity`), que seuls des
     chemins autorisés ont été touchés (`tasks/guard.ts` — tests uniquement
-    par défaut, élargissable dépôt par dépôt via `AGENT_CAPABILITIES`, voir
+    par défaut, élargissable dépôt par dépôt via `projects.json`, voir
     [Capacités de l'agent](#capacités-de-lagent)), que la suite est verte, et
     que la branche n'est pas protégée — alors seulement, push direct sur la
     branche source (défaut) ou ouverture d'une merge request dédiée du bot
-    (capacité `dedicated-mr`).
+    (`pushToSourceBranch: false`).
 11. **Rapport** — la note d'accusé de réception (étape 6) est éditée pour
     porter le résultat, et sa réaction passe de 👀 à ✅ ou ❌. Le demandeur
     est toujours informé, y compris en cas d'échec. Si l'édition échoue —
@@ -137,8 +143,11 @@ git clone <ce dépôt>
 cd cds-agent
 npm install
 cp .env.example .env
-# éditer .env : au minimum GITLAB_URL, GITLAB_TOKEN, BOT_USERNAME,
-# ALLOWED_PROJECTS, ALLOWED_USERS
+# éditer .env : au minimum GITLAB_URL, GITLAB_TOKEN, BOT_USERNAME
+cp projects.example.json projects.json
+# éditer projects.json : au moins un dépôt sous "projects", avec sa liste
+# "users" — un dépôt absent de ce fichier est refusé (voir Configuration
+# des projets ci-dessous)
 ```
 
 `npm install` n'installe que les `devDependencies` du projet lui-même
@@ -175,25 +184,16 @@ Quelques variables méritent une lecture attentive avant de démarrer :
   d'une variable de plus (un proxy interne sous un nom maison, par exemple),
   cette variable l'ajoute à la liste blanche — jamais l'inverse, il n'y a pas
   de mécanisme pour retirer une clé de base.
-- **`TEST_DIRECTORY_OVERRIDES`** — le garde-fou de chemin
-  (`src/tasks/guard.ts`) reconnaît nativement `tests/`, `test/`,
-  `__tests__/`, `spec/` (à tout niveau du chemin) plus les conventions de
-  nommage usuelles (`*.test.ts`, `*_test.py`, `*Test.java`...). Un dépôt qui
-  range ses tests ailleurs (`e2e/` par exemple) peut le déclarer ici, dépôt
-  par dépôt (`groupe/depot=e2e|integration`), sans élargir la détection pour
-  tous les autres dépôts surveillés.
-- **`AGENT_CAPABILITIES`** — modèle de capacités de l'agent, dépôt par
-  dépôt : quels chemins il peut modifier (`write-all` pour tout le dépôt,
-  `write:motif1|motif2` pour des motifs supplémentaires ciblés, en plus de
-  `tests/` toujours autorisé) et où va le résultat (`dedicated-mr` pour une
-  merge request dédiée du bot plutôt qu'un push direct sur la branche
-  source). **Vide par défaut : comportement historique inchangé**
-  (tests uniquement, push direct). Voir
-  [Capacités de l'agent](#capacités-de-lagent) ci-dessous pour le détail.
-- **`TEST_COMMANDS`** / **`INSTALL_COMMANDS`** — commande de test/installation
-  par dépôt (`groupe/depot=pytest -q`), en plus du défaut global
-  `TEST_COMMAND`/`INSTALL_COMMAND` : un système multi-écosystème n'a pas
-  qu'une seule commande de test pertinente pour tous les dépôts surveillés.
+- **`PROJECTS_FILE`** — chemin du fichier de configuration par projet
+  (défaut : `./projects.json`), qui remplace `ALLOWED_PROJECTS`,
+  `ALLOWED_USERS`, `AGENT_CAPABILITIES`, `DOCKER_IMAGES`, `TEST_COMMANDS`,
+  `INSTALL_COMMANDS` et `TEST_DIRECTORY_OVERRIDES` — toutes des variables
+  d'environnement avant ce chantier, aujourd'hui refusées bruyamment au
+  démarrage si l'une d'elles traîne encore dans `.env` (message qui dit où
+  le réglage a migré). Voir [Capacités de l'agent](#capacités-de-lagent)
+  ci-dessous, qui documente désormais l'intégralité de ce fichier — dépôts
+  et auteurs autorisés, capacités, commandes, image Docker, répertoires de
+  test.
 - **`CLONE_DEPTH`** — clone superficiel par défaut (20 commits) pour éviter
   de recloner tout l'historique d'un dépôt d'entreprise à chaque review ou
   implémentation. `0` désactive la limite (clone complet). Une valeur faible
@@ -251,32 +251,93 @@ Quelques variables méritent une lecture attentive avant de démarrer :
 Le fichier réel `.env` de ce dépôt (non versionné, voir `.gitignore`) ne
 renseigne aujourd'hui qu'une poignée de ces variables — tout le reste
 tourne sur les valeurs par défaut de `src/config.ts`. `.env.example` liste
-les quarante-neuf variables lues par `buildConfig()`, plus `LOG_LEVEL`/
+les quarante-trois variables lues par `buildConfig()`, plus `LOG_LEVEL`/
 `LOG_PRETTY`/`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` lues indépendamment.
 
 ## Capacités de l'agent
 
-Par défaut, sans aucune configuration, le daemon reproduit exactement le
-comportement historique : l'agent ne peut écrire que des fichiers reconnus
-comme tests (`src/tasks/guard.ts`), le daemon reste seul committeur
-(`checkHeadIntegrity`), et le résultat est poussé directement sur la branche
-source de la MR. `AGENT_CAPABILITIES` (voir [Configuration](#configuration))
-permet d'élargir ça, dépôt par dépôt :
+Chantier "projects.json" : la configuration par projet — dépôts et auteurs
+autorisés, capacités de l'agent, commandes d'installation/de test, image
+Docker, répertoires de test maison — a quitté les variables d'environnement
+pour un fichier JSON **versionné**, relu par des humains (une revue de code
+normale en repère un changement, ce qu'un `.env` ne permet pas) :
+`projects.json` (chemin configurable via `PROJECTS_FILE`, voir
+[Configuration](#configuration)). `projects.example.json` en donne un modèle
+complet ; **le fichier ne contient jamais de secret** — le token GitLab reste
+exclusivement dans l'environnement (`GITLAB_TOKEN`).
 
-- **quels chemins** l'agent peut modifier — `write-all` (tout le dépôt, code
-  source compris) ou `write:motif1|motif2` (des motifs glob supplémentaires,
-  en plus de `tests/`) ;
-- **où va le résultat** — `dedicated-mr` : au lieu d'un push direct, le bot
-  pousse sur une branche `cds-agent/...` dédiée et ouvre une merge request
-  qui cible la branche source, à faire relire par un humain avant fusion.
+```json
+{
+  "defaults": {
+    "capabilities": {
+      "issue":        { "review": false, "createMergeRequest": false,
+                        "writeTests": false, "writeBusinessCode": false },
+      "mergeRequest": { "review": true,  "writeTests": false,
+                        "writeBusinessCode": false, "pushToSourceBranch": false }
+    },
+    "commands": { "install": "npm install", "test": "npm test" },
+    "docker":   { "image": "node:22-bookworm-slim" }
+  },
+  "projects": {
+    "groupe/depot-a": {
+      "users": ["alice", "bob"],
+      "capabilities": {
+        "issue":        { "createMergeRequest": true, "writeBusinessCode": true,
+                          "writeTests": true },
+        "mergeRequest": { "review": true, "writeTests": true }
+      },
+      "commands": { "test": "pytest -q" },
+      "docker":   { "image": "python:3.12-slim" },
+      "testDirectories": ["e2e", "acceptance"]
+    }
+  }
+}
+```
 
-Un seul point du code répond à « l'agent avait-il le droit de faire ça ? » :
-`src/tasks/guard.ts::isWritablePath`, utilisé à la fois par le garde-fou de
-chemin (`collectChanges`) et par le prompt de l'agent (`implement.ts::
-buildPrompt`) — plus de logique dupliquée entre guard.ts, implement.ts et
-router.ts comme avant ce chantier. Une capacité inconnue ou mal orthographiée
-dans `AGENT_CAPABILITIES` (`write-al`, `dedicate-mr`...) fait échouer le
-démarrage avec un message explicite, plutôt que d'être ignorée en silence.
+**Résolution** (`src/projects.ts::resolveProject`) — `projects.<chemin>`
+surcharge `defaults`, **champ par champ** (fusion en profondeur sur les
+capacités : un projet qui ne redéclare que `mergeRequest.writeTests` garde
+le `mergeRequest.review`/`pushToSourceBranch` de `defaults`, pas un
+`false` implicite) ; `defaults` lui-même surcharge, champ par champ, un
+socle interne "tout refusé" pour les capacités, et `INSTALL_COMMAND`/
+`TEST_COMMAND`/`DOCKER_DEFAULT_IMAGE` (variables d'environnement globales,
+elles, inchangées) pour les commandes et l'image. Un dépôt **absent** de
+`"projects"` est refusé — silencieusement, comme l'ancien `ALLOWED_PROJECTS`
+vide ; un auteur absent de `"users"` reçoit une réponse explicite, comme
+l'ancien `ALLOWED_USERS`.
+
+**Capacités** (`issue`/`mergeRequest`, chacune avec les mêmes noms de champ
+que dans l'exemple ci-dessus) :
+
+- **`review`** — la revue est-elle permise sur ce type de cible ?
+- **`writeTests`** — l'agent peut écrire des tests (chemins reconnus par
+  `src/tasks/guard.ts::isTestPath`, plus `testDirectories`).
+- **`writeBusinessCode`** — l'agent peut modifier tout le dépôt, code source
+  compris (implique `writeTests`).
+- **`pushToSourceBranch`** (`mergeRequest` uniquement) — `true` : push direct
+  sur la branche source une fois tous les contrôles passés (comportement
+  historique). `false` (défaut du bloc `defaults` ci-dessus) : le bot pousse
+  sur une branche `cds-agent/...` dédiée et ouvre une merge request qui
+  cible la branche source, à faire relire par un humain avant fusion — c'est
+  cette option qui rend acceptable d'accorder `writeBusinessCode`.
+- **`issue.createMergeRequest`** — anticipée dans le schéma pour une future
+  prise en charge des issues, non câblée à ce jour : `src/tasks/router.ts`
+  refuse encore toute cible qui n'est pas une merge request avant même de
+  regarder une capacité (voir [Limites connues](#limites-connues)).
+
+Une intention détectée (`review`/`implement-tests`) dont la capacité
+correspondante n'est pas accordée POUR LE TYPE DE CIBLE de la demande est
+refusée avant même de cloner le dépôt, avec un message qui le dit
+(`src/tasks/router.ts::intentRefusalReason`). Une clé de capacité inconnue
+ou mal orthographiée (`"writeTest"` au lieu de `"writeTests"`, par exemple),
+à n'importe quel niveau du fichier, fait échouer le **démarrage** du daemon
+en la nommant — jamais un `false` silencieux : c'est toute la différence
+entre « j'ai désactivé » et « j'ai fait une faute de frappe ». Un seul point
+du code répond à « l'agent avait-il le droit de modifier ce chemin ? » :
+`src/tasks/guard.ts::isWritablePath` (alimenté par
+`src/projects.ts::repoCapabilitiesFor`), utilisé à la fois par le garde-fou
+de chemin (`collectChanges`) et par le prompt de l'agent (`implement.ts::
+buildPrompt`).
 
 **Ce qui reste inconditionnel, quelle que soit la capacité accordée** — une
 capacité élargit ce que l'agent a le droit de *produire*, jamais ce que le
@@ -287,32 +348,53 @@ daemon accepte de ne pas *vérifier* :
 - Le rejet des chemins contenant un composant `.` ou `..` (tentative de
   contournement du garde-fou par un chemin qui, une fois résolu, ne pointe
   plus vers l'endroit qu'il prétend).
-- Le refus de pousser sur une branche protégée, en mode `source-branch`. En
-  mode `dedicated-mr`, ce contrôle ne s'applique pas à la branche neuve créée
-  par le bot (elle ne peut, par construction, pas être déjà protégée) : le
-  risque qu'il couvre — écraser une branche protégée existante — ne se pose
-  structurellement pas dans ce mode.
+- Le refus de pousser sur une branche protégée, quand `pushToSourceBranch`
+  vaut `true`. Sinon (branche dédiée), ce contrôle ne s'applique pas à la
+  branche neuve créée par le bot (elle ne peut, par construction, pas être
+  déjà protégée) : le risque qu'il couvre — écraser une branche protégée
+  existante — ne se pose structurellement pas dans ce mode.
+- **Aucune capacité de fusion (`merge`)** : le bot ne dispose d'aucun moyen
+  de fusionner une merge request, à aucun niveau de configuration —
+  `src/gitlab/client.ts` n'expose aucun appel à l'API GitLab de fusion, et
+  aucun appelant n'en fabrique un. La garantie n'est pas un booléen qu'on
+  pourrait mettre à `false` par erreur : c'est l'absence pure et simple de
+  ce chemin de code.
 
-Quand les capacités effectivement accordées à une demande dépassent ce
-défaut, le rapport posté sur GitLab le mentionne explicitement (`🔓 Capacités
-élargies pour ce dépôt : ...`) : quelqu'un qui relit la MR sait que l'agent
-avait le droit de toucher au code source, pas seulement le déduire en
-constatant qu'un fichier source a changé.
+Quand les capacités effectivement accordées à une demande dépassent le
+défaut (`src/tasks/guard.ts::DEFAULT_CAPABILITIES`, tests uniquement / push
+direct), le rapport posté sur GitLab le mentionne explicitement (`🔓
+Capacités élargies pour ce dépôt : ...`) : quelqu'un qui relit la MR sait que
+l'agent avait le droit de toucher au code source, pas seulement le déduire
+en constatant qu'un fichier source a changé.
+
+**Rechargement à chaud** : `projects.json` est relu à chaque cycle de
+polling, juste avant la lecture des to-dos — mais seulement si son contenu a
+changé (empreinte, pas seulement l'horodatage). Les capacités applicables à
+une demande sont figées au tout début de son traitement
+(`daemon/index.ts::handle()`) : une tâche déjà en file ou en cours d'exécution
+ne voit jamais sa configuration changer sous ses pieds, même si le fichier
+est modifié entre-temps. Un fichier devenu invalide en cours de route
+**ne fait pas tomber le daemon** : l'erreur est journalisée bruyamment et la
+dernière configuration valide reste en vigueur — à la différence du
+démarrage, où l'absence de configuration valide est fatale (voir
+`src/projects.ts::ProjectsRegistry`).
 
 **Non implémenté, place réservée** : une capacité "appliquer le résultat dans
 un clone frais isolé plutôt que dans le clone manipulé par l'agent" (défense
 en profondeur supplémentaire contre un clone dont l'agent aurait pu altérer
 autre chose que ce qui est vérifié) est anticipée dans la forme du modèle
-(`RepoCapabilities` dans `src/tasks/guard.ts`) mais n'a pas de jeton dans
-`AGENT_CAPABILITIES` aujourd'hui — une tentative de l'utiliser échoue donc
-bruyamment ("capacité inconnue") plutôt que d'être silencieusement ignorée.
+(`RepoCapabilities` dans `src/tasks/guard.ts`) mais n'a pas de champ dans le
+schéma `projects.json` aujourd'hui — une tentative de l'utiliser (une clé
+inconnue) échoue donc bruyamment plutôt que d'être silencieusement ignorée.
 Écartée pour l'instant : les vecteurs identifiés sont déjà couverts par les
 contrôles inconditionnels ci-dessus (hooks git, empreinte de `.git`,
 `checkHeadIntegrity`), et un second clone ajouterait une classe de cas
 tordus (patchs qui ne s'appliquent pas, binaires, renommages) pour un gain
 marginal — voir
 `docs/adr/0006-frontiere-confiance-patch-vs-clone.md`. Voir aussi
-`docs/adr/0005-capacites-agent-par-depot.md` pour le modèle lui-même.
+`docs/adr/0005-capacites-agent-par-depot.md` pour le modèle d'origine (dont
+`projects.json` reprend la substance en changeant la source de
+configuration).
 
 ## Lancement
 
@@ -338,19 +420,19 @@ attendus).
 | Script | Commande | Rôle |
 |---|---|---|
 | `npm run dev` | `tsx src/daemon/index.ts` | Lance le daemon (polling + traitement des demandes). |
-| `npm test` | `node --test 'tests/**/*.test.ts'` | Suite de tests native Node, 405 tests, aucune dépendance externe, aucun modèle ni token GitLab requis. |
+| `npm test` | `node --test 'tests/**/*.test.ts'` | Suite de tests native Node, 448 tests, aucune dépendance externe, aucun modèle ni token GitLab requis. |
 | `npm run test:watch` | `node --test --watch ...` | Idem, en mode watch. |
 | `npm run check` | `tsc --noEmit` | Seul filet de typage — voir [CI](#documentation-complémentaire), pas câblé automatiquement avant ce chantier. |
 | `npm run context -- <mr\|issue> <iid>` | `tsx src/tools/dump-context.ts` | Construit le `TaskContext` d'une MR ou d'une issue réelle et l'écrit dans `./context-dump.json` — utile pour inspecter ce que le prompt verra, sans lancer l'agent. |
-| `npm run review -- <mr-iid>` | `tsx src/tools/dry-review.ts` | Exécute une review réelle (contexte + agent + validation) sur la première entrée d'`ALLOWED_PROJECTS`, affiche les remarques sans les publier sur GitLab. |
+| `npm run review -- <mr-iid>` | `tsx src/tools/dry-review.ts` | Exécute une review réelle (contexte + agent + validation) sur le premier dépôt déclaré dans `projects.json`, affiche les remarques sans les publier sur GitLab. |
 | `npm run publish -- <mr-iid>` | `tsx src/tools/dry-publish.ts` | Publie trois remarques écrites à la main (ligne ajoutée, ligne de contexte, ligne hors diff) sur une vraie MR, pour vérifier le comportement de `publishReview` (positions, repli, idempotence) sans dépendre du modèle. |
 | `npm run implement -- <mr-iid> <branche>` | `tsx src/tools/dry-implement.ts` | Exécute une implémentation réelle (clone, agent, garde-fous, push) sur la MR et la branche indiquées. |
 | `npm run proxy` | `tsx src/tools/proxy.ts` | Démarre isolément le proxy d'inférence filtrant (voir `INFERENCE_UPSTREAM_URL`/`INFERENCE_PROXY_PORT`), pour observer le trafic opencode ↔ LM Studio hors de tout conteneur. |
 
-Les scripts `review`/`publish`/`implement`/`context` appellent tous de vraies
-API GitLab (`ALLOWED_PROJECTS[0]`) : ils ne fonctionnent pas sans un `.env`
-valide et un token utilisable — contrairement à `npm test`, qui n'en dépend
-jamais.
+Les scripts `review`/`publish`/`implement`/`context` appellent tous de
+vraies API GitLab, sur le premier dépôt déclaré dans `projects.json` : ils
+ne fonctionnent pas sans un `.env` et un `projects.json` valides, avec un
+token utilisable — contrairement à `npm test`, qui n'en dépend jamais.
 
 ## Images Docker
 
@@ -564,13 +646,16 @@ commentaires du code cité :
   guard.ts::isWritablePath`) : par défaut, seuls des fichiers reconnus comme
   tests peuvent être modifiés en mode implémentation ; une suppression de
   test existant est distinguée et rejetée explicitement (voir
-  `docs/adr/0002-garde-fou-chemin-tests.md`). `AGENT_CAPABILITIES` permet
+  `docs/adr/0002-garde-fou-chemin-tests.md`). `projects.json` permet
   d'élargir ce périmètre dépôt par dépôt (voir
   [Capacités de l'agent](#capacités-de-lagent) et
   `docs/adr/0005-capacites-agent-par-depot.md`) — un seul point du code
   répond à « l'agent avait-il le droit de faire ça ? », et les contrôles
   ci-dessus (HEAD, hooks git, branche protégée) restent inconditionnels
-  quelle que soit la capacité accordée.
+  quelle que soit la capacité accordée. **Aucune capacité de fusion** :
+  aucun chemin de code, à aucun niveau de configuration, n'appelle l'API
+  GitLab de fusion d'une merge request (voir
+  [Capacités de l'agent](#capacités-de-lagent) ci-dessus).
 - **Environnement expurgé** pour tout processus non fiable (`sanitizedEnv()`
   dans `src/config.ts`) : liste blanche plutôt que liste noire.
 - **Sorties bornées en mémoire** (`src/agent/bounded-output.ts`) : une
@@ -661,7 +746,7 @@ Honnêtement, dans l'ordre où elles comptent le plus :
 npm test
 ```
 
-405 tests, `node --test` natif, aucune dépendance de test ajoutée. Les tests
+448 tests, `node --test` natif, aucune dépendance de test ajoutée. Les tests
 qui touchent Docker ou git injectent un faux binaire (voir
 `tests/agent/sandbox.test.ts`, `tests/agent/workspace.test.ts`) : la suite ne
 nécessite ni Docker réellement lancé, ni modèle d'inférence, ni token GitLab
@@ -676,5 +761,8 @@ deux sont câblés dans `.gitlab-ci.yml`.
   webhook, garde-fou par chemin, opencode + inférence locale, contrat de
   fiabilité de la file en mémoire, modèle de capacités par dépôt, frontière
   de confiance (patch vs clone), worker unique et absence de quotas.
-- [`.env.example`](./.env.example) — les quarante-neuf variables lues par
+- [`.env.example`](./.env.example) — les quarante-trois variables lues par
   `buildConfig()`, une par une.
+- [`projects.example.json`](./projects.example.json) — modèle complet du
+  fichier de configuration par projet (voir
+  [Capacités de l'agent](#capacités-de-lagent)).

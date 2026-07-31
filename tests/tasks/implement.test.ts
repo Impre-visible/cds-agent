@@ -8,6 +8,7 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { TaskContextBase } from "../../src/types.ts";
 import type { RepoCapabilities } from "../../src/tasks/guard.ts";
+import { repoCapabilitiesFor } from "../../src/projects.ts";
 
 // implement.ts importe (transitivement) config.ts, qui jette au chargement
 // si GITLAB_TOKEN/BOT_USERNAME sont absents. Même parade que
@@ -25,15 +26,6 @@ let buildPrompt: (
 ) => string;
 let buildInstallCommand: (installCommand: string, ignoreScripts: boolean) => string;
 let rollbackAgentChanges: (repo: string) => Promise<void>;
-let resolveCapabilities: (
-  projectPath: string,
-  overrides: Map<string, RepoCapabilities>,
-) => RepoCapabilities;
-let resolveCommand: (
-  projectPath: string,
-  overrides: Map<string, string>,
-  fallback: string,
-) => string;
 let buildBotBranchName: (targetIid: number) => string;
 let openDedicatedMergeRequest: (
   repo: string,
@@ -96,8 +88,6 @@ before(async () => {
     buildPrompt,
     buildInstallCommand,
     rollbackAgentChanges,
-    resolveCapabilities,
-    resolveCommand,
     buildBotBranchName,
     openDedicatedMergeRequest,
   } = await import("../../src/tasks/implement.ts"));
@@ -583,33 +573,60 @@ describe("buildPrompt — capacités (chantier « capacités »)", () => {
   });
 });
 
-describe("resolveCapabilities / resolveCommand (chantier « capacités »)", () => {
-  test("resolveCapabilities retombe sur DEFAULT_CAPABILITIES si le dépôt n'a pas d'entrée", () => {
-    const capabilities = resolveCapabilities("groupe/depot", new Map());
-    assert.deepEqual(capabilities, {
-      writablePaths: "tests-only",
-      publishMode: "source-branch",
-    });
+// Chantier "projects.json" : resolveCapabilities/resolveCommand (Map par
+// dépôt, alimentées par AGENT_CAPABILITIES/TEST_COMMANDS/INSTALL_COMMANDS)
+// n'existent plus — la résolution par dépôt (fusion en profondeur
+// defaults/projet) vit désormais entièrement dans src/projects.ts::
+// resolveProject, testée dans tests/projects.test.ts. Ce qui reste ici,
+// propre à implement.ts, c'est la traduction MergeRequestCapabilities →
+// RepoCapabilities (repoCapabilitiesFor), consommée par runImplement.
+describe("repoCapabilitiesFor (chantier « projects.json »)", () => {
+  test("ni writeTests ni writeBusinessCode : writablePaths \"none\"", () => {
+    assert.deepEqual(
+      repoCapabilitiesFor({
+        review: true,
+        writeTests: false,
+        writeBusinessCode: false,
+        pushToSourceBranch: false,
+      }),
+      { writablePaths: "none", publishMode: "dedicated-mr" },
+    );
   });
 
-  test("resolveCapabilities lit l'entrée du dépôt, insensible à la casse du chemin", () => {
-    const overrides = new Map([
-      ["groupe/depot", { writablePaths: "all" as const, publishMode: "source-branch" as const }],
-    ]);
-    assert.deepEqual(resolveCapabilities("Groupe/Depot", overrides), {
-      writablePaths: "all",
-      publishMode: "source-branch",
-    });
+  test("writeTests seul : writablePaths \"tests-only\"", () => {
+    assert.deepEqual(
+      repoCapabilitiesFor({
+        review: true,
+        writeTests: true,
+        writeBusinessCode: false,
+        pushToSourceBranch: true,
+      }),
+      { writablePaths: "tests-only", publishMode: "source-branch" },
+    );
   });
 
-  test("resolveCommand retombe sur le défaut global si le dépôt n'a pas d'entrée", () => {
-    assert.equal(resolveCommand("groupe/depot", new Map(), "npm test"), "npm test");
+  test("writeBusinessCode : writablePaths \"all\", l'emporte même si writeTests est faux", () => {
+    assert.deepEqual(
+      repoCapabilitiesFor({
+        review: true,
+        writeTests: false,
+        writeBusinessCode: true,
+        pushToSourceBranch: false,
+      }),
+      { writablePaths: "all", publishMode: "dedicated-mr" },
+    );
   });
 
-  test("resolveCommand privilégie l'entrée du dépôt sur le défaut global", () => {
-    const overrides = new Map([["groupe/depot", "pytest -q"]]);
-    assert.equal(resolveCommand("groupe/depot", overrides, "npm test"), "pytest -q");
-    assert.equal(resolveCommand("autre/depot", overrides, "npm test"), "npm test");
+  test("pushToSourceBranch pilote publishMode indépendamment de writablePaths", () => {
+    assert.equal(
+      repoCapabilitiesFor({
+        review: true,
+        writeTests: true,
+        writeBusinessCode: true,
+        pushToSourceBranch: true,
+      }).publishMode,
+      "source-branch",
+    );
   });
 });
 

@@ -1,3 +1,5 @@
+import type { ResolvedProject } from "./projects.ts";
+
 export interface GitLabUser {
   id: number;
   username: string;
@@ -90,6 +92,20 @@ export interface AgentRequest {
    * ancien comportement (poster une note neuve).
    */
   ack?: AckHandle;
+  /**
+   * Chantier "projects.json" : configuration résolue de ce dépôt (capacités,
+   * commandes, image Docker, répertoires de test), figée par
+   * daemon/index.ts::handle() au tout début du traitement de la demande —
+   * jamais relue depuis le registre par la suite, y compris si projects.json
+   * est rechargé pendant que cette demande patiente en file ou s'exécute
+   * (voir src/projects.ts::ProjectsRegistry). Garanti présent pour toute
+   * demande qui atteint le worker (tasks/router.ts::runTask) : authorize()
+   * n'autorise jamais une demande dont le projet est absent de
+   * projects.json. Absent pour les usages hors production antérieurs à
+   * l'accusé de réception (dry-run, tests) — même statut optionnel que
+   * `ack` ci-dessus, pour la même raison.
+   */
+  project?: ResolvedProject;
 }
 
 export interface DiffRefs {

@@ -39,11 +39,16 @@ export function killContainer(
   });
 }
 
-export function imageFor(projectPath: string): string {
-  return (
-    config.dockerImages.get(projectPath.toLowerCase()) ??
-    config.dockerDefaultImage
-  );
+/**
+ * Chantier "projects.json" : l'image Docker par dépôt vit désormais dans
+ * `docker.image` (defaults + par dépôt, voir src/projects.ts::resolveProject,
+ * qui applique déjà le repli sur config.dockerDefaultImage). Cette fonction
+ * ne fait donc plus qu'un passthrough — gardée nommée et exportée pour que ce
+ * fichier reste le point où se lit "quelle image pour ce dépôt ?" (voir
+ * agent/workspace.ts::runCommand, seul appelant).
+ */
+export function imageFor(docker: { image: string }): string {
+  return docker.image;
 }
 
 export interface SandboxOptions {
