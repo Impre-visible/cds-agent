@@ -258,9 +258,33 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     // Format docker --cpus : un nombre entier ou décimal.
     dockerCpus: matchingFormat(env, "DOCKER_CPUS", "4", /^\d+(\.\d+)?$/),
     agentImage: env.AGENT_IMAGE ?? "cds-agent/agent-node22",
-    /** Vue depuis le conteneur : l'hôte n'est pas localhost. */
-    inferenceUrl:
-      env.CONTAINER_INFERENCE_URL ?? "http://host.docker.internal:1234/v1",
+    /**
+     * Serveur d'inférence réel, vu depuis l'HÔTE (§1.7) — pas depuis un
+     * conteneur : host.docker.internal n'a de sens que dans le netns d'un
+     * conteneur, jamais pour le process du daemon lui-même. C'est la cible
+     * vers laquelle le proxy filtrant (tools/proxy.ts, voir
+     * runAgentInSandbox) relaie effectivement le trafic d'inférence.
+     */
+    inferenceUpstreamUrl: env.INFERENCE_UPSTREAM_URL ?? "http://127.0.0.1:1234/v1",
+    /**
+     * Échappatoire explicite (§1.7) : par défaut absent, auquel cas le
+     * conteneur agent ne connaît QUE l'adresse du proxy filtrant local
+     * (démarré par runAgentInSandbox), jamais une route directe et ouverte
+     * vers host.docker.internal (donc vers tous les ports de l'hôte). Si
+     * renseignée malgré tout, cette variable redonne l'ancien comportement
+     * (accès direct, sans passer par le proxy) — à réserver à un usage
+     * avancé conscient du compromis, pas au défaut.
+     */
+    inferenceUrl: env.CONTAINER_INFERENCE_URL,
+    // Port d'écoute du proxy filtrant démarré par runAgentInSandbox pour
+    // chaque exécution de l'agent (0 = l'OS choisit un port libre, ce qui
+    // évite toute collision si un proxy précédent n'a pas fini de se
+    // fermer — un seul worker tourne à la fois de toute façon, voir
+    // queue.ts, donc pas de vrai besoin de port fixe).
+    inferenceProxyPort: finiteNumber(env, "INFERENCE_PROXY_PORT", 0, {
+      min: 0,
+      max: 65_535,
+    }),
     // maxAttempts=0 désactiverait silencieusement les réessais.
     maxAttempts: finiteNumber(env, "MAX_ATTEMPTS", 3, { min: 1, max: 20 }),
     // Au-delà, un GitLab qui pend (routeur en carafe, upstream mort...)

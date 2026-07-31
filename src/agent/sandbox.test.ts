@@ -1,6 +1,13 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,6 +25,7 @@ let buildDockerRunArgs: (
     hostGateway?: boolean;
     env?: Record<string, string>;
     mounts?: { host: string; container: string }[];
+    user?: string;
   },
 ) => string[];
 let runInSandbox: (
@@ -31,6 +39,7 @@ let runInSandbox: (
     mounts?: { host: string; container: string }[];
     timeoutMs?: number;
     dockerBin?: string;
+    user?: string;
   },
 ) => Promise<{
   ok: boolean;
@@ -40,12 +49,31 @@ let runInSandbox: (
 }>;
 let currentContainer: () => string | undefined;
 let killContainer: (name: string, dockerBin?: string) => Promise<void>;
+let hostUser: () => string | undefined;
+let runAgentInSandbox: (
+  repo: string,
+  meta: string,
+  projectPath: string,
+  options?: { dockerBin?: string },
+) => Promise<{
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  durationMs: number;
+}>;
 
 before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
-  ({ buildDockerRunArgs, runInSandbox, currentContainer, killContainer } =
-    await import("./sandbox.ts"));
+  ({
+    buildDockerRunArgs,
+    runInSandbox,
+    currentContainer,
+    killContainer,
+    hostUser,
+    runAgentInSandbox,
+  } = await import("./sandbox.ts"));
 });
 
 describe("buildDockerRunArgs", () => {
@@ -104,6 +132,88 @@ describe("buildDockerRunArgs", () => {
     assert.notEqual(i, -1);
     assert.equal(withGateway[i + 1], "host.docker.internal:host-gateway");
   });
+
+  // §4.3 — le Dockerfile promet un conteneur qui tourne "sous l'uid de
+  // l'hôte via --user" ; jusqu'à ce correctif, runInSandbox ne le passait
+  // jamais et le conteneur agent tournait donc en root.
+  describe("--user (§4.3 : le conteneur ne doit pas tourner en root)", () => {
+    test("valeur explicite : passée telle quelle à --user", () => {
+      const args = buildDockerRunArgs("/repo", "node:22", "npm test", "cds-x", {
+        user: "1234:5678",
+      });
+      const i = args.indexOf("--user");
+      assert.notEqual(i, -1, "--user doit être présent");
+      assert.equal(args[i + 1], "1234:5678");
+    });
+
+    test("par défaut (pas de user explicite) : l'uid/gid réels du process hôte, pas root", () => {
+      const args = buildDockerRunArgs("/repo", "node:22", "npm test", "cds-x");
+      const expected = hostUser();
+      const i = args.indexOf("--user");
+      if (expected === undefined) {
+        // Plateforme sans uid POSIX (Windows) : --user est omis, pas de régression.
+        assert.equal(i, -1);
+      } else {
+        assert.notEqual(i, -1, "--user doit être présent par défaut");
+        assert.equal(args[i + 1], expected);
+        // Jamais 0 (root) sur une machine de dev/CI Unix normale : si ce
+        // test tourne en tant que root (rare, mais possible en conteneur CI
+        // lui-même), il documente au moins que ce n'est pas silencieux.
+      }
+    });
+  });
+
+  // §4.4 — durcissement du docker run : présents avant ce correctif
+  // (--cap-drop, no-new-privileges, --pids-limit, --memory/--cpus,
+  // --network none par défaut) mais incomplets. On ajoute --read-only (avec
+  // les --tmpfs nécessaires à l'écriture réelle), --ulimit nofile, et un
+  // profil seccomp explicite.
+  describe("durcissement §4.4", () => {
+    test("--read-only est présent", () => {
+      const args = buildDockerRunArgs("/repo", "node:22", "npm test", "cds-x");
+      assert.ok(args.includes("--read-only"));
+    });
+
+    test("--tmpfs monte /tmp en écriture avec une limite de taille (rw + size=)", () => {
+      const args = buildDockerRunArgs("/repo", "node:22", "npm test", "cds-x");
+      const i = args.indexOf("--tmpfs");
+      assert.notEqual(i, -1, "--tmpfs doit être présent");
+      const value = args[i + 1] ?? "";
+      assert.match(value, /^\/tmp:/, "doit monter /tmp, où vivent le cache npm et HOME de l'agent");
+      assert.match(value, /[:,]rw(,|$)/, "doit rester inscriptible malgré --read-only");
+      assert.match(value, /size=/, "doit borner ce qu'un conteneur peut y écrire");
+    });
+
+    test("--ulimit nofile est présent", () => {
+      const args = buildDockerRunArgs("/repo", "node:22", "npm test", "cds-x");
+      const i = args.indexOf("--ulimit");
+      assert.notEqual(i, -1);
+      assert.match(args[i + 1] ?? "", /^nofile=\d+:\d+$/);
+    });
+
+    test("un profil seccomp explicite est déclaré, en plus de no-new-privileges déjà présent", () => {
+      const args = buildDockerRunArgs("/repo", "node:22", "npm test", "cds-x");
+      const securityOpts = args
+        .map((value, index) => (args[index - 1] === "--security-opt" ? value : undefined))
+        .filter((value): value is string => value !== undefined);
+      assert.ok(securityOpts.includes("no-new-privileges"));
+      assert.ok(
+        securityOpts.some((opt) => opt.startsWith("seccomp=")),
+        "un profil seccomp doit être explicitement déclaré",
+      );
+    });
+
+    test("--read-only + --tmpfs n'empêchent pas le montage du dépôt en écriture (pas de :ro sur /repo)", () => {
+      const args = buildDockerRunArgs("/repo", "node:22", "npm test", "cds-x");
+      const i = args.indexOf("-v");
+      assert.notEqual(i, -1);
+      assert.equal(
+        args[i + 1],
+        "/repo:/repo",
+        "le dépôt doit rester monté sans :ro : l'agent et npm install doivent pouvoir y écrire",
+      );
+    });
+  });
 });
 
 /**
@@ -140,6 +250,11 @@ for arg in "$@"; do
   if [ "$prev" = "--name" ]; then name="$arg"; fi
   prev="$arg"
 done
+
+# Dépose l'intégralité des arguments reçus (un par ligne), pour les tests
+# qui doivent inspecter au-delà du seul payload final (ex. les variables
+# -e passées, --add-host, --network...) — voir runAgentInSandbox ci-dessous.
+printf '%s\\n' "$@" > "$FAKE_DOCKER_MARKER_DIR/argv-$name"
 
 payload="\${@: -1}"
 
@@ -249,5 +364,135 @@ describe("runInSandbox", () => {
         killContainer("cds-inexistant", "/chemin/vers/rien"),
       );
     });
+  });
+});
+
+// §1.7 — le conteneur agent ne doit connaître qu'un seul endpoint réseau
+// utile (l'inférence), pas une route ouverte vers host.docker.internal (donc
+// vers tous les ports de l'hôte). runAgentInSandbox démarre désormais un
+// proxy filtrant local (voir tools/proxy.ts) et ne configure l'agent
+// qu'avec l'adresse de ce proxy.
+describe("runAgentInSandbox (§1.7 : réseau restreint à l'inférence)", () => {
+  let dir: string;
+  let dockerBin: string;
+  let markerDir: string;
+  let previousMarkerDir: string | undefined;
+
+  before(() => {
+    dir = mkdtempSync(join(tmpdir(), "cds-agent-fake-docker-agent-"));
+    markerDir = mkdtempSync(
+      join(tmpdir(), "cds-agent-fake-docker-agent-markers-"),
+    );
+    dockerBin = writeFakeDocker(dir);
+    previousMarkerDir = process.env.FAKE_DOCKER_MARKER_DIR;
+    process.env.FAKE_DOCKER_MARKER_DIR = markerDir;
+  });
+
+  after(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(markerDir, { recursive: true, force: true });
+    if (previousMarkerDir === undefined)
+      delete process.env.FAKE_DOCKER_MARKER_DIR;
+    else process.env.FAKE_DOCKER_MARKER_DIR = previousMarkerDir;
+  });
+
+  test("le conteneur reçoit l'adresse du proxy local (host.docker.internal:<port du proxy>), " +
+    "jamais directement l'upstream réel", async () => {
+    const metaDir = mkdtempSync(join(tmpdir(), "cds-agent-meta-"));
+    writeFileSync(join(metaDir, "prompt.txt"), "prompt de test", "utf8");
+
+    try {
+      const result = await runAgentInSandbox("/repo", metaDir, "groupe/depot", {
+        dockerBin,
+      });
+      assert.equal(result.timedOut, false);
+      assert.equal(result.code, 0);
+
+      const argvFiles = readdirSync(markerDir).filter((name) =>
+        name.startsWith("argv-"),
+      );
+      assert.equal(
+        argvFiles.length,
+        1,
+        "un seul conteneur docker run attendu pour cette exécution",
+      );
+      const argv = readFileSync(join(markerDir, argvFiles[0] as string), "utf8").split(
+        "\n",
+      );
+
+      const envIndex = argv.findIndex((value) =>
+        value.startsWith("OPENCODE_CONFIG_CONTENT="),
+      );
+      assert.notEqual(
+        envIndex,
+        -1,
+        "OPENCODE_CONFIG_CONTENT doit être passé en -e",
+      );
+      const opencodeConfig = JSON.parse(
+        (argv[envIndex] as string).slice("OPENCODE_CONFIG_CONTENT=".length),
+      );
+      const baseURL: string = opencodeConfig.provider.lmstudio.options.baseURL;
+
+      assert.match(
+        baseURL,
+        /^http:\/\/host\.docker\.internal:\d+\/v1$/,
+        "l'agent ne doit connaître que l'adresse du proxy local",
+      );
+      assert.ok(
+        !baseURL.includes(":1234/"),
+        "pas le port par défaut de l'upstream réel (CONTAINER_INFERENCE_URL n'est pas défini dans ce test)",
+      );
+
+      // --add-host reste nécessaire : le conteneur doit joindre l'hôte pour
+      // atteindre CE proxy (qui, lui, tourne sur l'hôte) — voir
+      // needsHostGateway().
+      assert.ok(argv.includes("host.docker.internal:host-gateway"));
+      // --network bridge : toujours nécessaire pour joindre le proxy. Voir
+      // le rapport de la tâche pour ce que cela laisse encore ouvert (le
+      // conteneur reste capable de joindre autre chose que ce proxy au
+      // niveau réseau, un outil shell de l'agent n'est pas bloqué par ce
+      // correctif).
+      assert.ok(argv.includes("bridge"));
+    } finally {
+      rmSync(metaDir, { recursive: true, force: true });
+    }
+  });
+
+  test("le proxy démarré pour l'exécution est bien fermé une fois runAgentInSandbox terminé", async () => {
+    const metaDir = mkdtempSync(join(tmpdir(), "cds-agent-meta-"));
+    writeFileSync(join(metaDir, "prompt.txt"), "prompt de test", "utf8");
+
+    try {
+      const result = await runAgentInSandbox("/repo", metaDir, "groupe/depot", {
+        dockerBin,
+      });
+      const argvFiles = readdirSync(markerDir).filter((name) =>
+        name.startsWith("argv-"),
+      );
+      const argv = readFileSync(
+        join(markerDir, argvFiles[argvFiles.length - 1] as string),
+        "utf8",
+      ).split("\n");
+      const envIndex = argv.findIndex((value) =>
+        value.startsWith("OPENCODE_CONFIG_CONTENT="),
+      );
+      const opencodeConfig = JSON.parse(
+        (argv[envIndex] as string).slice("OPENCODE_CONFIG_CONTENT=".length),
+      );
+      const baseURL: string = opencodeConfig.provider.lmstudio.options.baseURL;
+      const port = Number(new URL(baseURL).port);
+
+      assert.equal(result.code, 0);
+      // Le proxy a été fermé dans le `finally` de runAgentInSandbox : une
+      // requête sur ce port doit désormais échouer (rien n'écoute plus).
+      await assert.rejects(() =>
+        fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+          method: "POST",
+          body: "{}",
+        }),
+      );
+    } finally {
+      rmSync(metaDir, { recursive: true, force: true });
+    }
   });
 });

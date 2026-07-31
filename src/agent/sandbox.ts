@@ -2,6 +2,8 @@ import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { config } from "../config.ts";
 import type { AgentResult } from "./runner.ts";
+import { createBoundedOutput } from "./bounded-output.ts";
+import { startInferenceProxy } from "../tools/proxy.ts";
 
 export interface SandboxResult {
   ok: boolean;
@@ -52,6 +54,39 @@ export interface SandboxOptions {
   timeoutMs?: number;
   /** Nom du binaire docker à invoquer ; injectable pour les tests (faux docker). */
   dockerBin?: string;
+  /**
+   * Valeur passée à `docker run --user` (format "uid:gid"). Par défaut,
+   * l'uid/gid réels du process hôte (voir hostUser()) ; injectable pour les
+   * tests, où l'uid réel du runner n'a aucune importance pour ce qui est
+   * vérifié. `undefined` omet complètement --user (cas des plateformes sans
+   * uid POSIX, ex. Windows).
+   */
+  user?: string;
+}
+
+/**
+ * uid:gid du process hôte qui lance le daemon, au format attendu par
+ * `docker run --user` (§4.3). Les deux Dockerfiles (docker/agent.Dockerfile
+ * et docker/node22.Dockerfile) documentent le même modèle d'exécution :
+ * le conteneur tourne sous l'uid de l'hôte, pas sous l'uid baked-in de
+ * l'image (root pour l'un, uid 1001 pour l'autre — deux valeurs différentes
+ * et de toute façon non pertinentes une fois --user passé, qui les écrase
+ * toutes les deux). Sans ce --user, le conteneur agent tournait en root
+ * (agent.Dockerfile n'a pas de USER) et écrivait des fichiers root dans le
+ * dépôt monté depuis le /tmp de l'hôte : le rmSync best-effort de
+ * dispose() (voir workspace.ts) échoue alors en EPERM sur Linux, et les
+ * workspaces s'accumulent au lieu d'être nettoyés.
+ *
+ * `undefined` si le process n'a pas d'uid POSIX (Windows) : --user est
+ * alors simplement omis, comme avant ce correctif — dégradation
+ * silencieuse mais sans régression, ce cas n'étant de toute façon pas un
+ * environnement de déploiement visé ici.
+ */
+export function hostUser(): string | undefined {
+  const uid = process.getuid?.();
+  const gid = process.getgid?.();
+  if (uid === undefined || gid === undefined) return undefined;
+  return `${uid}:${gid}`;
 }
 
 /**
@@ -84,6 +119,38 @@ export function buildDockerRunArgs(
     "ALL",
     "--security-opt",
     "no-new-privileges",
+    // Profil seccomp explicite (§4.4) : "default" est déjà celui que Docker
+    // applique implicitement, mais le nommer ici documente l'intention et
+    // protège contre un démon dont la config globale aurait basculé sur
+    // "unconfined" — sans dépendre d'un fichier de profil personnalisé
+    // (portabilité : un chemin de profil doit exister côté démon, pas
+    // toujours le host qui lance ce process, cf. Docker Desktop).
+    "--security-opt",
+    "seccomp=default",
+    // Système de fichiers racine en lecture seule (§4.4) : seuls /repo (le
+    // dépôt monté, ci-dessous) et /tmp (tmpfs, ci-dessous) restent
+    // inscriptibles. Couvre le besoin réel (écrire dans le dépôt, cache
+    // npm, fichiers temporaires de tests) sans laisser un process écrire
+    // n'importe où ailleurs dans l'image.
+    "--read-only",
+    // rw : l'agent (cache npm, config XDG sous /tmp/agent — voir
+    // agent.Dockerfile) et les tests (fichiers temporaires) doivent pouvoir
+    // y écrire. exec : certains outils déposent et exécutent des scripts
+    // temporaires (post-install, harnais de test) ; désactiver l'exécution
+    // casserait des usages légitimes qu'on ne peut pas énumérer à l'avance
+    // pour un dépôt arbitraire — arbitrage documenté ici plutôt qu'un
+    // durcissement qui serait désactivé au premier `npm install` cassé.
+    // size= borne ce qu'un conteneur peut y écrire (§4.4 : rien n'empêchait
+    // jusqu'ici de remplir le tmpfs, contrairement au bind mount /repo dont
+    // la taille n'est elle-même pas plafonnable par un flag docker run —
+    // limite connue, voir le rapport de la tâche.
+    "--tmpfs",
+    "/tmp:rw,exec,size=1g,mode=1777",
+    // Plancher confortable pour npm/git/opencode (beaucoup de descripteurs
+    // ouverts en parallèle lors d'un install ou d'une suite de tests), tout
+    // en bornant un process qui en ouvrirait sans limite.
+    "--ulimit",
+    "nofile=4096:8192",
     "-v",
     `${repo}:/repo`,
     "-w",
@@ -93,6 +160,9 @@ export function buildDockerRunArgs(
     "-e",
     "FORCE_COLOR=0",
   ];
+
+  const user = options.user ?? hostUser();
+  if (user) args.push("--user", user);
 
   for (const mount of options.mounts ?? []) {
     args.push("-v", `${mount.host}:${mount.container}:ro`);
@@ -132,7 +202,11 @@ export function runInSandbox(
     );
     const child = spawn(dockerBin, args, { stdio: ["ignore", "pipe", "pipe"] });
 
-    let output = "";
+    // Bornée (§4.8) : une sortie bavarde ou une boucle qui spamme stdout ne
+    // doit pas faire grossir cette chaîne sans limite jusqu'à l'OOM du
+    // daemon (voir bounded-output.ts pour la justification du choix de
+    // tronquer le début plutôt que la fin).
+    const boundedOutput = createBoundedOutput();
     let timedOut = false;
     let killGrace: ReturnType<typeof setTimeout> | undefined;
 
@@ -158,7 +232,7 @@ export function runInSandbox(
       options.timeoutMs ?? config.commandTimeoutMs,
     );
     const capture = (chunk: Buffer) => {
-      output += chunk;
+      boundedOutput.append(chunk);
       process.stdout.write(chunk);
     };
 
@@ -179,56 +253,103 @@ export function runInSandbox(
       clearTimeout(timer);
       clearTimeout(killGrace);
       if (activeContainer === containerName) activeContainer = undefined;
-      resolve({ ok: code === 0, code, output, timedOut });
+      resolve({ ok: code === 0, code, output: boundedOutput.value(), timedOut });
     });
   });
+}
+
+/**
+ * `--add-host host.docker.internal:host-gateway` (§1.7) n'a d'utilité que
+ * si l'agent doit effectivement joindre l'hôte sous ce nom : le proxy
+ * d'inférence local démarré ci-dessous par défaut, ou une valeur explicite
+ * de CONTAINER_INFERENCE_URL qui pointerait volontairement dessus. Si
+ * l'inférence est configurée vers une adresse extérieure (une vraie API
+ * HTTPS, par exemple), accorder cet alias en plus n'apporte rien et
+ * élargit la surface exposée au conteneur pour aucun bénéfice.
+ */
+function needsHostGateway(url: string): boolean {
+  try {
+    return new URL(url).hostname === "host.docker.internal";
+  } catch {
+    return false;
+  }
 }
 
 export async function runAgentInSandbox(
   repo: string,
   meta: string,
   _projectPath: string,
+  /** `dockerBin` : uniquement pour l'injection d'un faux docker en test (voir sandbox.test.ts). */
+  options: { dockerBin?: string } = {},
 ): Promise<AgentResult> {
   const started = Date.now();
 
-  const opencodeConfig = JSON.stringify({
-    $schema: "https://opencode.ai/config.json",
-    provider: {
-      lmstudio: {
-        npm: "@ai-sdk/openai-compatible",
-        name: "LM Studio",
-        options: { baseURL: config.inferenceUrl, apiKey: "lm-studio" },
-        // Le format "fournisseur/modèle" d'AGENT_MODEL est validé au
-        // démarrage par config.ts (validateAgentModel) : split("/")[1] ne
-        // peut donc plus produire une clé de modèle vide ici.
-        models: { [config.agentModel.split("/")[1] ?? ""]: { name: "agent" } },
+  // §1.7 : par défaut (config.inferenceUrl absente), le conteneur ne
+  // connaît que l'adresse d'un proxy filtrant démarré ici pour la durée de
+  // cette exécution, qui relaie exclusivement vers
+  // config.inferenceUpstreamUrl — jamais une route ouverte vers
+  // host.docker.internal, qui donnerait accès à tous les ports de l'hôte et
+  // pas seulement à celui de l'inférence. Voir tools/proxy.ts pour les
+  // limites assumées de cette restriction (elle ne couvre que le trafic
+  // d'inférence, pas d'éventuels appels réseau directs par les outils shell
+  // de l'agent).
+  const proxy = config.inferenceUrl
+    ? undefined
+    : await startInferenceProxy({ upstreamUrl: config.inferenceUpstreamUrl });
+
+  try {
+    // config.inferenceUrl reste une échappatoire explicite (voir config.ts) :
+    // si renseignée, elle court-circuite le proxy et redonne l'ancien
+    // comportement (accès direct à l'adresse indiquée).
+    const modelBaseUrl = config.inferenceUrl ?? proxy?.containerUrl;
+    if (!modelBaseUrl) {
+      // Ne devrait jamais arriver : proxy est toujours défini quand
+      // config.inferenceUrl est absente (branche ci-dessus).
+      throw new Error("proxy d'inférence introuvable");
+    }
+
+    const opencodeConfig = JSON.stringify({
+      $schema: "https://opencode.ai/config.json",
+      provider: {
+        lmstudio: {
+          npm: "@ai-sdk/openai-compatible",
+          name: "LM Studio",
+          options: { baseURL: modelBaseUrl, apiKey: "lm-studio" },
+          // Le format "fournisseur/modèle" d'AGENT_MODEL est validé au
+          // démarrage par config.ts (validateAgentModel) : split("/")[1] ne
+          // peut donc plus produire une clé de modèle vide ici.
+          models: { [config.agentModel.split("/")[1] ?? ""]: { name: "agent" } },
+        },
       },
-    },
-  });
+    });
 
-  const result = await runInSandbox(
-    repo,
-    config.agentImage,
-    `opencode run --model ${config.agentModel} "$(cat /task/prompt.txt)"`,
-    {
-      network: true,
-      hostGateway: true,
-      mounts: [{ host: meta, container: "/task" }],
-      env: { OPENCODE_CONFIG_CONTENT: opencodeConfig },
-      // L'agent a son propre budget (AGENT_TIMEOUT_MINUTES, 10 min par
-      // défaut), distinct du timeout générique des commandes courtes
-      // (COMMAND_TIMEOUT_MINUTES, 5 min, pensé pour install/tests). Sans ce
-      // paramètre explicite, c'est ce dernier qui s'appliquait ici et
-      // AGENT_TIMEOUT_MINUTES n'avait aucun effet en mode Docker.
-      timeoutMs: config.agentTimeoutMs,
-    },
-  );
+    const result = await runInSandbox(
+      repo,
+      config.agentImage,
+      `opencode run --model ${config.agentModel} "$(cat /task/prompt.txt)"`,
+      {
+        network: true,
+        hostGateway: needsHostGateway(modelBaseUrl),
+        mounts: [{ host: meta, container: "/task" }],
+        env: { OPENCODE_CONFIG_CONTENT: opencodeConfig },
+        // L'agent a son propre budget (AGENT_TIMEOUT_MINUTES, 10 min par
+        // défaut), distinct du timeout générique des commandes courtes
+        // (COMMAND_TIMEOUT_MINUTES, 5 min, pensé pour install/tests). Sans ce
+        // paramètre explicite, c'est ce dernier qui s'appliquait ici et
+        // AGENT_TIMEOUT_MINUTES n'avait aucun effet en mode Docker.
+        timeoutMs: config.agentTimeoutMs,
+        dockerBin: options.dockerBin,
+      },
+    );
 
-  return {
-    code: result.code,
-    stdout: result.output,
-    stderr: "",
-    timedOut: result.timedOut,
-    durationMs: Date.now() - started,
-  };
+    return {
+      code: result.code,
+      stdout: result.output,
+      stderr: "",
+      timedOut: result.timedOut,
+      durationMs: Date.now() - started,
+    };
+  } finally {
+    await proxy?.close();
+  }
 }
