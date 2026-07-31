@@ -30,7 +30,16 @@ const request: AgentRequest = {
 const context = await buildContext(request);
 if (!context.sourceBranch) throw new Error("branche source introuvable");
 
-const { remarks, durationMs } = await runReview(context, context.sourceBranch);
+const { remarks, durationMs, truncated, omittedFiles } = await runReview(
+  context,
+  context.sourceBranch,
+);
+
+if (truncated) {
+  console.log(
+    `\n⚠️ diff tronqué pour tenir sous le plafond du prompt${omittedFiles.length ? ` — non montré(s) : ${omittedFiles.join(", ")}` : ""}`,
+  );
+}
 
 console.log(
   `\n${remarks.length} remarque(s) en ${Math.round(durationMs / 1000)} s :\n`,

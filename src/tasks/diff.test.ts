@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { parseDiff, validateRemarks } from "./diff.ts";
+import { parseDiff, numberDiffLines, validateRemarks } from "./diff.ts";
 import type { DiffFile } from "../types.ts";
 
 describe("parseDiff", () => {
@@ -51,6 +51,69 @@ describe("parseDiff", () => {
 
   test("diff vide renvoie une map vide", () => {
     assert.equal(parseDiff("").size, 0);
+  });
+});
+
+// §5.3 : le numéro préfixé à chaque ligne doit être exactement celui que
+// parseDiff/validateRemarks savent retrouver — sinon la numérotation induit
+// le modèle en erreur au lieu de le corriger.
+describe("numberDiffLines", () => {
+  test("numérote lignes ajoutées et de contexte avec le numéro du nouveau fichier, sur plusieurs hunks", () => {
+    const diff = [
+      "@@ -1,2 +1,2 @@",
+      " const a = 1;",
+      "+const b = 2;",
+      "@@ -20,2 +21,3 @@",
+      " const x = 1;",
+      "+const y = 2;",
+      " const z = 3;",
+    ].join("\n");
+
+    const numbered = numberDiffLines(diff).split("\n");
+
+    assert.match(numbered[0] ?? "", /^@@ -1,2 \+1,2 @@$/);
+    assert.match(numbered[1] ?? "", /^\s+1 \|  const a = 1;$/);
+    assert.match(numbered[2] ?? "", /^\s+2 \| \+const b = 2;$/);
+    assert.match(numbered[3] ?? "", /^@@ -20,2 \+21,3 @@$/);
+    assert.match(numbered[4] ?? "", /^\s+21 \|  const x = 1;$/);
+    assert.match(numbered[5] ?? "", /^\s+22 \| \+const y = 2;$/);
+    assert.match(numbered[6] ?? "", /^\s+23 \|  const z = 3;$/);
+
+    // Vérification croisée : chaque numéro affiché doit être celui que
+    // parseDiff retrouve réellement pour la même ligne (les deux doivent
+    // rester d'accord, voir walkDiffLines).
+    const positions = parseDiff(diff);
+    for (const newLine of [1, 21, 23]) {
+      assert.ok(positions.has(newLine), `parseDiff doit connaître la ligne ${newLine}`);
+    }
+  });
+
+  test("les lignes supprimées n'ont pas de numéro dans le nouveau fichier : marquées, pas de numéro de l'ancien fichier réutilisé", () => {
+    const diff = [
+      "@@ -1,3 +1,2 @@",
+      " const a = 1;",
+      "-const b = 2;",
+      " const c = 3;",
+    ].join("\n");
+
+    const numbered = numberDiffLines(diff).split("\n");
+    assert.match(numbered[1] ?? "", /^\s+1 \|  const a = 1;$/);
+    // Le marqueur de la ligne supprimée (avant le séparateur " | ") ne doit
+    // contenir ni "2" (numéro de l'ancien fichier) ni aucun autre chiffre :
+    // seul un repère non numérique doit y apparaître. Le contenu de la
+    // ligne elle-même (après " | ") contient forcément des chiffres du code
+    // original ("= 2;"), donc on isole bien le marqueur avant de vérifier.
+    const deletedLine = numbered[2] ?? "";
+    const marker = deletedLine.split(" | ")[0] ?? "";
+    assert.doesNotMatch(marker, /\d/);
+    assert.match(deletedLine, /-const b = 2;$/);
+    assert.match(numbered[3] ?? "", /^\s+2 \|  const c = 3;$/);
+  });
+
+  test("les en-têtes @@ sont reproduits tels quels, sans préfixe de numéro", () => {
+    const diff = ["@@ -5,1 +5,1 @@", " const z = 1;"].join("\n");
+    const numbered = numberDiffLines(diff);
+    assert.ok(numbered.startsWith("@@ -5,1 +5,1 @@\n"));
   });
 });
 

@@ -90,16 +90,24 @@ export async function runTask(request: AgentRequest): Promise<void> {
       return;
     }
 
-    const { remarks, durationMs } = await runReview(
+    const { remarks, durationMs, truncated, omittedFiles } = await runReview(
       context,
       context.sourceBranch,
     );
     const seconds = Math.round(durationMs / 1000);
 
+    // §5.7 : une revue silencieusement partielle est pire qu'un refus franc
+    // — si le diff a dépassé le plafond envoyé au modèle, l'utilisateur doit
+    // le savoir, pas seulement en déduire l'absence de remarques sur un
+    // fichier qu'il pensait relu.
+    const truncationWarning = truncated
+      ? ` ⚠️ Diff trop volumineux pour être relu intégralement (plafond dépassé)${omittedFiles.length ? ` — non montré(s) au modèle : ${omittedFiles.join(", ")}` : ""} : la revue ci-dessous est partielle.`
+      : "";
+
     if (remarks.length === 0) {
       await report(
         request,
-        `🤖 Revue terminée en ${seconds} s : aucune remarque exploitable. Les remarques produites ne correspondaient à aucun fichier du diff et ont été écartées.`,
+        `🤖 Revue terminée en ${seconds} s : aucune remarque exploitable. Les remarques produites ne correspondaient à aucun fichier du diff et ont été écartées.${truncationWarning}`,
       );
       return;
     }
@@ -126,7 +134,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
 
     await report(
       request,
-      `🤖 Revue terminée en ${seconds} s — ${outcomes.length} remarque(s) publiée(s)${detail}`,
+      `🤖 Revue terminée en ${seconds} s — ${outcomes.length} remarque(s) publiée(s)${detail}${truncationWarning}`,
     );
 
     console.log(
