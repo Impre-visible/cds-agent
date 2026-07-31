@@ -173,6 +173,7 @@ function isExecutableSafe(path: string): boolean {
 export interface CommandResult {
   ok: boolean;
   output: string;
+  timedOut: boolean;
 }
 
 export interface RunOptions {
@@ -202,16 +203,19 @@ export async function runCommand(
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...sanitizedEnv(), CI: "1", FORCE_COLOR: "0" },
     });
-    return { ok: true, output };
+    return { ok: true, output, timedOut: false };
   } catch (error) {
     const failure = error as {
       stdout?: string;
       stderr?: string;
       message: string;
+      // Positionné par execFileSync quand le process est tué après `timeout`.
+      killed?: boolean;
     };
     return {
       ok: false,
       output: `${failure.stdout ?? ""}${failure.stderr ?? ""}${failure.message}`,
+      timedOut: Boolean(failure.killed),
     };
   }
 }
