@@ -1,5 +1,9 @@
-import { test, describe, before } from "node:test";
+import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // config.ts jette au chargement du module si GITLAB_TOKEN ou BOT_USERNAME
 // sont absents (cf. required()). Même parade que les autres tests du
@@ -9,11 +13,16 @@ import assert from "node:assert/strict";
 // les tests ci-dessous lui passent des environnements fabriqués et ne
 // touchent plus jamais process.env, donc pas besoin de sous-processus.
 let buildConfig: (env: NodeJS.ProcessEnv) => Record<string, unknown>;
+let config: { gitlabUrl: string; token: string };
+let gitCredentialEnv: () => NodeJS.ProcessEnv;
+let sanitizedEnv: () => NodeJS.ProcessEnv;
 
 before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
-  ({ buildConfig } = await import("./config.ts"));
+  ({ buildConfig, config, gitCredentialEnv, sanitizedEnv } = await import(
+    "./config.ts"
+  ));
 });
 
 /** Environnement minimal valide : seules les deux variables obligatoires. */
@@ -142,13 +151,6 @@ describe("buildConfig — autres valeurs numériques", () => {
       /COMMAND_TIMEOUT_MINUTES/,
     );
   });
-
-  test("TASK_STUB_MS négatif est rejeté", () => {
-    assert.throws(
-      () => buildConfig(baseEnv({ TASK_STUB_MS: "-1" })),
-      /TASK_STUB_MS/,
-    );
-  });
 });
 
 describe("buildConfig — configuration valide complète", () => {
@@ -156,7 +158,6 @@ describe("buildConfig — configuration valide complète", () => {
     const config = buildConfig(
       baseEnv({
         POLL_INTERVAL_MS: "15000",
-        TASK_STUB_MS: "1000",
         LOOKBACK_MINUTES: "5",
         AGENT_TIMEOUT_MINUTES: "15",
         MAX_REMARKS: "8",
@@ -168,7 +169,6 @@ describe("buildConfig — configuration valide complète", () => {
     );
 
     assert.equal(config.pollIntervalMs, 15_000);
-    assert.equal(config.taskStubMs, 1_000);
     assert.equal(config.lookbackMs, 5 * 60_000);
     assert.equal(config.agentTimeoutMs, 15 * 60_000);
     assert.equal(config.maxRemarks, 8);
@@ -236,5 +236,211 @@ describe("buildConfig — validation de forme (docker)", () => {
     const config = buildConfig(baseEnv());
     assert.equal(config.dockerMemory, "4g");
     assert.equal(config.dockerCpus, "4");
+  });
+});
+
+// §1.5 — le mode sandbox est désormais le défaut ; le mode hôte non
+// sandboxé exige un opt-in explicite et bruyant (ALLOW_UNSANDBOXED=1).
+describe("buildConfig — useDocker (§1.5 : sandbox par défaut)", () => {
+  test("sans aucune variable, la sandbox est activée (défaut sûr)", () => {
+    const config = buildConfig(baseEnv());
+    assert.equal(config.useDocker, true);
+  });
+
+  test("USE_DOCKER=1 active la sandbox — inchangé, c'est le .env réel du projet", () => {
+    const config = buildConfig(baseEnv({ USE_DOCKER: "1" }));
+    assert.equal(config.useDocker, true);
+  });
+
+  test("ALLOW_UNSANDBOXED=1 seul suffit à passer en mode hôte", () => {
+    const config = buildConfig(baseEnv({ ALLOW_UNSANDBOXED: "1" }));
+    assert.equal(config.useDocker, false);
+  });
+
+  test("USE_DOCKER=0 seul (sans ALLOW_UNSANDBOXED) est rejeté : ce n'est plus un opt-out valide, " +
+    "pour éviter qu'un .env existant retombe silencieusement en mode non sandboxé", () => {
+    assert.throws(
+      () => buildConfig(baseEnv({ USE_DOCKER: "0" })),
+      (error: Error) => {
+        assert.match(error.message, /USE_DOCKER=0/);
+        assert.match(error.message, /ALLOW_UNSANDBOXED/);
+        return true;
+      },
+    );
+  });
+
+  test("USE_DOCKER=0 combiné à ALLOW_UNSANDBOXED=1 : l'opt-in explicite l'emporte, pas d'erreur", () => {
+    const config = buildConfig(
+      baseEnv({ USE_DOCKER: "0", ALLOW_UNSANDBOXED: "1" }),
+    );
+    assert.equal(config.useDocker, false);
+  });
+});
+
+// §4.10 — un AGENT_MODEL sans "/" produit une clé de modèle opencode vide
+// dans agent/sandbox.ts (config.agentModel.split("/")[1] ?? ""), échec
+// silencieux loin de la cause. Validé dès le démarrage.
+describe("buildConfig — validation du format d'AGENT_MODEL (§4.10)", () => {
+  test("AGENT_MODEL absent retombe sur le défaut documenté", () => {
+    const config = buildConfig(baseEnv());
+    assert.equal(config.agentModel, "lmstudio/qwen2.5-coder-7b-instruct-mlx");
+  });
+
+  test("AGENT_MODEL valide (\"fournisseur/modèle\") est accepté tel quel", () => {
+    const config = buildConfig(baseEnv({ AGENT_MODEL: "lmstudio/qwen2.5" }));
+    assert.equal(config.agentModel, "lmstudio/qwen2.5");
+  });
+
+  test("AGENT_MODEL sans '/' est rejeté, avec un message qui dit le format attendu", () => {
+    assert.throws(
+      () => buildConfig(baseEnv({ AGENT_MODEL: "qwen2.5-coder" })),
+      (error: Error) => {
+        assert.match(error.message, /AGENT_MODEL/);
+        assert.match(error.message, /qwen2\.5-coder/);
+        assert.match(error.message, /fournisseur\/modèle/);
+        return true;
+      },
+    );
+  });
+
+  test("AGENT_MODEL avec une partie fournisseur vide (\"/modele\") est rejeté", () => {
+    assert.throws(
+      () => buildConfig(baseEnv({ AGENT_MODEL: "/qwen2.5" })),
+      /AGENT_MODEL/,
+    );
+  });
+
+  test("AGENT_MODEL avec une partie modèle vide (\"fournisseur/\") est rejeté — c'est exactement le " +
+    "cas qui produirait une clé vide dans agent/sandbox.ts", () => {
+    assert.throws(
+      () => buildConfig(baseEnv({ AGENT_MODEL: "lmstudio/" })),
+      /AGENT_MODEL/,
+    );
+  });
+});
+
+// §4.6 — sanitizedEnv() est désormais une liste blanche : les variables
+// sensibles qu'une denylist par regex manquait doivent être absentes, et les
+// variables nécessaires à l'exécution de commandes (dont git) doivent rester
+// présentes.
+describe("sanitizedEnv (§4.6 : liste blanche, pas denylist)", () => {
+  const injected = {
+    AWS_ACCESS_KEY_ID: "AKIAFAKEFAKEFAKEFAKE",
+    AWS_SECRET_ACCESS_KEY: "fake-secret-value",
+    GH_PAT: "ghp_fakefakefakefakefake",
+    SSH_AUTH_SOCK: "/tmp/fake-ssh-agent.sock",
+    KUBECONFIG: "/fake/.kube/config",
+    DATABASE_URL: "postgres://user:hunter2@db.internal/app",
+    // Les cas que la denylist par regex interceptait déjà : doivent aussi
+    // rester absents avec la liste blanche.
+    GITLAB_TOKEN_EXTRA: "should-not-leak",
+  };
+  const previous: Record<string, string | undefined> = {};
+
+  before(() => {
+    for (const [key, value] of Object.entries(injected)) {
+      previous[key] = process.env[key];
+      process.env[key] = value;
+    }
+  });
+
+  after(() => {
+    for (const key of Object.keys(injected)) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  });
+
+  test("aucune des variables sensibles injectées (au-delà de ce qu'une denylist regex " +
+    "attraperait) ne fuite dans l'environnement produit", () => {
+    const clean = sanitizedEnv();
+    for (const key of Object.keys(injected)) {
+      assert.equal(
+        key in clean,
+        false,
+        `${key} n'aurait jamais dû fuiter — c'est précisément ce que la denylist manquait`,
+      );
+    }
+  });
+
+  test("les variables nécessaires à l'exécution de commandes (PATH, HOME) restent présentes", () => {
+    const clean = sanitizedEnv();
+    assert.ok(clean.PATH, "PATH doit être présent : sans lui, aucun binaire n'est trouvable");
+    // HOME n'est garanti que si le process de test lui-même en a un — vrai
+    // sur toute machine de dev/CI Unix habituelle.
+    if (process.env.HOME) assert.equal(clean.HOME, process.env.HOME);
+  });
+
+  test("une vraie commande git tourne avec cet environnement réduit (dépôt jetable, vrai commit)", () => {
+    const root = mkdtempSync(join(tmpdir(), "cds-agent-sanitized-env-git-"));
+    try {
+      const env = sanitizedEnv();
+      const run = (args: string[]) =>
+        execFileSync("git", args, { cwd: root, encoding: "utf8", env });
+
+      run(["init", "--quiet", "-b", "main"]);
+      run(["config", "user.name", "cds-agent-test"]);
+      run(["config", "user.email", "cds-agent-test@local.invalid"]);
+      writeFileSync(join(root, "fichier.txt"), "contenu\n");
+      run(["add", "--all"]);
+
+      // Ne doit pas lever : si git ne trouvait pas ce dont il a besoin
+      // (identité, HOME pour un éventuel .gitconfig global, PATH...), le
+      // commit échouerait ici.
+      assert.doesNotThrow(() => run(["commit", "--quiet", "-m", "test"]));
+
+      const log = execFileSync("git", ["log", "--oneline"], {
+        cwd: root,
+        encoding: "utf8",
+        env,
+      });
+      assert.match(log, /test/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// §4.9 — l'en-tête Authorization doit être restreint à l'instance GitLab
+// visée (http.<url>.extraHeader), pas posé globalement (http.extraHeader).
+describe("gitCredentialEnv (§4.9 : en-tête restreint à l'instance GitLab)", () => {
+  test("la clé de config produite est bien scopée à l'hôte de gitlabUrl, vérifié via " +
+    "`git config --get-urlmatch` contre un vrai dépôt", () => {
+    const root = mkdtempSync(join(tmpdir(), "cds-agent-git-credential-env-"));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      const credEnv = { ...process.env, ...gitCredentialEnv() };
+
+      // URL sous l'instance GitLab configurée : doit matcher.
+      const matched = execFileSync(
+        "git",
+        [
+          "config",
+          "--get-urlmatch",
+          "http.extraHeader",
+          `${config.gitlabUrl}/some/project.git`,
+        ],
+        { cwd: root, encoding: "utf8", env: credEnv },
+      ).trim();
+      assert.match(matched, /^Authorization: Basic /);
+
+      // Un hôte différent (même avec un préfixe de nom proche) ne doit
+      // jamais recevoir l'en-tête : sinon le PAT fuiterait vers un tiers au
+      // premier détour (redirection, sous-module...).
+      assert.throws(() =>
+        execFileSync(
+          "git",
+          [
+            "config",
+            "--get-urlmatch",
+            "http.extraHeader",
+            "https://evil.example.com/foo.git",
+          ],
+          { cwd: root, encoding: "utf8", env: credEnv, stdio: "pipe" },
+        ),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

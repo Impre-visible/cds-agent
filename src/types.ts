@@ -11,12 +11,6 @@ export interface TodoTarget {
   project_id?: number;
 }
 
-export interface TodoNote {
-  id: number;
-  body: string;
-  author: GitLabUser;
-}
-
 export interface Todo {
   id: number;
   action_name: string;
@@ -28,8 +22,6 @@ export interface Todo {
   created_at: string;
   author: GitLabUser;
   project?: { id: number; path_with_namespace: string } | null;
-  /** Non documenté par GitLab — présent ou non selon la version. À vérifier. */
-  note?: TodoNote | null;
 }
 
 export interface Note {

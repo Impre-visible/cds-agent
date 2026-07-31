@@ -117,6 +117,67 @@ function finiteNumber(
 }
 
 /**
+ * Sécurité par défaut : sandbox Docker activée sauf opt-in explicite.
+ * Auparavant, l'absence de USE_DOCKER dans l'environnement faisait tourner
+ * l'agent — du code écrit par un LLM — directement sur l'hôte, avec le
+ * profil de login de l'utilisateur (voir runCommand() dans
+ * agent/workspace.ts) : un défaut non sûr finit toujours par tourner
+ * quelque part. On inverse donc la polarité : il faut désormais un opt-in
+ * bruyant (ALLOW_UNSANDBOXED=1) pour désactiver la sandbox.
+ *
+ * USE_DOCKER=1 reste accepté tel quel (rien ne change pour le .env actuel
+ * du projet). USE_DOCKER=0, en revanche, n'est plus un mécanisme d'opt-out
+ * à lui seul : avant ce changement il suffisait à désactiver la sandbox
+ * (c'était même le défaut), et le laisser continuer à le faire
+ * silencieusement referait exactement le trou qu'on comble ici pour
+ * quiconque a ce réglage dans un .env existant. On échoue donc bruyamment
+ * pour forcer une décision consciente : soit ajouter ALLOW_UNSANDBOXED=1
+ * (et accepter l'avertissement affiché au démarrage), soit retirer
+ * USE_DOCKER=0 pour retomber sur la sandbox.
+ */
+function resolveUseDocker(env: NodeJS.ProcessEnv): boolean {
+  const allowUnsandboxed = env.ALLOW_UNSANDBOXED === "1";
+  if (env.USE_DOCKER === "0" && !allowUnsandboxed) {
+    throw new Error(
+      'USE_DOCKER=0 ne suffit plus à désactiver la sandbox Docker (défaut désormais sûr) : ' +
+        "positionnez ALLOW_UNSANDBOXED=1 pour confirmer explicitement le mode hôte non " +
+        "sandboxé, ou retirez USE_DOCKER=0 pour rester en sandbox — voir .env",
+    );
+  }
+  if (allowUnsandboxed) {
+    console.warn(
+      "⚠ ALLOW_UNSANDBOXED=1 : les commandes de l'agent (y compris du code potentiellement " +
+        "écrit par le LLM) s'exécutent directement sur l'hôte, sans isolation Docker. " +
+        "À réserver au développement local.",
+    );
+    return false;
+  }
+  return true;
+}
+
+/**
+ * sandbox.ts construit la clé de modèle opencode via
+ * config.agentModel.split("/")[1] (voir agent/sandbox.ts) : un identifiant
+ * sans "/" (ou avec une partie vide de part et d'autre) produit une clé de
+ * modèle vide, échec silencieux à des couches de distance de cette
+ * validation — une requête d'inférence qui échoue bien plus tard avec un
+ * message sans rapport avec la vraie cause. On vérifie donc ici le format
+ * attendu "fournisseur/modèle" dès le démarrage.
+ */
+function validateAgentModel(env: NodeJS.ProcessEnv, fallback: string): string {
+  const raw = env.AGENT_MODEL;
+  if (raw === undefined || raw === "") return fallback;
+  const slash = raw.indexOf("/");
+  if (slash <= 0 || slash === raw.length - 1) {
+    throw new Error(
+      `Variable d'environnement invalide : AGENT_MODEL="${raw}" doit être au format ` +
+        `"fournisseur/modèle" (ex. "lmstudio/qwen2.5-coder-7b-instruct-mlx") — voir .env`,
+    );
+  }
+  return raw;
+}
+
+/**
  * Validation de forme légère pour les valeurs passées telles quelles à
  * `docker run` (mémoire, CPU) : pas de plage numérique pertinente ici, mais
  * une faute de frappe produirait sinon une commande Docker qui échoue de
@@ -155,23 +216,19 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
       min: 1_000,
       max: 3_600_000,
     }),
-    dumpDir: env.DUMP_DIR ?? "./todo-dumps",
     stateFile: env.STATE_FILE ?? "./state/processed.jsonl",
     skipMarkDone: env.SKIP_MARK_DONE === "1",
     allowedProjects: list(env, "ALLOWED_PROJECTS"),
     allowedUsers: list(env, "ALLOWED_USERS"),
-    // Non utilisé actuellement (code mort), mais validé comme le reste pour
-    // ne pas laisser un NaN se propager si l'usage revient un jour.
-    taskStubMs: finiteNumber(env, "TASK_STUB_MS", 20_000, {
-      min: 0,
-      max: 600_000,
-    }),
     // Exprimé en minutes côté env : borné à [1, 1440] (une journée) avant
     // conversion en ms.
     lookbackMs:
       finiteNumber(env, "LOOKBACK_MINUTES", 10, { min: 1, max: 1_440 }) *
       60_000,
-    agentModel: env.AGENT_MODEL ?? "lmstudio/qwen2.5-coder-7b-instruct-mlx",
+    agentModel: validateAgentModel(
+      env,
+      "lmstudio/qwen2.5-coder-7b-instruct-mlx",
+    ),
     // Exprimé en minutes côté env : un timeout de 0 laisserait l'agent
     // tourner indéfiniment (voir agent/runner.ts) ; 4 h de plafond couvre
     // largement une tâche locale raisonnable.
@@ -189,7 +246,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
       finiteNumber(env, "COMMAND_TIMEOUT_MINUTES", 5, { min: 1, max: 60 }) *
       60_000,
     fakeAgentScript: env.FAKE_AGENT_SCRIPT ?? "",
-    useDocker: env.USE_DOCKER === "1",
+    useDocker: resolveUseDocker(env),
     dockerImages: parseImageMap(env.DOCKER_IMAGES ?? ""),
     testDirectoryOverrides: parseTestDirectoryMap(
       env.TEST_DIRECTORY_OVERRIDES ?? "",
@@ -206,30 +263,87 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
       env.CONTAINER_INFERENCE_URL ?? "http://host.docker.internal:1234/v1",
     // maxAttempts=0 désactiverait silencieusement les réessais.
     maxAttempts: finiteNumber(env, "MAX_ATTEMPTS", 3, { min: 1, max: 20 }),
+    // Porte de sortie pour sanitizedEnv() (voir plus bas) : la liste blanche
+    // de base couvre les besoins génériques (PATH, HOME, proxies...), mais
+    // un dépôt ou un environnement particulier peut avoir besoin d'une
+    // variable de plus (ex. un proxy interne sous un autre nom). Format :
+    // liste de noms de variables séparés par des virgules, sensible à la
+    // casse (ce sont des noms de variables d'environnement).
+    extraSanitizedEnvKeys: (env.SANITIZED_ENV_EXTRA_KEYS ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
   } as const;
 }
 
 export const config = buildConfig(process.env);
 
-/** Credential git passé par variables d'environnement : rien n'est écrit sur disque. */
+/**
+ * Credential git passé par variables d'environnement : rien n'est écrit sur
+ * disque. La clé `http.<url>.extraHeader` (plutôt que `http.extraHeader`
+ * global) restreint l'en-tête Authorization à l'instance GitLab visée : sans
+ * ce préfixe, le PAT partirait vers n'importe quel hôte que git contacte
+ * (redirection, sous-module, ...). Le "/" final est significatif — vérifié
+ * avec `git config --get-urlmatch` contre un vrai dépôt (voir config.test.ts) :
+ * il fait matcher tout chemin sous cet hôte (n'importe quel projet GitLab
+ * dessus), sans déborder sur un hôte différent même partageant un préfixe de
+ * nom (ex. gitlab.com vs gitlab.com.evil.org, testé et bien distingués par
+ * git — le "/" clôt le nom d'hôte).
+ */
 export function gitCredentialEnv(): NodeJS.ProcessEnv {
   const basic = Buffer.from(`oauth2:${config.token}`).toString("base64");
   return {
     GIT_CONFIG_COUNT: "1",
-    GIT_CONFIG_KEY_0: "http.extraHeader",
+    GIT_CONFIG_KEY_0: `http.${config.gitlabUrl}/.extraHeader`,
     GIT_CONFIG_VALUE_0: `Authorization: Basic ${basic}`,
     GIT_TERMINAL_PROMPT: "0",
   };
 }
 
-const SECRET_PATTERN =
-  /token|secret|password|passwd|credential|api[_-]?key|GIT_CONFIG_/i;
+/**
+ * Liste blanche des variables transmises aux processus enfants non fiables
+ * (git, `bash -lc`, l'agent en conteneur — voir agent/workspace.ts et
+ * agent/runner.ts) : PATH pour trouver les binaires, HOME pour la
+ * configuration git/npm de l'utilisateur, LANG/LANGUAGE/TERM et le préfixe
+ * LC_ (locale) pour un affichage correct, TMPDIR/TMP/TEMP pour les fichiers
+ * temporaires, et les variables de proxy HTTP pour un réseau sortant qui
+ * passe par un proxy d'entreprise (clone git, npm install...).
+ *
+ * Remplace une denylist par regex, incomplète par construction : ni
+ * AWS_ACCESS_KEY_ID (ne matche pas `api[_-]?key`), ni GH_PAT, SSH_AUTH_SOCK,
+ * KUBECONFIG ou DATABASE_URL (qui contient souvent un mot de passe) n'y
+ * étaient interceptés. Pour un processus explicitement non fiable, seule une
+ * liste blanche donne une garantie : tout ce qui n'est pas listé est absent,
+ * qu'il "ressemble" à un secret ou non. SSH_AUTH_SOCK en particulier est
+ * volontairement exclu : le transmettre équivaudrait à laisser le processus
+ * s'authentifier en tant que l'utilisateur via l'agent ssh.
+ */
+const BASE_ALLOWED_ENV_KEYS = [
+  "PATH",
+  "HOME",
+  "LANG",
+  "LANGUAGE",
+  "TERM",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+];
 
 /** Environnement expurgé, destiné aux processus enfants non fiables. */
 export function sanitizedEnv(): NodeJS.ProcessEnv {
+  const allowed = new Set([
+    ...BASE_ALLOWED_ENV_KEYS,
+    ...config.extraSanitizedEnvKeys,
+  ]);
   const clean: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (!SECRET_PATTERN.test(key)) clean[key] = value;
+    if (allowed.has(key) || key.startsWith("LC_")) clean[key] = value;
   }
   return clean;
 }

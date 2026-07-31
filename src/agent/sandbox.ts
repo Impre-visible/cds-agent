@@ -198,6 +198,9 @@ export async function runAgentInSandbox(
         npm: "@ai-sdk/openai-compatible",
         name: "LM Studio",
         options: { baseURL: config.inferenceUrl, apiKey: "lm-studio" },
+        // Le format "fournisseur/modèle" d'AGENT_MODEL est validé au
+        // démarrage par config.ts (validateAgentModel) : split("/")[1] ne
+        // peut donc plus produire une clé de modèle vide ici.
         models: { [config.agentModel.split("/")[1] ?? ""]: { name: "agent" } },
       },
     },
