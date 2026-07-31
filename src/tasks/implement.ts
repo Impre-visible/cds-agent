@@ -235,6 +235,7 @@ export async function runImplement(
 
     const { paths, offending } = collectChanges(
       git(repo, ["status", "--porcelain=v1", "-uall"]),
+      config.testDirectoryOverrides.get(context.projectPath.toLowerCase()),
     );
 
     if (paths.length === 0) {

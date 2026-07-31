@@ -46,6 +46,30 @@ function parseImageMap(raw: string): Map<string, string> {
   return map;
 }
 
+/**
+ * Format : "groupe/depot=dossier1|dossier2,autre/depot=dossier3" — même
+ * syntaxe que DOCKER_IMAGES, avec un "|" en plus pour séparer les
+ * plusieurs noms de dossier d'un même dépôt. Sert à déclarer, dépôt par
+ * dépôt, des répertoires de test maison en plus des conventions standard
+ * reconnues par tasks/guard.ts (tests/, test/, __tests__/, spec/) : un
+ * monorepo qui range ses tests sous "e2e/" par exemple, sans élargir la
+ * détection par défaut de tous les autres dépôts. Absent de la config, la
+ * détection reste strictement celle des conventions standard.
+ */
+function parseTestDirectoryMap(raw: string): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const entry of raw.split(",")) {
+    const [path, directories] = entry.split("=").map((part) => part.trim());
+    if (!path || !directories) continue;
+    const names = directories
+      .split("|")
+      .map((name) => name.trim())
+      .filter(Boolean);
+    if (names.length) map.set(path.toLowerCase(), names);
+  }
+  return map;
+}
+
 interface NumberBounds {
   min?: number;
   max?: number;
@@ -167,6 +191,9 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     fakeAgentScript: env.FAKE_AGENT_SCRIPT ?? "",
     useDocker: env.USE_DOCKER === "1",
     dockerImages: parseImageMap(env.DOCKER_IMAGES ?? ""),
+    testDirectoryOverrides: parseTestDirectoryMap(
+      env.TEST_DIRECTORY_OVERRIDES ?? "",
+    ),
     dockerDefaultImage: env.DOCKER_DEFAULT_IMAGE ?? "node:22-bookworm-slim",
     // Format docker --memory : un nombre suivi d'une unité optionnelle
     // (b/k/m/g).

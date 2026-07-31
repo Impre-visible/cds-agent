@@ -192,6 +192,31 @@ describe("buildConfig — configuration valide complète", () => {
   });
 });
 
+describe("buildConfig — testDirectoryOverrides (dossiers de test par projet)", () => {
+  test("absent, la map est vide (comportement par défaut sûr)", () => {
+    const config = buildConfig(baseEnv());
+    assert.equal((config.testDirectoryOverrides as Map<string, string[]>).size, 0);
+  });
+
+  test("un dépôt peut déclarer plusieurs dossiers séparés par '|'", () => {
+    const config = buildConfig(
+      baseEnv({
+        TEST_DIRECTORY_OVERRIDES: "Groupe/Depot=e2e|acceptance,autre/depot=fixtures",
+      }),
+    );
+    const overrides = config.testDirectoryOverrides as Map<string, string[]>;
+    assert.deepEqual(overrides.get("groupe/depot"), ["e2e", "acceptance"]);
+    assert.deepEqual(overrides.get("autre/depot"), ["fixtures"]);
+  });
+
+  test("une entrée mal formée (sans '=' ou sans valeur) est ignorée", () => {
+    const config = buildConfig(
+      baseEnv({ TEST_DIRECTORY_OVERRIDES: "sans-egal,groupe/depot=" }),
+    );
+    assert.equal((config.testDirectoryOverrides as Map<string, string[]>).size, 0);
+  });
+});
+
 describe("buildConfig — validation de forme (docker)", () => {
   test("DOCKER_MEMORY dans un format inattendu est rejeté", () => {
     assert.throws(

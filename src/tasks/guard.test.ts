@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { isTestPath, collectChanges } from "./guard.ts";
 
 describe("isTestPath", () => {
-  test("reconnaît un chemin sous un dossier de test connu", () => {
+  test("reconnaît un chemin sous un dossier de test connu, à la racine", () => {
     assert.equal(isTestPath("tests/foo.js"), true);
     assert.equal(isTestPath("test/foo.py"), true);
     assert.equal(isTestPath("__tests__/foo.js"), true);
@@ -21,18 +21,97 @@ describe("isTestPath", () => {
     assert.equal(isTestPath("src/foo.ts"), false);
   });
 
-  // TODO(T11): isTestPath ne reconnaît un dossier de test que via startsWith
-  // à la racine du chemin — un dossier de test niché plus bas (src/tests/x.js)
-  // n'est pas reconnu, alors qu'il s'agit bien d'un chemin de test.
-  test("ne reconnaît pas un dossier de test qui n'est pas à la racine du chemin (bug connu)", () => {
-    assert.equal(isTestPath("src/tests/x.js"), false);
+  test("rejette un fichier de config à la racine", () => {
+    assert.equal(isTestPath("package.json"), false);
   });
 
-  // TODO(T11): TEST_FILENAME ne couvre que les extensions JS/TS — un fichier
-  // de test dans un autre langage (Python, Ruby...) hors des dossiers connus
-  // n'est pas détecté.
-  test("ne reconnaît pas un fichier de test hors JS/TS (bug connu)", () => {
-    assert.equal(isTestPath("src/foo.test.py"), false);
+  describe("T11 — dossier de test niché à n'importe quel niveau", () => {
+    test("un dossier de test niché dans src/ est reconnu", () => {
+      assert.equal(isTestPath("src/tests/x.js"), true);
+    });
+
+    test("un dossier de test niché plus profondément (monorepo) est reconnu", () => {
+      assert.equal(isTestPath("packages/api/test/helper.js"), true);
+      assert.equal(isTestPath("apps/web/src/__tests__/App.jsx"), true);
+    });
+
+    test("un dossier de test en casse capitalisée (Tests/) est reconnu", () => {
+      assert.equal(isTestPath("src/Tests/FooTests.cs"), true);
+    });
+
+    test("ne confond pas un dossier 'test' avec une sous-chaîne ('contest', 'latest')", () => {
+      assert.equal(isTestPath("contest/foo.js"), false);
+      assert.equal(isTestPath("latest/foo.js"), false);
+    });
+  });
+
+  describe("T11 — conventions multi-écosystème", () => {
+    test("Python : test_foo.py et foo_test.py, hors dossier de test", () => {
+      assert.equal(isTestPath("src/test_foo.py"), true);
+      assert.equal(isTestPath("src/foo_test.py"), true);
+    });
+
+    test("Python : conftest.py n'est PAS reconnu hors d'un dossier de test", () => {
+      assert.equal(isTestPath("conftest.py"), false);
+      assert.equal(isTestPath("src/conftest.py"), false);
+    });
+
+    test("Python : conftest.py et setup.py sont acceptés à l'intérieur d'un dossier de test (comportement existant, par répertoire)", () => {
+      assert.equal(isTestPath("tests/conftest.py"), true);
+      assert.equal(isTestPath("tests/setup.py"), true);
+    });
+
+    test("Go : foo_test.go", () => {
+      assert.equal(isTestPath("pkg/server/foo_test.go"), true);
+    });
+
+    test("Go : un fichier source ordinaire n'est pas reconnu", () => {
+      assert.equal(isTestPath("pkg/server/foo.go"), false);
+    });
+
+    test("Java/Kotlin : FooTest.java, FooTests.java, FooTestCase.java, FooSpec.kt", () => {
+      assert.equal(isTestPath("src/test/java/com/acme/FooTest.java"), true);
+      assert.equal(isTestPath("com/acme/FooTests.java"), true);
+      assert.equal(isTestPath("com/acme/FooTestCase.java"), true);
+      assert.equal(isTestPath("com/acme/FooSpec.kt"), true);
+    });
+
+    test("Java : ne confond pas 'Latest.java' avec une convention de test (casse significative)", () => {
+      assert.equal(isTestPath("com/acme/Latest.java"), false);
+    });
+
+    test("Scala : FooSpec.scala", () => {
+      assert.equal(isTestPath("com/acme/FooSpec.scala"), true);
+    });
+
+    test("Ruby : foo_spec.rb, foo_test.rb, test_foo.rb", () => {
+      assert.equal(isTestPath("lib/foo_spec.rb"), true);
+      assert.equal(isTestPath("lib/foo_test.rb"), true);
+      assert.equal(isTestPath("lib/test_foo.rb"), true);
+    });
+  });
+
+  describe("T11 — tentatives de contournement", () => {
+    test("un dossier 'test' suivi d'une remontée '..' ne trompe pas le contrôle", () => {
+      // Résolu, ce chemin ne pointe plus du tout vers tests/ mais vers
+      // server.js à la racine — il doit être rejeté, pas accepté au
+      // prétexte qu'un segment "test" apparaît dans la chaîne.
+      assert.equal(isTestPath("vendor/test/../../server.js"), false);
+      assert.equal(isTestPath("tests/../src/server.js"), false);
+      assert.equal(isTestPath("./tests/foo.js"), false);
+    });
+  });
+
+  describe("configuration par projet (extraDirectories)", () => {
+    test("un dossier additionnel n'est reconnu que si explicitement déclaré", () => {
+      assert.equal(isTestPath("e2e/foo.js"), false);
+      assert.equal(isTestPath("e2e/foo.js", ["e2e"]), true);
+    });
+
+    test("la déclaration est insensible à la casse et n'affecte pas les autres dossiers", () => {
+      assert.equal(isTestPath("E2E/foo.js", ["e2e"]), true);
+      assert.equal(isTestPath("src/foo.ts", ["e2e"]), false);
+    });
   });
 });
 
@@ -79,6 +158,21 @@ describe("collectChanges", () => {
     );
     assert.deepEqual(paths, ["src/foo bar.ts"]);
     assert.deepEqual(offending, ["src/foo bar.ts"]);
+  });
+
+  test("un dossier de test niché est accepté (T11)", () => {
+    const { offending } = collectChanges(
+      "A  packages/api/test/helper.js\n",
+    );
+    assert.deepEqual(offending, []);
+  });
+
+  test("un dossier additionnel n'est accepté que si passé explicitement à collectChanges", () => {
+    const withoutOverride = collectChanges("A  e2e/foo.js\n");
+    assert.deepEqual(withoutOverride.offending, ["e2e/foo.js"]);
+
+    const withOverride = collectChanges("A  e2e/foo.js\n", ["e2e"]);
+    assert.deepEqual(withOverride.offending, []);
   });
 
   // TODO(T12): collectChanges ne décode pas les séquences octales que git
