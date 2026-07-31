@@ -233,8 +233,10 @@ export async function runImplement(
       };
     }
 
-    const { paths, offending } = collectChanges(
-      git(repo, ["status", "--porcelain=v1", "-uall"]),
+    // `-z` : voir guard.ts pour le détail du format (pas de quoting, entrées
+    // séparées par un octet nul, renommages/copies sur deux entrées).
+    const { paths, offending, deletedTests } = collectChanges(
+      git(repo, ["status", "--porcelain=v1", "-uall", "-z"]),
       config.testDirectoryOverrides.get(context.projectPath.toLowerCase()),
     );
 
@@ -247,12 +249,24 @@ export async function runImplement(
       };
     }
 
-    // Le garde-fou : c'est ce qui empêche de « faire passer les tests » en modifiant le code testé.
-    if (offending.length > 0) {
+    // Le garde-fou : c'est ce qui empêche de « faire passer les tests » en
+    // modifiant le code testé — ou en supprimant les tests qui gênent
+    // (deletedTests, §2.3), distingué ici pour un message d'erreur qui ne
+    // fait pas passer une suppression pour une simple modification.
+    if (offending.length > 0 || deletedTests.length > 0) {
       git(repo, ["checkout", "--", "."]);
+      const reasons = [
+        offending.length > 0
+          ? `fichiers hors périmètre modifiés : ${offending.join(", ")}`
+          : null,
+        deletedTests.length > 0
+          ? `suppression de fichier(s) de test détectée : ${deletedTests.join(", ")}`
+          : null,
+      ].filter((reason): reason is string => reason !== null);
+
       return {
         status: "rejected",
-        detail: `fichiers hors périmètre modifiés : ${offending.join(", ")}`,
+        detail: reasons.join(" ; "),
         files: paths,
         durationMs: Date.now() - started,
       };

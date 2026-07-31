@@ -1,6 +1,15 @@
 export interface ChangeSet {
   paths: string[];
+  // Chemins hors périmètre de test — au sens large : un chemin qui n'est
+  // pas un chemin de test, ou un statut de porcelain trop ambigu/suspect
+  // pour être accepté sans discussion (voir isSuspectStatus plus bas).
   offending: string[];
+  // Sous-cas volontairement distingué de `offending` : un fichier de test
+  // *existant* que l'agent a supprimé (ou déplacé puis supprimé). Le chemin
+  // reste, en apparence, dans le périmètre "tests/", donc un simple filtre
+  // isTestPath ne le verrait jamais — c'est justement le contournement visé
+  // (§2.3) : retirer un test gênant plutôt que d'en ajouter un qui passe.
+  deletedTests: string[];
 }
 
 // Noms de répertoire reconnus comme périmètre de test, quel que soit
@@ -112,26 +121,109 @@ export function isTestPath(
   return TEST_FILENAME_PATTERNS.some((pattern) => pattern.test(basename));
 }
 
+/**
+ * Un statut XY que ce flux ne devrait normalement jamais produire : un
+ * conflit de fusion non résolu, un changement de type (fichier <-> lien
+ * symbolique, qui pourrait déguiser un chemin de test en pointeur vers
+ * autre chose), ou une entrée "ignorée" (ne devrait pas apparaître, puisque
+ * `-uall` sans `--ignored` ne les demande pas).
+ *
+ * Le principe directeur, volontaire : un statut qu'on n'a pas explicitement
+ * décidé d'accepter est traité comme suspect, jamais comme anodin — c'est
+ * le garde-fou qui doit justifier une exception, pas l'inverse.
+ */
+function isSuspectStatus(code: string): boolean {
+  if (code === "??") return false; // non suivi : cas normal, traité plus bas comme un ajout
+  if (code === "!!") return true; // ignoré : ne devrait jamais apparaître ici
+  // "U" en X ou en Y marque un chemin non fusionné ; "AA"/"DD" (ajouté ou
+  // supprimé des deux côtés) sont eux aussi des conflits, sans lettre "U".
+  if (code.includes("U") || code === "AA" || code === "DD") return true;
+  // Changement de type (T) : un fichier de test remplacé par un lien
+  // symbolique (ou l'inverse) reste un chemin "tests/…" pour isTestPath,
+  // mais son contenu réel est indéterminé sans inspection supplémentaire.
+  if (code.includes("T")) return true;
+  return false;
+}
+
+/**
+ * "D" en colonne X (index) ou Y (arbre de travail) signale qu'à l'état
+ * courant, ce chemin n'a plus de contenu — que ce soit une suppression
+ * simple ("D "/" D"/"MD"/"AD"...) ou un renommage suivi d'une suppression
+ * du fichier renommé ("RD"/"CD", constaté empiriquement : git émet bien un
+ * second caractère "D" dans ce cas, la paire de chemins -z est produite
+ * comme pour tout renommage/copie).
+ */
+function isDeleteStatus(code: string): boolean {
+  return code[0] === "D" || code[1] === "D";
+}
+
 /** Lit l'état réel du dépôt, sans faire confiance à ce que l'agent déclare. */
 export function collectChanges(
   porcelain: string,
   extraDirectories: string[] = [],
 ): ChangeSet {
-  const paths: string[] = [];
+  // Format `--porcelain=v1 -z` (implement.ts est responsable de passer -z à
+  // git) : chaque entrée est terminée par un octet nul et n'est JAMAIS
+  // quotée — accents, espaces, guillemets, retours à la ligne dans un nom
+  // de fichier traversent tels quels. Constaté empiriquement contre un vrai
+  // dépôt (git 2.50) plutôt que déduit de mémoire : un renommage ou une
+  // copie ajoute une DEUXIÈME entrée -z, le chemin d'origine, SANS son
+  // propre préfixe XY et sans le séparateur " -> " du format v1 sans -z —
+  // "R  nouveau\0ancien\0", jamais "R  ancien -> nouveau". Le renommage
+  // s'écrit toujours en colonne X, jamais en Y, y compris pour les statuts
+  // combinés ("RM", "RD").
+  const tokens = porcelain.split("\0").filter((token) => token.length > 0);
 
-  for (const line of porcelain.split("\n")) {
-    if (!line.trim()) continue;
-    const payload = line.slice(3);
-    // Un renommage s'écrit "ancien -> nouveau" : les deux chemins comptent.
-    for (const part of payload.split(" -> ")) {
-      const clean = part.trim().replace(/^"|"$/g, "");
-      if (clean) paths.push(clean);
+  const paths: string[] = [];
+  const offending = new Set<string>();
+  const deletedTests = new Set<string>();
+
+  for (let i = 0; i < tokens.length; i++) {
+    // `filter` ci-dessus garantit qu'aucun token n'est vide, mais
+    // TypeScript (noUncheckedIndexedAccess) ne le sait pas depuis un accès
+    // indexé : le fallback ne joue aucun rôle, `entry` ne peut pas être
+    // vide ici.
+    const entry = tokens[i] ?? "";
+    const code = entry.slice(0, 2);
+    const path = entry.slice(3);
+    if (!path) continue;
+
+    const isRenameOrCopy = code[0] === "R" || code[0] === "C";
+    // Le chemin d'origine est une entrée -z séparée, jamais un suffixe de
+    // la ligne courante : on consomme le token suivant.
+    const originPath = isRenameOrCopy ? tokens[++i] : undefined;
+
+    paths.push(path);
+    if (originPath) paths.push(originPath);
+
+    if (isSuspectStatus(code)) {
+      offending.add(path);
+      if (originPath) offending.add(originPath);
+      continue;
+    }
+
+    // Le chemin courant (nouveau nom en cas de renommage/copie) : une
+    // suppression qui le touche et qui reste, malgré tout, sous un chemin
+    // de test est le scénario de contournement visé par §2.3 — distingué
+    // de "offending" pour un message d'erreur qui ne prête pas à confusion
+    // avec un simple fichier hors périmètre.
+    if (isDeleteStatus(code) && isTestPath(path, extraDirectories)) {
+      deletedTests.add(path);
+    } else if (!isTestPath(path, extraDirectories)) {
+      offending.add(path);
+    }
+
+    // Le chemin d'origine d'un renommage/copie n'est pas une suppression :
+    // son contenu survit sous le nouveau nom. Seul compte, comme pour tout
+    // autre chemin, son appartenance ou non au périmètre de test.
+    if (originPath && !isTestPath(originPath, extraDirectories)) {
+      offending.add(originPath);
     }
   }
 
-  const unique = [...new Set(paths)];
   return {
-    paths: unique,
-    offending: unique.filter((path) => !isTestPath(path, extraDirectories)),
+    paths: [...new Set(paths)],
+    offending: [...offending],
+    deletedTests: [...deletedTests],
   };
 }

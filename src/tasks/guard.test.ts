@@ -1,6 +1,41 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { isTestPath, collectChanges } from "./guard.ts";
+
+/**
+ * Un vrai dépôt git jetable, avec un fichier de test déjà commité — pour les
+ * scénarios de §2.2/§2.3 qui doivent être vérifiés contre une vraie sortie
+ * `git status -z`, pas seulement contre des chaînes -z écrites à la main :
+ * même motif que workspace.test.ts / implement.test.ts.
+ */
+function makeTestRepo(): { root: string; repo: string } {
+  const root = mkdtempSync(join(tmpdir(), "cds-agent-guard-test-"));
+  const repo = join(root, "repo");
+  execFileSync("git", ["init", "--quiet", "-b", "main", repo]);
+  execFileSync("git", ["-C", repo, "config", "user.email", "seed@test.local"]);
+  execFileSync("git", ["-C", repo, "config", "user.name", "seed"]);
+  mkdirSync(join(repo, "tests"), { recursive: true });
+  writeFileSync(join(repo, "tests", "existant.test.js"), "// test existant\n");
+  execFileSync("git", ["-C", repo, "add", "--all"]);
+  execFileSync("git", ["-C", repo, "commit", "--quiet", "-m", "seed"]);
+  return { root, repo };
+}
+
+/** La commande exacte que doit lancer implement.ts. */
+function statusZ(repo: string): string {
+  return execFileSync("git", [
+    "-C",
+    repo,
+    "status",
+    "--porcelain=v1",
+    "-uall",
+    "-z",
+  ]).toString("utf8");
+}
 
 describe("isTestPath", () => {
   test("reconnaît un chemin sous un dossier de test connu, à la racine", () => {
@@ -116,82 +151,241 @@ describe("isTestPath", () => {
 });
 
 describe("collectChanges", () => {
+  // collectChanges reçoit désormais la sortie de `git status --porcelain=v1
+  // -uall -z` (voir implement.ts) : chaque entrée est terminée par un octet
+  // nul plutôt qu'un saut de ligne. Les chaînes ci-dessous, écrites à la
+  // main, reproduisent ce format pour les cas simples ; les scénarios de
+  // quoting/échappement (§2.2) et de suppression (§2.3) sont, eux, vérifiés
+  // contre une vraie sortie git plus bas.
+
   test("extrait les chemins d'un statut porcelain simple", () => {
     const { paths, offending } = collectChanges(
-      "M  tests/foo.test.ts\nA  src/bar.ts\n",
+      "M  tests/foo.test.ts\0A  src/bar.ts\0",
     );
     assert.deepEqual(paths, ["tests/foo.test.ts", "src/bar.ts"]);
     assert.deepEqual(offending, ["src/bar.ts"]);
   });
 
-  test("ignore les lignes vides", () => {
-    const { paths } = collectChanges("\n\nA  tests/a.test.ts\n\n");
+  test("ignore les entrées vides", () => {
+    const { paths } = collectChanges("\0\0A  tests/a.test.ts\0\0");
     assert.deepEqual(paths, ["tests/a.test.ts"]);
-  });
-
-  test("un renommage 'ancien -> nouveau' compte les deux chemins", () => {
-    const { paths, offending } = collectChanges(
-      "R  tests/old.test.ts -> tests/new.test.ts\n",
-    );
-    assert.deepEqual(paths, ["tests/old.test.ts", "tests/new.test.ts"]);
-    assert.deepEqual(offending, []);
-  });
-
-  test("un renommage vers un fichier hors périmètre est signalé", () => {
-    const { paths, offending } = collectChanges(
-      "R  tests/old.test.ts -> src/new.ts\n",
-    );
-    assert.deepEqual(paths, ["tests/old.test.ts", "src/new.ts"]);
-    assert.deepEqual(offending, ["src/new.ts"]);
   });
 
   test("déduplique les chemins identiques", () => {
-    const { paths } = collectChanges(
-      "M  tests/a.test.ts\nM  tests/a.test.ts\n",
-    );
+    const { paths } = collectChanges("M  tests/a.test.ts\0M  tests/a.test.ts\0");
     assert.deepEqual(paths, ["tests/a.test.ts"]);
   });
 
-  test("dépouille les chemins entre guillemets (espaces)", () => {
-    const { paths, offending } = collectChanges(
-      'A  "src/foo bar.ts"\n',
-    );
-    assert.deepEqual(paths, ["src/foo bar.ts"]);
-    assert.deepEqual(offending, ["src/foo bar.ts"]);
-  });
-
   test("un dossier de test niché est accepté (T11)", () => {
-    const { offending } = collectChanges(
-      "A  packages/api/test/helper.js\n",
-    );
+    const { offending } = collectChanges("A  packages/api/test/helper.js\0");
     assert.deepEqual(offending, []);
   });
 
   test("un dossier additionnel n'est accepté que si passé explicitement à collectChanges", () => {
-    const withoutOverride = collectChanges("A  e2e/foo.js\n");
+    const withoutOverride = collectChanges("A  e2e/foo.js\0");
     assert.deepEqual(withoutOverride.offending, ["e2e/foo.js"]);
 
-    const withOverride = collectChanges("A  e2e/foo.js\n", ["e2e"]);
+    const withOverride = collectChanges("A  e2e/foo.js\0", ["e2e"]);
     assert.deepEqual(withOverride.offending, []);
   });
 
-  // TODO(T12): collectChanges ne décode pas les séquences octales que git
-  // utilise pour quoter les caractères non-ASCII (core.quotepath) — le chemin
-  // récupéré contient les échappements \NNN littéraux au lieu du caractère
-  // accentué réel.
-  test("ne décode pas les échappements octaux git pour les caractères accentués (bug connu)", () => {
-    const { paths } = collectChanges('A  "tests/caf\\303\\251.js"\n');
-    assert.deepEqual(paths, ["tests/caf\\303\\251.js"]);
+  describe("statuts suspects (§2.3, hors suppression) — traités comme hors périmètre", () => {
+    test("un conflit de fusion non résolu (UU) est signalé, même sur un chemin de test", () => {
+      const { offending, deletedTests } = collectChanges("UU tests/foo.test.ts\0");
+      assert.deepEqual(offending, ["tests/foo.test.ts"]);
+      assert.deepEqual(deletedTests, []);
+    });
+
+    test("un conflit ajouté/supprimé des deux côtés (AA, DD) est signalé", () => {
+      assert.deepEqual(
+        collectChanges("AA tests/foo.test.ts\0").offending,
+        ["tests/foo.test.ts"],
+      );
+      assert.deepEqual(
+        collectChanges("DD tests/foo.test.ts\0").offending,
+        ["tests/foo.test.ts"],
+      );
+    });
+
+    test("un changement de type (T, fichier <-> lien symbolique) est signalé", () => {
+      const { offending } = collectChanges(" T tests/foo.test.ts\0");
+      assert.deepEqual(offending, ["tests/foo.test.ts"]);
+    });
+
+    test("un fichier non suivi (??) reste traité normalement, pas comme suspect", () => {
+      const { offending } = collectChanges("?? tests/nouveau.test.ts\0");
+      assert.deepEqual(offending, []);
+    });
   });
 
-  // TODO(T13): collectChanges ignore les colonnes de statut XY — une
-  // suppression (D) d'un fichier de test est traitée comme n'importe quelle
-  // modification de ce chemin : comme le chemin reste sous un dossier de
-  // test, il n'est jamais signalé comme offending, alors que supprimer un
-  // test est justement le genre de triche que le garde-fou doit détecter.
-  test("une suppression de fichier de test n'est pas signalée comme offending (bug connu)", () => {
-    const { paths, offending } = collectChanges("D  tests/foo.test.ts\n");
-    assert.deepEqual(paths, ["tests/foo.test.ts"]);
-    assert.deepEqual(offending, []);
+  describe("renommage et copie", () => {
+    test("un renommage compte les deux chemins et n'est pas signalé si les deux restent dans le périmètre", () => {
+      const { root, repo } = makeTestRepo();
+      try {
+        execFileSync("git", [
+          "-C",
+          repo,
+          "mv",
+          "tests/existant.test.js",
+          "tests/renomme.test.js",
+        ]);
+        const { paths, offending, deletedTests } = collectChanges(statusZ(repo));
+        assert.deepEqual(
+          new Set(paths),
+          new Set(["tests/renomme.test.js", "tests/existant.test.js"]),
+        );
+        assert.deepEqual(offending, []);
+        // Le contenu survit sous le nouveau nom : ce n'est pas une
+        // suppression, même si l'ancien chemin "disparaît".
+        assert.deepEqual(deletedTests, []);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("un renommage vers un fichier hors périmètre est signalé", () => {
+      const { root, repo } = makeTestRepo();
+      try {
+        mkdirSync(join(repo, "src"), { recursive: true });
+        execFileSync("git", [
+          "-C",
+          repo,
+          "mv",
+          "tests/existant.test.js",
+          "src/deplace.ts",
+        ]);
+        const { paths, offending } = collectChanges(statusZ(repo));
+        assert.deepEqual(
+          new Set(paths),
+          new Set(["src/deplace.ts", "tests/existant.test.js"]),
+        );
+        assert.deepEqual(offending, ["src/deplace.ts"]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("un renommage suivi de la suppression du fichier renommé (RD) est traité comme une suppression de test", () => {
+      const { root, repo } = makeTestRepo();
+      try {
+        execFileSync("git", [
+          "-C",
+          repo,
+          "mv",
+          "tests/existant.test.js",
+          "tests/renomme.test.js",
+        ]);
+        // L'agent supprime ensuite, dans l'arbre de travail, le fichier
+        // qu'il vient de renommer : constaté empiriquement, git émet un
+        // statut "RD" (pas "R " suivi d'un "D " séparé).
+        execFileSync("rm", [join(repo, "tests", "renomme.test.js")]);
+        const { offending, deletedTests } = collectChanges(statusZ(repo));
+        assert.deepEqual(offending, []);
+        assert.deepEqual(deletedTests, ["tests/renomme.test.js"]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // `git status` ne détecte jamais de copie de lui-même (contrairement à
+    // `git diff -C`, il n'existe pas de `--find-copies` pour ce sous-
+    // commande — vérifié : `-C` est refusé avec "unknown switch"). Le code
+    // "C" reste documenté par git pour le format -z (même structure que
+    // "R" : la copie ajoute une entrée d'origine), d'où ce test sur une
+    // chaîne construite à la main plutôt que sur une vraie sortie git.
+    test("une copie (C, format -z documenté mais non produit par git status) est attribuée comme un renommage", () => {
+      const { paths, offending } = collectChanges(
+        "C  tests/copie.test.ts\0tests/existant.test.js\0",
+      );
+      assert.deepEqual(
+        new Set(paths),
+        new Set(["tests/copie.test.ts", "tests/existant.test.js"]),
+      );
+      assert.deepEqual(offending, []);
+    });
+  });
+
+  describe("§2.2 — quoting/échappement git, vérifié contre une vraie sortie -z", () => {
+    test("espaces, accents et guillemets dans un nom de fichier passent tels quels, sans décodage à faire", () => {
+      const { root, repo } = makeTestRepo();
+      try {
+        writeFileSync(join(repo, "tests", "espace dans le nom.test.js"), "// x\n");
+        writeFileSync(join(repo, "tests", "café.test.js"), "// x\n");
+        writeFileSync(join(repo, "tests", 'guillemet".test.js'), "// x\n");
+        const { paths, offending } = collectChanges(statusZ(repo));
+        assert.deepEqual(
+          new Set(paths),
+          new Set([
+            "tests/espace dans le nom.test.js",
+            "tests/café.test.js",
+            'tests/guillemet".test.js',
+          ]),
+        );
+        assert.deepEqual(offending, []);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("un nom de fichier contenant littéralement ' -> ' ne casse pas le parsing (pas de rename ici)", () => {
+      const { root, repo } = makeTestRepo();
+      try {
+        writeFileSync(join(repo, "tests", "a -> b.test.js"), "// x\n");
+        const { paths, offending } = collectChanges(statusZ(repo));
+        // Seul ce nouveau fichier apparaît : "tests/existant.test.js" est
+        // déjà commité par makeTestRepo() et n'a pas été touché ici.
+        assert.deepEqual(paths, ["tests/a -> b.test.js"]);
+        assert.deepEqual(offending, []);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("§2.3 — suppression d'un fichier de test existant", () => {
+    test("le scénario motivant le correctif : l'agent supprime un test existant, c'est refusé", () => {
+      const { root, repo } = makeTestRepo();
+      try {
+        execFileSync("rm", [join(repo, "tests", "existant.test.js")]);
+        const { paths, offending, deletedTests } = collectChanges(statusZ(repo));
+        assert.deepEqual(paths, ["tests/existant.test.js"]);
+        assert.deepEqual(
+          offending,
+          [],
+          "la suppression ne doit pas se fondre dans le message générique « hors périmètre »",
+        );
+        assert.deepEqual(deletedTests, ["tests/existant.test.js"]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("la suppression d'un fichier hors périmètre reste signalée comme offending, pas comme deletedTests", () => {
+      const { root, repo } = makeTestRepo();
+      try {
+        writeFileSync(join(repo, "server.js"), "console.log(1);\n");
+        execFileSync("git", ["-C", repo, "add", "--all"]);
+        execFileSync("git", ["-C", repo, "commit", "--quiet", "-m", "add server.js"]);
+        execFileSync("rm", [join(repo, "server.js")]);
+        const { offending, deletedTests } = collectChanges(statusZ(repo));
+        assert.deepEqual(offending, ["server.js"]);
+        assert.deepEqual(deletedTests, []);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("cas nominal : ajouter un nouveau fichier de test ne déclenche aucun faux positif", () => {
+      const { root, repo } = makeTestRepo();
+      try {
+        writeFileSync(join(repo, "tests", "nouveau.test.js"), "// nouveau test\n");
+        const { paths, offending, deletedTests } = collectChanges(statusZ(repo));
+        assert.deepEqual(paths, ["tests/nouveau.test.js"]);
+        assert.deepEqual(offending, []);
+        assert.deepEqual(deletedTests, []);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 });
