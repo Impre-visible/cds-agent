@@ -2,7 +2,7 @@ import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
-import type { AgentRequest } from "../types.ts";
+import type { AgentRequest } from "../../src/types.ts";
 
 // Même astuce que publish.test.ts/context.test.ts : un vrai serveur
 // node:http jetable, GITLAB_URL pointé dessus avant l'import dynamique de
@@ -16,8 +16,8 @@ let calls: string[] = [];
 
 const BOT_USERNAME = "cds-bot";
 
-let detectIntent: typeof import("./router.ts").detectIntent;
-let report: typeof import("./router.ts").report;
+let detectIntent: typeof import("../../src/tasks/router.ts").detectIntent;
+let report: typeof import("../../src/tasks/router.ts").report;
 
 function respondJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
@@ -59,7 +59,7 @@ before(async () => {
   process.env.GITLAB_REQUEST_TIMEOUT_MS = "500";
   process.env.GITLAB_MAX_RETRIES = "0";
 
-  ({ detectIntent, report } = await import("./router.ts"));
+  ({ detectIntent, report } = await import("../../src/tasks/router.ts"));
 });
 
 after(async () => {

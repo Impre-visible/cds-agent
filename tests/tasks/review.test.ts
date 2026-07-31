@@ -1,6 +1,6 @@
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
-import type { DiffFile, MergeRequestContext } from "../types.ts";
+import type { DiffFile, MergeRequestContext } from "../../src/types.ts";
 
 // review.ts importe (transitivement) src/config.ts, qui lit .env et jette au
 // chargement du module si GITLAB_TOKEN ou BOT_USERNAME sont absents. On
@@ -24,7 +24,7 @@ before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
   ({ extractJson, parseRemark, buildPrompt, escapeDelimiters } = await import(
-    "./review.ts"
+    "../../src/tasks/review.ts"
   ));
 });
 

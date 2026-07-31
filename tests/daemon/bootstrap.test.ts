@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { bootstrapIfFresh } from "./bootstrap.ts";
-import type { Todo } from "../types.ts";
+import { bootstrapIfFresh } from "../../src/daemon/bootstrap.ts";
+import type { Todo } from "../../src/types.ts";
 
 function makeTodo(id: number, state: "pending" | "done"): Todo {
   return {

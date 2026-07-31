@@ -117,7 +117,7 @@ merge requests sont gérées pour l'instant »).
 
 - **Node.js 26** (le projet exécute directement les `.ts` via le
   type-stripping natif de Node, sans étape de build — `node --test
-  'src/**/*.test.ts'` et `tsx` en dépendent). Testé avec Node 26.3.0.
+  'tests/**/*.test.ts'` et `tsx` en dépendent). Testé avec Node 26.3.0.
 - **Docker** en état de marche, avec un utilisateur autorisé à lancer
   `docker run` — la sandbox est activée par défaut (voir
   [Configuration](#configuration)).
@@ -338,7 +338,7 @@ attendus).
 | Script | Commande | Rôle |
 |---|---|---|
 | `npm run dev` | `tsx src/daemon/index.ts` | Lance le daemon (polling + traitement des demandes). |
-| `npm test` | `node --test 'src/**/*.test.ts'` | Suite de tests native Node, 405 tests, aucune dépendance externe, aucun modèle ni token GitLab requis. |
+| `npm test` | `node --test 'tests/**/*.test.ts'` | Suite de tests native Node, 405 tests, aucune dépendance externe, aucun modèle ni token GitLab requis. |
 | `npm run test:watch` | `node --test --watch ...` | Idem, en mode watch. |
 | `npm run check` | `tsc --noEmit` | Seul filet de typage — voir [CI](#documentation-complémentaire), pas câblé automatiquement avant ce chantier. |
 | `npm run context -- <mr\|issue> <iid>` | `tsx src/tools/dump-context.ts` | Construit le `TaskContext` d'une MR ou d'une issue réelle et l'écrit dans `./context-dump.json` — utile pour inspecter ce que le prompt verra, sans lancer l'agent. |
@@ -663,7 +663,7 @@ npm test
 
 405 tests, `node --test` natif, aucune dépendance de test ajoutée. Les tests
 qui touchent Docker ou git injectent un faux binaire (voir
-`src/agent/sandbox.test.ts`, `src/agent/workspace.test.ts`) : la suite ne
+`tests/agent/sandbox.test.ts`, `tests/agent/workspace.test.ts`) : la suite ne
 nécessite ni Docker réellement lancé, ni modèle d'inférence, ni token GitLab
 valide. `npm run check` (`tsc --noEmit`) est le seul contrôle de types ; les
 deux sont câblés dans `.gitlab-ci.yml`.

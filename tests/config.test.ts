@@ -25,7 +25,7 @@ before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
   ({ buildConfig, config, gitCredentialEnv, sanitizedEnv, computeContainerProxyEnv } =
-    await import("./config.ts"));
+    await import("../src/config.ts"));
 });
 
 /** Environnement minimal valide : seules les deux variables obligatoires. */

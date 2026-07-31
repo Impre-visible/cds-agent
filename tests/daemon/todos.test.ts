@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { collectTodos } from "./todos.ts";
-import type { Todo } from "../types.ts";
+import { collectTodos } from "../../src/daemon/todos.ts";
+import type { Todo } from "../../src/types.ts";
 
 const LOOKBACK_MS = 10 * 60 * 1000; // 10 minutes, comme la valeur par défaut de config.ts
 

@@ -1,6 +1,6 @@
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
-import type { AgentRequest } from "../types.ts";
+import type { AgentRequest } from "../../src/types.ts";
 
 // ack.ts importe (transitivement, via request.ts → gitlab/client.ts)
 // src/config.ts, qui jette au chargement si GITLAB_TOKEN/BOT_USERNAME sont
@@ -10,7 +10,7 @@ let ackBody: (request: AgentRequest, position: number) => string;
 before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
-  ({ ackBody } = await import("./ack.ts"));
+  ({ ackBody } = await import("../../src/daemon/ack.ts"));
 });
 
 function makeRequest(overrides: Partial<AgentRequest> = {}): AgentRequest {

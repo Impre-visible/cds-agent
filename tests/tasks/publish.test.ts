@@ -2,8 +2,8 @@ import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { DiffFile, DiffRefs, MergeRequestContext } from "../types.ts";
-import type { ValidatedRemark } from "./diff.ts";
+import type { DiffFile, DiffRefs, MergeRequestContext } from "../../src/types.ts";
+import type { ValidatedRemark } from "../../src/tasks/diff.ts";
 
 // §5.5/§5.6 : publishReview() ne parle qu'HTTP (via gitlab/client.ts), donc
 // on le vérifie contre un vrai serveur node:http jetable plutôt que contre un
@@ -16,7 +16,7 @@ import type { ValidatedRemark } from "./diff.ts";
 // et gitlabUrl est figé dans le module au premier import (cache ESM, un seul
 // process par fichier de test — voir request.test.ts pour la même
 // contrainte) : toutes les variables d'environnement sont donc posées AVANT
-// le premier `await import("./publish.ts")`, une fois le serveur démarré et
+// le premier `await import("../../src/tasks/publish.ts")`, une fois le serveur démarré et
 // son port connu.
 
 const BOT_USERNAME = "cds-agent-bot";
@@ -61,7 +61,7 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.end(text);
 }
 
-let publishReview: typeof import("./publish.ts").publishReview;
+let publishReview: typeof import("../../src/tasks/publish.ts").publishReview;
 let server: Server;
 let baseUrl: string;
 
@@ -121,7 +121,7 @@ before(async () => {
   process.env.BOT_USERNAME = BOT_USERNAME;
   process.env.GITLAB_URL = baseUrl;
 
-  ({ publishReview } = await import("./publish.ts"));
+  ({ publishReview } = await import("../../src/tasks/publish.ts"));
 });
 
 after(async () => {

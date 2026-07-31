@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { TaskQueue } from "./queue.ts";
+import { TaskQueue } from "../../src/daemon/queue.ts";
 
 interface Item {
   key: string;

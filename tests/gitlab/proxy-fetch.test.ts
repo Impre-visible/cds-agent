@@ -10,7 +10,7 @@ let selectProxyForUrl: (target: URL) => URL | null;
 let performFetch: (url: string, init: RequestInit) => Promise<Response>;
 
 before(async () => {
-  ({ selectProxyForUrl, performFetch } = await import("./proxy-fetch.ts"));
+  ({ selectProxyForUrl, performFetch } = await import("../../src/gitlab/proxy-fetch.ts"));
 });
 
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"];

@@ -11,7 +11,7 @@ let ZERO_WIDTH_SPACE: string;
 before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
-  ({ defuseMentions, ZERO_WIDTH_SPACE } = await import("./request.ts"));
+  ({ defuseMentions, ZERO_WIDTH_SPACE } = await import("../../src/daemon/request.ts"));
 });
 
 describe("defuseMentions", () => {

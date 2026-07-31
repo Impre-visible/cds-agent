@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import type { AgentRequest } from "../types.ts";
+import type { AgentRequest } from "../../src/types.ts";
 
 // authorize.ts importe src/config.ts, qui n'est évalué qu'une seule fois par
 // URL de module (cache ESM) et qui jette au chargement si GITLAB_TOKEN ou
@@ -14,7 +14,7 @@ import type { AgentRequest } from "../types.ts";
 // Node : environnement propre, graphe de modules entièrement frais. Les
 // variables requises sont injectées explicitement, ce qui rend le test
 // reproductible même sans .env local (CI).
-const authorizeUrl = new URL("./authorize.ts", import.meta.url).href;
+const authorizeUrl = new URL("../../src/daemon/authorize.ts", import.meta.url).href;
 
 function runAuthorize(
   env: Record<string, string>,

@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { createBoundedOutput } from "./bounded-output.ts";
+import { createBoundedOutput } from "../../src/agent/bounded-output.ts";
 
 describe("createBoundedOutput (§4.8 : capture bornée en mémoire)", () => {
   test("une sortie sous la limite n'est pas touchée", () => {

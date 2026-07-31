@@ -2,7 +2,7 @@ import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
-import type { AgentRequest, Note } from "../types.ts";
+import type { AgentRequest, Note } from "../../src/types.ts";
 
 // Même astuce que gitlab/client.test.ts : un vrai serveur node:http jetable,
 // GITLAB_URL pointé dessus avant l'import dynamique de config.ts/context.ts.
@@ -15,7 +15,7 @@ type Handler = (req: IncomingMessage, res: ServerResponse) => void;
 let server: Server;
 const routes = new Map<string, Handler>();
 
-let buildContext: typeof import("./context.ts").buildContext;
+let buildContext: typeof import("../../src/tasks/context.ts").buildContext;
 
 function respondJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
@@ -47,7 +47,7 @@ before(async () => {
   process.env.GITLAB_RETRY_BASE_MS = "10";
   process.env.GITLAB_RETRY_MAX_DELAY_MS = "20";
 
-  ({ buildContext } = await import("./context.ts"));
+  ({ buildContext } = await import("../../src/tasks/context.ts"));
 });
 
 after(async () => {

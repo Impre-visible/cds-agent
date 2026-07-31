@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { log, withRequestContext, currentContext, formatLine } from "./log.ts";
+import { log, withRequestContext, currentContext, formatLine } from "../src/log.ts";
 
 /**
  * Intercepte console.log/warn/error le temps d'un test. Sûr en parallèle :

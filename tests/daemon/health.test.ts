@@ -8,7 +8,7 @@ import {
   startHealthServer,
   stopHealthServer,
   type HealthDeps,
-} from "./health.ts";
+} from "../../src/daemon/health.ts";
 
 function baseDeps(overrides: Partial<HealthDeps> = {}): HealthDeps {
   return {

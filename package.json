@@ -8,8 +8,8 @@
     "node": ">=26.0.0"
   },
   "scripts": {
-    "test": "node --test 'src/**/*.test.ts'",
-    "test:watch": "node --test --watch 'src/**/*.test.ts'",
+    "test": "node --test 'tests/**/*.test.ts'",
+    "test:watch": "node --test --watch 'tests/**/*.test.ts'",
     "dev": "tsx src/daemon/index.ts",
     "check": "tsc --noEmit",
     "context": "tsx src/tools/dump-context.ts",

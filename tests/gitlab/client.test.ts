@@ -2,7 +2,7 @@ import { test, describe, before, after, beforeEach, afterEach } from "node:test"
 import assert from "node:assert/strict";
 import { createServer, request as httpRequest } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
-import type { Todo } from "../types.ts";
+import type { Todo } from "../../src/types.ts";
 
 // client.ts importe (transitivement) src/config.ts, qui jette au chargement
 // si GITLAB_TOKEN/BOT_USERNAME sont absents, et calcule GITLAB_URL une fois
@@ -21,10 +21,10 @@ type Handler = (req: IncomingMessage, res: ServerResponse) => void;
 let server: Server;
 const routes = new Map<string, Handler>();
 
-let gitlab: typeof import("./client.ts").gitlab;
-let api: typeof import("./client.ts").api;
-let apiForm: typeof import("./client.ts").apiForm;
-let GitLabError: typeof import("./client.ts").GitLabError;
+let gitlab: typeof import("../../src/gitlab/client.ts").gitlab;
+let api: typeof import("../../src/gitlab/client.ts").api;
+let apiForm: typeof import("../../src/gitlab/client.ts").apiForm;
+let GitLabError: typeof import("../../src/gitlab/client.ts").GitLabError;
 
 function makeTodo(id: number): Todo {
   return {
@@ -67,7 +67,7 @@ before(async () => {
   process.env.GITLAB_RETRY_BASE_MS = "20";
   process.env.GITLAB_RETRY_MAX_DELAY_MS = "80";
 
-  ({ gitlab, api, apiForm, GitLabError } = await import("./client.ts"));
+  ({ gitlab, api, apiForm, GitLabError } = await import("../../src/gitlab/client.ts"));
 });
 
 after(async () => {

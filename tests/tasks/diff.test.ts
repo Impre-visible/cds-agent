@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { parseDiff, numberDiffLines, validateRemarks } from "./diff.ts";
-import type { DiffFile } from "../types.ts";
+import { parseDiff, numberDiffLines, validateRemarks } from "../../src/tasks/diff.ts";
+import type { DiffFile } from "../../src/types.ts";
 
 describe("parseDiff", () => {
   test("indexe les lignes ajoutées et de contexte, pas les lignes supprimées", () => {

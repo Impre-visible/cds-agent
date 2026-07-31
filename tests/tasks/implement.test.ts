@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { TaskContextBase } from "../types.ts";
-import type { RepoCapabilities } from "./guard.ts";
+import type { TaskContextBase } from "../../src/types.ts";
+import type { RepoCapabilities } from "../../src/tasks/guard.ts";
 
 // implement.ts importe (transitivement) config.ts, qui jette au chargement
 // si GITLAB_TOKEN/BOT_USERNAME sont absents. Même parade que
@@ -90,7 +90,7 @@ before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
   process.env.GITLAB_URL = mergeRequestServerUrl;
-  ({ git } = await import("../agent/workspace.ts"));
+  ({ git } = await import("../../src/agent/workspace.ts"));
   ({
     checkHeadIntegrity,
     buildPrompt,
@@ -100,7 +100,7 @@ before(async () => {
     resolveCommand,
     buildBotBranchName,
     openDedicatedMergeRequest,
-  } = await import("./implement.ts"));
+  } = await import("../../src/tasks/implement.ts"));
 });
 
 after(async () => {

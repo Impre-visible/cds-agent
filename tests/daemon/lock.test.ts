@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { InstanceLock, isProcessAlive } from "./lock.ts";
+import { InstanceLock, isProcessAlive } from "../../src/daemon/lock.ts";
 
 let root: string;
 let deadPid: number;

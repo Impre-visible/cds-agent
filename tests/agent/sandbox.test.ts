@@ -73,7 +73,7 @@ before(async () => {
     killContainer,
     hostUser,
     runAgentInSandbox,
-  } = await import("./sandbox.ts"));
+  } = await import("../../src/agent/sandbox.ts"));
 });
 
 describe("buildDockerRunArgs", () => {

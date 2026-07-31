@@ -12,7 +12,7 @@ import {
   describeCapabilities,
   DEFAULT_CAPABILITIES,
   type RepoCapabilities,
-} from "./guard.ts";
+} from "../../src/tasks/guard.ts";
 
 /**
  * Un vrai dépôt git jetable, avec un fichier de test déjà commité — pour les

@@ -33,7 +33,7 @@ let runCommand: (
 before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
-  ({ git, fingerprintGitMeta, runCommand } = await import("./workspace.ts"));
+  ({ git, fingerprintGitMeta, runCommand } = await import("../../src/agent/workspace.ts"));
 });
 
 /** Un vrai dépôt git jetable, avec une remote "origin" bare locale. */

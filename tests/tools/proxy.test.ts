@@ -2,7 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { startInferenceProxy } from "./proxy.ts";
+import { startInferenceProxy } from "../../src/tools/proxy.ts";
 
 /** Petit serveur HTTP jetable qui joue le rôle du "vrai" LM Studio. */
 function startFakeUpstream(): Promise<{

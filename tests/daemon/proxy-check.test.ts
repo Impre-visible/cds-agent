@@ -15,7 +15,7 @@ let warnIfGitProxyNotExported: (
 ) => Promise<void>;
 
 before(async () => {
-  ({ gitProxyConfiguredFor, warnIfGitProxyNotExported } = await import("./proxy-check.ts"));
+  ({ gitProxyConfiguredFor, warnIfGitProxyNotExported } = await import("../../src/daemon/proxy-check.ts"));
 });
 
 /** Un HOME jetable avec un ~/.gitconfig fabriqué à la main. */

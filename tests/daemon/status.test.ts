@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { DaemonStatus } from "./status.ts";
+import { DaemonStatus } from "../../src/daemon/status.ts";
 
 describe("DaemonStatus — §6.5", () => {
   test("aucune tâche en cours au départ, aucun polling encore réussi", () => {

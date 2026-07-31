@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { ShutdownController, drain } from "./shutdown.ts";
-import { TaskQueue } from "./queue.ts";
+import { ShutdownController, drain } from "../../src/daemon/shutdown.ts";
+import { TaskQueue } from "../../src/daemon/queue.ts";
 
 interface Item {
   key: string;

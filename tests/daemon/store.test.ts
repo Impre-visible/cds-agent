@@ -7,10 +7,11 @@ import {
   readFileSync,
   copyFileSync,
   chmodSync,
+  existsSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RequestStore, canProcess } from "./store.ts";
+import { RequestStore, canProcess } from "../../src/daemon/store.ts";
 
 let root: string;
 
@@ -182,7 +183,9 @@ describe("RequestStore — interrupted()", () => {
     store.record("e", 5, "failed");
 
     const interrupted = store.interrupted();
-    const byKey = new Map(interrupted.map((entry) => [entry.key, entry.status]));
+    const byKey = new Map(
+      interrupted.map((entry) => [entry.key, entry.status]),
+    );
 
     assert.equal(byKey.get("a"), "claimed");
     assert.equal(byKey.get("b"), "acked");
@@ -224,7 +227,7 @@ describe("RequestStore — rétrocompatibilité du fichier d'état", () => {
     assert.equal(canProcess(store.statusOf("note:100")), true);
   });
 
-  test("charge le vrai fichier state/processed.jsonl du dépôt (uniquement claimed/acked)", () => {
+  test("charge le vrai fichier state/processed.jsonl (uniquement claimed/acked)", (t) => {
     const source = join(
       import.meta.dirname,
       "..",
@@ -232,17 +235,34 @@ describe("RequestStore — rétrocompatibilité du fichier d'état", () => {
       "state",
       "processed.jsonl",
     );
+
+    if (!existsSync(source)) {
+      t.skip("state/processed.jsonl absent — rien à vérifier");
+      return;
+    }
+
+    const keys = new Set(
+      readFileSync(source, "utf8")
+        .split("\n")
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l).key as string),
+    );
+
+    if (keys.size === 0) {
+      t.skip("state/processed.jsonl vide — rien à vérifier");
+      return;
+    }
+
     const path = freshPath();
     copyFileSync(source, path);
-
     const store = new RequestStore(path);
-    const lines = readFileSync(source, "utf8").split("\n").filter(Boolean);
-    const lastKey = JSON.parse(lines.at(-1) as string).key as string;
 
     // Le fichier réel ne contient que des paires claimed/acked : la
     // dernière entrée de chaque clé doit rester "acked", rejouable.
-    assert.equal(store.statusOf(lastKey), "acked");
-    assert.equal(canProcess(store.statusOf(lastKey)), true);
+    for (const key of keys) {
+      assert.equal(store.statusOf(key), "acked");
+      assert.equal(canProcess(store.statusOf(key)), true);
+    }
   });
 
   test("ignore une ligne corrompue sans faire planter le démarrage", () => {
@@ -283,10 +303,30 @@ describe("RequestStore — compactage (§6.6)", () => {
     finalStatus: "done" | "failed",
   ): string[] {
     return [
-      JSON.stringify({ key, todoId, status: "claimed", at: "2026-01-01T00:00:00.000Z" }),
-      JSON.stringify({ key, todoId, status: "acked", at: "2026-01-01T00:00:01.000Z" }),
-      JSON.stringify({ key, todoId, status: "running", at: "2026-01-01T00:00:02.000Z" }),
-      JSON.stringify({ key, todoId, status: finalStatus, at: "2026-01-01T00:00:03.000Z" }),
+      JSON.stringify({
+        key,
+        todoId,
+        status: "claimed",
+        at: "2026-01-01T00:00:00.000Z",
+      }),
+      JSON.stringify({
+        key,
+        todoId,
+        status: "acked",
+        at: "2026-01-01T00:00:01.000Z",
+      }),
+      JSON.stringify({
+        key,
+        todoId,
+        status: "running",
+        at: "2026-01-01T00:00:02.000Z",
+      }),
+      JSON.stringify({
+        key,
+        todoId,
+        status: finalStatus,
+        at: "2026-01-01T00:00:03.000Z",
+      }),
     ];
   }
 
@@ -343,7 +383,12 @@ describe("RequestStore — compactage (§6.6)", () => {
     }
     // Une demande en plein cycle, jamais terminée.
     lines.push(
-      JSON.stringify({ key: "orphan", todoId: 999, status: "claimed", at: "2026-01-01T00:00:00.000Z" }),
+      JSON.stringify({
+        key: "orphan",
+        todoId: 999,
+        status: "claimed",
+        at: "2026-01-01T00:00:00.000Z",
+      }),
     );
     writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
 
@@ -361,7 +406,12 @@ describe("RequestStore — compactage (§6.6)", () => {
     const lines: string[] = [];
     for (let i = 0; i < 600; i++) {
       lines.push(
-        JSON.stringify({ key: `k:${i}`, todoId: i, status: "claimed", at: "2026-01-01T00:00:00.000Z" }),
+        JSON.stringify({
+          key: `k:${i}`,
+          todoId: i,
+          status: "claimed",
+          at: "2026-01-01T00:00:00.000Z",
+        }),
       );
     }
     writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
@@ -370,7 +420,11 @@ describe("RequestStore — compactage (§6.6)", () => {
     // l'écriture du fichier temporaire mais avant le renommage : un .tmp
     // orphelin (contenu quelconque, potentiellement à moitié écrit), à côté
     // du fichier réel resté, lui, parfaitement intact.
-    writeFileSync(`${path}.compact.tmp`, "{ceci n'est pas une ligne JSON valide", "utf8");
+    writeFileSync(
+      `${path}.compact.tmp`,
+      "{ceci n'est pas une ligne JSON valide",
+      "utf8",
+    );
 
     const store = new RequestStore(path);
     for (let i = 0; i < 600; i++) {
@@ -399,7 +453,12 @@ describe("RequestStore — compactage (§6.6)", () => {
     const lines: string[] = [];
     for (let i = 0; i < 600; i++) {
       lines.push(
-        JSON.stringify({ key: `k:${i}`, todoId: i, status: "claimed", at: "2026-01-01T00:00:00.000Z" }),
+        JSON.stringify({
+          key: `k:${i}`,
+          todoId: i,
+          status: "claimed",
+          at: "2026-01-01T00:00:00.000Z",
+        }),
       );
     }
     const original = `${lines.join("\n")}\n`;

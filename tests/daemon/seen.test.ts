@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { SeenTracker } from "./seen.ts";
+import { SeenTracker } from "../../src/daemon/seen.ts";
 
 /** Horloge falsifiable : chaque test contrôle exactement le temps qui passe, sans vrai setTimeout. */
 function fakeClock(start = 0): { now: () => number; advance: (ms: number) => void } {
