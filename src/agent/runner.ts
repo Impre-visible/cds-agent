@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { config, sanitizedEnv } from "./env.ts";
+import { config, sanitizedEnv } from "../config.ts";
 
 export interface AgentResult {
   code: number | null;

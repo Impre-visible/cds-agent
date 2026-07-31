@@ -1,9 +1,9 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { config } from "./env.ts";
-import { runAgent } from "./agent.ts";
-import { createWorkspace } from "./workspace.ts";
-import type { TaskContext } from "./types.ts";
+import { config } from "../config.ts";
+import { runAgent } from "../agent/runner.ts";
+import { createWorkspace } from "../agent/workspace.ts";
+import type { TaskContext } from "../types.ts";
 import { validateRemarks, type ValidatedRemark } from "./diff.ts";
 
 export interface Remark {
@@ -67,13 +67,20 @@ export async function runReview(
 
   try {
     // Le fichier de sortie ne doit jamais entrer dans un commit.
-    writeFileSync(join(workspace.repo, ".git", "info", "exclude"), `\n${OUTPUT_FILE}\n`, {
-      flag: "a",
-    });
+    writeFileSync(
+      join(workspace.repo, ".git", "info", "exclude"),
+      `\n${OUTPUT_FILE}\n`,
+      {
+        flag: "a",
+      },
+    );
 
     const result = await runAgent(workspace.repo, buildPrompt(context));
 
-    if (result.timedOut) throw new Error(`agent interrompu après ${config.agentTimeoutMs / 60_000} min`);
+    if (result.timedOut)
+      throw new Error(
+        `agent interrompu après ${config.agentTimeoutMs / 60_000} min`,
+      );
 
     let raw: string | null = null;
     let channel = "fichier";
@@ -84,20 +91,27 @@ export async function runReview(
       channel = "stdout";
     }
     if (!raw) {
-      throw new Error(`aucun JSON exploitable, ni fichier ni stdout (code ${result.code})`);
+      throw new Error(
+        `aucun JSON exploitable, ni fichier ni stdout (code ${result.code})`,
+      );
     }
     console.log(`    JSON récupéré via ${channel}`);
 
     const parsed = JSON.parse(raw) as { remarks?: unknown };
-    if (!Array.isArray(parsed.remarks)) throw new Error(`JSON sans tableau "remarks"`);
+    if (!Array.isArray(parsed.remarks))
+      throw new Error(`JSON sans tableau "remarks"`);
 
     const { valid, rejected } = validateRemarks(
       parsed.remarks as Remark[],
       context.files,
     );
-    for (const reason of rejected) console.log(`    remarque rejetée : ${reason}`);
+    for (const reason of rejected)
+      console.log(`    remarque rejetée : ${reason}`);
 
-    return { remarks: valid.slice(0, config.maxRemarks), durationMs: result.durationMs };
+    return {
+      remarks: valid.slice(0, config.maxRemarks),
+      durationMs: result.durationMs,
+    };
   } finally {
     workspace.dispose();
   }

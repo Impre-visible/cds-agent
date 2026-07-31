@@ -1,4 +1,4 @@
-import { config } from "./env.ts";
+import { config } from "../config.ts";
 import type {
   GitLabUser,
   Note,
@@ -7,7 +7,7 @@ import type {
   MergeRequestDetail,
   DiffFile,
   IssueDetail,
-} from "./types.ts";
+} from "../types.ts";
 
 export class GitLabError extends Error {
   constructor(

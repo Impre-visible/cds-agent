@@ -5,15 +5,13 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "step1": "tsx src/step1-watch.ts",
-    "step2": "tsx src/step2-ack.ts",
-    "dev": "tsx src/daemon.ts",
+    "dev": "tsx src/daemon/index.ts",
     "check": "tsc --noEmit",
-    "context": "tsx src/dump-context.ts",
-    "review": "tsx src/dry-review.ts",
-    "proxy": "tsx src/proxy.ts",
-    "publish": "tsx src/dry-publish.ts",
-    "implement": "tsx src/dry-implement.ts"
+    "context": "tsx src/tools/dump-context.ts",
+    "review": "tsx src/tools/dry-review.ts",
+    "proxy": "tsx src/tools/proxy.ts",
+    "publish": "tsx src/tools/dry-publish.ts",
+    "implement": "tsx src/tools/dry-implement.ts"
   },
   "keywords": [],
   "author": "",

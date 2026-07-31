@@ -1,11 +1,11 @@
-import { config } from "./env.ts";
-import { gitlab, GitLabError } from "./gitlab.ts";
+import { config } from "../config.ts";
+import { gitlab, GitLabError } from "../gitlab/client.ts";
 import { RequestStore } from "./store.ts";
-import type { AgentRequest, GitLabUser, Todo } from "./types.ts";
+import type { AgentRequest, GitLabUser, Todo } from "../types.ts";
 import { buildRequest, defuseMentions } from "./request.ts";
 import { authorize } from "./authorize.ts";
 import { TaskQueue } from "./queue.ts";
-import { runTask } from "./task.ts";
+import { runTask } from "../tasks/router.ts";
 
 const store = new RequestStore(config.stateFile);
 let bot: GitLabUser;
@@ -38,10 +38,15 @@ async function finishTodo(todoId: number): Promise<void> {
     return;
   }
   const outcome = await gitlab.markTodoDone(todoId);
-  console.log(`    to-do ${outcome === "done" ? "marqué done" : "déjà done côté GitLab"}`);
+  console.log(
+    `    to-do ${outcome === "done" ? "marqué done" : "déjà done côté GitLab"}`,
+  );
 }
 
-async function acknowledge(request: AgentRequest, position: number): Promise<void> {
+async function acknowledge(
+  request: AgentRequest,
+  position: number,
+): Promise<void> {
   const { projectId, kind, iid, noteId } = request;
 
   try {
@@ -102,12 +107,17 @@ async function handle(todo: Todo): Promise<void> {
 }
 
 async function collectTodos(): Promise<Todo[]> {
-  const [pending, done] = await Promise.all([gitlab.pendingTodos(), gitlab.doneTodos()]);
+  const [pending, done] = await Promise.all([
+    gitlab.pendingTodos(),
+    gitlab.doneTodos(),
+  ]);
 
   // Un to-do peut avoir été auto-résolu par une écriture du bot avant
   // qu'on l'ait lu. On rattrape donc les « done » récents.
   const cutoff = Date.now() - config.lookbackMs;
-  const recentDone = done.filter((todo) => Date.parse(todo.created_at) >= cutoff);
+  const recentDone = done.filter(
+    (todo) => Date.parse(todo.created_at) >= cutoff,
+  );
 
   const byId = new Map<number, Todo>();
   for (const todo of [...pending, ...recentDone]) byId.set(todo.id, todo);
@@ -134,7 +144,9 @@ async function poll(): Promise<void> {
       examined.add(todo.id);
     } catch (error) {
       // Pas de marquage : la demande sera réessayée au prochain cycle.
-      console.error(`  to-do #${todo.id} en échec : ${(error as Error).message}`);
+      console.error(
+        `  to-do #${todo.id} en échec : ${(error as Error).message}`,
+      );
     }
   }
 }

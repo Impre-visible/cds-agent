@@ -1,9 +1,9 @@
-import { config } from "./env.ts";
-import { gitlab, resourceKind } from "./gitlab.ts";
-import { buildContext } from "./context.ts";
-import { parseDiff, validateRemarks } from "./diff.ts";
-import { publishReview } from "./publish.ts";
-import type { AgentRequest } from "./types.ts";
+import { config } from "../config.ts";
+import { gitlab, resourceKind } from "../gitlab/client.ts";
+import { buildContext } from "../tasks/context.ts";
+import { parseDiff, validateRemarks } from "../tasks/diff.ts";
+import { publishReview } from "../tasks/publish.ts";
+import type { AgentRequest } from "../types.ts";
 
 const iid = Number(process.argv[2]);
 if (!iid) {

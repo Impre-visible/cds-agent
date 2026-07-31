@@ -1,9 +1,9 @@
-import { config } from "./env.ts";
-import { runAgent } from "./agent.ts";
+import { config } from "../config.ts";
+import { runAgent } from "../agent/runner.ts";
 import { collectChanges } from "./guard.ts";
-import { gitlab } from "./gitlab.ts";
-import { createWorkspace, git, runCommand } from "./workspace.ts";
-import type { TaskContext } from "./types.ts";
+import { gitlab } from "../gitlab/client.ts";
+import { createWorkspace, git, runCommand } from "../agent/workspace.ts";
+import type { TaskContext } from "../types.ts";
 
 export interface ImplementResult {
   status: "pushed" | "rejected" | "no-change" | "tests-red";

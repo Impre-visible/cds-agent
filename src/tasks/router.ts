@@ -1,9 +1,9 @@
 import { buildContext } from "./context.ts";
-import { gitlab } from "./gitlab.ts";
+import { gitlab } from "../gitlab/client.ts";
 import { publishReview } from "./publish.ts";
 import { runReview } from "./review.ts";
 import { runImplement } from "./implement.ts";
-import type { AgentRequest } from "./types.ts";
+import type { AgentRequest } from "../types.ts";
 
 type Intent = "review" | "implement" | "unknown";
 

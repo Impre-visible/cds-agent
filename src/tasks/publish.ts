@@ -1,6 +1,6 @@
-import { gitlab, GitLabError } from "./gitlab.ts";
+import { gitlab, GitLabError } from "../gitlab/client.ts";
 import type { ValidatedRemark } from "./diff.ts";
-import type { DiffRefs, TaskContext } from "./types.ts";
+import type { DiffRefs, TaskContext } from "../types.ts";
 
 export type Placement = "line" | "file" | "general";
 
@@ -12,7 +12,10 @@ export interface PublishOutcome {
 
 async function resolveShas(context: TaskContext): Promise<DiffRefs> {
   // La doc recommande les versions : le premier élément est la plus récente.
-  const [latest] = await gitlab.mergeRequestVersions(context.projectId, context.targetIid);
+  const [latest] = await gitlab.mergeRequestVersions(
+    context.projectId,
+    context.targetIid,
+  );
   if (latest?.head_commit_sha) {
     return {
       base_sha: latest.base_commit_sha,
@@ -59,8 +62,11 @@ export async function publishReview(
         outcomes.push({ message: remark.message, placement: "line" });
         continue;
       } catch (error) {
-        const detail = error instanceof GitLabError ? `${error.status}` : String(error);
-        console.log(`    ligne ${remark.position.newLine} refusée (${detail}), repli fichier`);
+        const detail =
+          error instanceof GitLabError ? `${error.status}` : String(error);
+        console.log(
+          `    ligne ${remark.position.newLine} refusée (${detail}), repli fichier`,
+        );
       }
     }
 
@@ -73,8 +79,11 @@ export async function publishReview(
       outcomes.push({ message: remark.message, placement: "file" });
       continue;
     } catch (error) {
-      const detail = error instanceof GitLabError ? `${error.status}` : String(error);
-      console.log(`    fichier ${remark.file.new_path} refusé (${detail}), repli général`);
+      const detail =
+        error instanceof GitLabError ? `${error.status}` : String(error);
+      console.log(
+        `    fichier ${remark.file.new_path} refusé (${detail}), repli général`,
+      );
     }
 
     // Niveau 3 — regroupé en commentaire général.
@@ -85,12 +94,19 @@ export async function publishReview(
     const summary = [
       `🤖 Remarques non positionnables (${orphans.length}) :`,
       "",
-      ...orphans.map((r) => `- \`${r.file.new_path}\` — **${r.severity}** ${r.message}`),
+      ...orphans.map(
+        (r) => `- \`${r.file.new_path}\` — **${r.severity}** ${r.message}`,
+      ),
       "",
       "<sub>cds-agent</sub>",
     ].join("\n");
 
-    await gitlab.createNote(context.projectId, "merge_requests", context.targetIid, summary);
+    await gitlab.createNote(
+      context.projectId,
+      "merge_requests",
+      context.targetIid,
+      summary,
+    );
     for (const remark of orphans) {
       outcomes.push({ message: remark.message, placement: "general" });
     }

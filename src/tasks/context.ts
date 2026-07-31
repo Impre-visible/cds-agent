@@ -1,5 +1,5 @@
-import { config } from "./env.ts";
-import { gitlab } from "./gitlab.ts";
+import { config } from "../config.ts";
+import { gitlab } from "../gitlab/client.ts";
 import type {
   AgentRequest,
   DiffFile,
@@ -7,7 +7,7 @@ import type {
   IssueDetail,
   LinkedIssue,
   TaskContext,
-} from "./types.ts";
+} from "../types.ts";
 
 const DIFF_REFS_RETRIES = 5;
 const DIFF_REFS_DELAY_MS = 2_000;

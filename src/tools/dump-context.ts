@@ -1,8 +1,8 @@
 import { writeFileSync } from "node:fs";
-import { config } from "./env.ts";
-import { gitlab, resourceKind } from "./gitlab.ts";
-import { buildContext } from "./context.ts";
-import type { AgentRequest } from "./types.ts";
+import { config } from "../config.ts";
+import { gitlab, resourceKind } from "../gitlab/client.ts";
+import { buildContext } from "../tasks/context.ts";
+import type { AgentRequest } from "../types.ts";
 
 const [kindArg, iidArg] = process.argv.slice(2);
 if (!kindArg || !iidArg) {
@@ -33,7 +33,9 @@ const request: AgentRequest = {
 
 const context = await buildContext(request);
 
-console.log(`cible      : ${context.projectPath} ${context.targetKind} ${context.targetIid}`);
+console.log(
+  `cible      : ${context.projectPath} ${context.targetKind} ${context.targetIid}`,
+);
 console.log(`titre      : ${context.targetTitle}`);
 console.log(`diff_refs  : ${context.diffRefs ? "OK" : "ABSENT ⚠︎"}`);
 if (context.diffRefs) {
@@ -43,9 +45,13 @@ if (context.diffRefs) {
 }
 console.log(`fichiers   : ${context.files.length}`);
 for (const file of context.files) {
-  console.log(`  ${file.new_path} (${file.diff.split("\n").length} lignes de diff)`);
+  console.log(
+    `  ${file.new_path} (${file.diff.split("\n").length} lignes de diff)`,
+  );
 }
-console.log(`ticket lié : ${context.linkedIssue ? `#${context.linkedIssue.iid} (${context.linkedIssue.comments.length} commentaires)` : "aucun"}`);
+console.log(
+  `ticket lié : ${context.linkedIssue ? `#${context.linkedIssue.iid} (${context.linkedIssue.comments.length} commentaires)` : "aucun"}`,
+);
 
 writeFileSync("./context-dump.json", JSON.stringify(context, null, 2), "utf8");
 console.log(`\nJSON complet : ./context-dump.json`);

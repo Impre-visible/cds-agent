@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { config, gitCredentialEnv, sanitizedEnv } from "./env.ts";
+import { config, gitCredentialEnv, sanitizedEnv } from "../config.ts";
 
 export interface Workspace {
   root: string;

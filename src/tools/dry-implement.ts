@@ -1,8 +1,8 @@
-import { config } from "./env.ts";
-import { gitlab, resourceKind } from "./gitlab.ts";
-import { buildContext } from "./context.ts";
-import { runImplement } from "./implement.ts";
-import type { AgentRequest } from "./types.ts";
+import { config } from "../config.ts";
+import { gitlab, resourceKind } from "../gitlab/client.ts";
+import { buildContext } from "../tasks/context.ts";
+import { runImplement } from "../tasks/implement.ts";
+import type { AgentRequest } from "../types.ts";
 
 const iid = Number(process.argv[2]);
 const branch = process.argv[3];

@@ -1,4 +1,4 @@
-import type { DiffFile } from "./types.ts";
+import type { DiffFile } from "../types.ts";
 
 export interface LinePosition {
   newLine: number;
@@ -45,7 +45,9 @@ export function validateRemarks(
   files: DiffFile[],
 ): { valid: ValidatedRemark[]; rejected: string[] } {
   const byPath = new Map(files.map((file) => [file.new_path, file]));
-  const lineIndex = new Map(files.map((file) => [file.new_path, parseDiff(file.diff)]));
+  const lineIndex = new Map(
+    files.map((file) => [file.new_path, parseDiff(file.diff)]),
+  );
   const valid: ValidatedRemark[] = [];
   const rejected: string[] = [];
 
