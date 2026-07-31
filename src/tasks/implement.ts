@@ -2,7 +2,12 @@ import { config } from "../config.ts";
 import { runAgent } from "../agent/runner.ts";
 import { collectChanges } from "./guard.ts";
 import { gitlab } from "../gitlab/client.ts";
-import { createWorkspace, git, runCommand } from "../agent/workspace.ts";
+import {
+  createWorkspace,
+  fingerprintGitMeta,
+  git,
+  runCommand,
+} from "../agent/workspace.ts";
 import type { TaskContext } from "../types.ts";
 import { basename, resolve, join } from "node:path";
 import { writeFileSync } from "node:fs";
@@ -73,6 +78,12 @@ export async function runImplement(
       };
     }
 
+    // Référence prise juste avant de lâcher l'agent dans le dépôt — après
+    // install et après la suite de référence, qui peuvent légitimement
+    // toucher à .git/hooks (un script "prepare" à la husky, par exemple).
+    // C'est cet état-là, pas celui du clone, qui sert de témoin.
+    const gitMetaBaseline = fingerprintGitMeta(repo);
+
     if (config.fakeAgentScript) {
       console.log(`    agent simulé : ${config.fakeAgentScript}`);
 
@@ -103,6 +114,21 @@ export async function runImplement(
       await runAgentInSandbox(repo, workspace.meta, context.projectPath);
     } else {
       await runAgent(repo, buildPrompt(context));
+    }
+
+    // On revérifie AVANT la moindre commande git côté hôte, y compris ce
+    // `git status` : une clé comme core.fsmonitor s'exécute dès le status,
+    // pas seulement au commit ou au push. Si .git/config ou .git/hooks a
+    // bougé pendant que l'agent tournait, on s'arrête là — aucune commande
+    // git n'est lancée sur ce dépôt, rien ne sera poussé.
+    if (fingerprintGitMeta(repo) !== gitMetaBaseline) {
+      return {
+        status: "rejected",
+        detail:
+          "altération de .git/config ou des hooks détectée après l'exécution de l'agent : par sécurité, aucune commande git supplémentaire n'a été lancée et rien n'a été poussé",
+        files: [],
+        durationMs: Date.now() - started,
+      };
     }
 
     const { paths, offending } = collectChanges(

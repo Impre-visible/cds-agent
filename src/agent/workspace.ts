@@ -1,9 +1,32 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config, gitCredentialEnv, sanitizedEnv } from "../config.ts";
 import { imageFor, runInSandbox } from "./sandbox.ts";
+
+/**
+ * L'agent tourne dans le clone avec un accès en écriture complet à .git/ :
+ * il peut y déposer un hook (pre-commit, post-checkout, prepare-commit-msg…)
+ * exécuté par le prochain `git` lancé sur l'hôte. On neutralise ça pour
+ * toute invocation, en pointant core.hooksPath vers un répertoire vide.
+ *
+ * mkdtemp et pas un chemin fixe du type /tmp/cds-agent-no-hooks : un nom
+ * prévisible dans un répertoire partagé, c'est justement l'endroit où un
+ * autre utilisateur de la machine peut déposer à l'avance les hooks qui
+ * seront exécutés. mkdtemp donne un nom aléatoire et un répertoire en 0700
+ * dont nous sommes seuls propriétaires.
+ */
+const NO_HOOKS_DIR = mkdtempSync(join(tmpdir(), "cds-agent-nohooks-"));
+const NO_HOOKS_ARGS = ["-c", `core.hooksPath=${NO_HOOKS_DIR}`];
 
 export interface Workspace {
   root: string;
@@ -31,7 +54,16 @@ export function createWorkspace(
   try {
     execFileSync(
       "git",
-      ["clone", "--quiet", ...depthArgs, "--branch", branch, url, repo],
+      [
+        ...NO_HOOKS_ARGS,
+        "clone",
+        "--quiet",
+        ...depthArgs,
+        "--branch",
+        branch,
+        url,
+        repo,
+      ],
       {
         stdio: "pipe",
         env: { ...sanitizedEnv(), ...gitCredentialEnv() },
@@ -73,7 +105,7 @@ export function git(
   args: string[],
   authenticated = false,
 ): string {
-  return execFileSync("git", args, {
+  return execFileSync("git", [...NO_HOOKS_ARGS, ...args], {
     cwd: repo,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -81,6 +113,61 @@ export function git(
       ? { ...sanitizedEnv(), ...gitCredentialEnv() }
       : sanitizedEnv(),
   });
+}
+
+/**
+ * Empreinte de .git/config et .git/hooks : les deux portes par lesquelles
+ * l'agent peut obtenir une exécution de code sur l'hôte (clés de config
+ * comme core.pager/core.fsmonitor/filter.<n>.clean, ou un hook classique
+ * une fois core.hooksPath contourné d'une façon qu'on n'aurait pas prévue).
+ * Prise juste avant que l'agent ne travaille et revérifiée juste après, elle
+ * permet de détecter toute altération — y compris celles que la neutralisation
+ * des hooks ci-dessus ne couvre pas (core.fsmonitor déclenche déjà sur un
+ * simple `git status`, avant tout add/commit/push).
+ *
+ * Calculée uniquement via le système de fichiers, jamais en invoquant git :
+ * tant qu'on n'a pas confirmé que rien n'a bougé, on ne veut lancer aucune
+ * commande git sur un dépôt potentiellement piégé.
+ */
+export function fingerprintGitMeta(repo: string): string {
+  const hash = createHash("sha256");
+
+  hash.update(readTextSafe(join(repo, ".git", "config")));
+
+  const hooksDir = join(repo, ".git", "hooks");
+  for (const name of listSafe(hooksDir)) {
+    const path = join(hooksDir, name);
+    hash.update(name);
+    hash.update(readTextSafe(path));
+    // Le bit exécutable est ce qui transforme un fichier inerte en hook actif.
+    hash.update(isExecutableSafe(path) ? "x" : "-");
+  }
+
+  return hash.digest("hex");
+}
+
+function readTextSafe(path: string): string {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function listSafe(dir: string): string[] {
+  try {
+    return readdirSync(dir).sort();
+  } catch {
+    return [];
+  }
+}
+
+function isExecutableSafe(path: string): boolean {
+  try {
+    return (statSync(path).mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
 }
 
 export interface CommandResult {

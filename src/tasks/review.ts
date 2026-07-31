@@ -68,6 +68,13 @@ export async function runReview(
   const workspace = createWorkspace(context.projectPath, sourceBranch);
 
   try {
+    // Contrairement à implement.ts, aucune commande git n'est relancée côté
+    // hôte après que l'agent ait tourné dans ce workspace (pas d'add/commit/
+    // push : seul le fichier OUTPUT_FILE est relu, en pur fs). L'agent peut
+    // toujours écrire un hook ou modifier .git/config, mais rien ici ne les
+    // exécute. Si ce fichier gagne un jour un appel à git() après l'exécution
+    // de l'agent, il faudra lui appliquer la même vérification de fingerprint
+    // qu'implement.ts (voir fingerprintGitMeta dans agent/workspace.ts).
     // Le fichier de sortie ne doit jamais entrer dans un commit.
     writeFileSync(
       join(workspace.repo, ".git", "info", "exclude"),
