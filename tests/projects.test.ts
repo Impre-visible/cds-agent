@@ -13,7 +13,7 @@ import {
   type ProjectsBaseline,
 } from "../src/projects.ts";
 import { authorize } from "../src/daemon/authorize.ts";
-import { DEFAULT_CAPABILITIES } from "../src/tasks/guard.ts";
+import { DEFAULT_CAPABILITIES, isWritablePath } from "../src/tasks/guard.ts";
 import type { AgentRequest } from "../src/types.ts";
 
 const BASELINE: ProjectsBaseline = {
@@ -139,6 +139,233 @@ describe("parseProjectsFile — validation", () => {
       () => parseProjectsFile({ projects: { "g/p": { testDirectories: "e2e" } } }),
       /tableau/,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Chantier "capacités par motifs" — restaure l'entre-deux entre writeTests
+// (chemins de test uniquement) et writeBusinessCode (dépôt entier) que
+// l'ancien AGENT_CAPABILITIES exprimait via write:src/**|lib/**.
+// ---------------------------------------------------------------------------
+describe("mergeRequest.writablePaths — parsing et formedness des motifs", () => {
+  test("un projet avec writeTests: true et des motifs valides est accepté", () => {
+    assert.doesNotThrow(() =>
+      parseProjectsFile({
+        projects: {
+          "g/p": {
+            capabilities: {
+              mergeRequest: { writeTests: true, writablePaths: ["src/generated/**", "docs/*.md"] },
+            },
+          },
+        },
+      }),
+    );
+  });
+
+  test("writablePaths doit être un tableau de chaînes non vides", () => {
+    assert.throws(
+      () =>
+        parseProjectsFile({
+          projects: { "g/p": { capabilities: { mergeRequest: { writeTests: true, writablePaths: "src/**" } } } },
+        }),
+      /tableau/,
+    );
+  });
+
+  test("un motif absolu (commence par \"/\") est rejeté en le citant", () => {
+    assert.throws(
+      () =>
+        parseProjectsFile({
+          projects: {
+            "g/p": { capabilities: { mergeRequest: { writeTests: true, writablePaths: ["/src/**"] } } },
+          },
+        }),
+      (error: Error) => {
+        assert.match(error.message, /motif mal formé/);
+        assert.match(error.message, /\/src\/\*\*/);
+        return true;
+      },
+    );
+  });
+
+  test('un motif avec un composant "." ou ".." est rejeté', () => {
+    assert.throws(
+      () =>
+        parseProjectsFile({
+          projects: {
+            "g/p": {
+              capabilities: { mergeRequest: { writeTests: true, writablePaths: ["src/../etc/**"] } },
+            },
+          },
+        }),
+      /motif mal formé/,
+    );
+  });
+
+  test("un motif avec un caractère hors du sous-ensemble glob supporté (\"?\") est rejeté", () => {
+    assert.throws(
+      () =>
+        parseProjectsFile({
+          projects: {
+            "g/p": { capabilities: { mergeRequest: { writeTests: true, writablePaths: ["src/foo?.ts"] } } },
+          },
+        }),
+      /motif mal formé/,
+    );
+  });
+
+  test("writablePaths mal orthographié (\"writablePath\") échoue en le nommant, comme toute clé inconnue", () => {
+    assert.throws(
+      () =>
+        parseProjectsFile({
+          projects: { "g/p": { capabilities: { mergeRequest: { writablePath: ["src/**"] } } } },
+        }),
+      /clé inconnue ".*writablePath"/,
+    );
+  });
+});
+
+describe("mergeRequest.writablePaths — combinaisons incohérentes rejetées au chargement", () => {
+  test("writeBusinessCode: true ET des motifs non vides, dans le même bloc : rejeté", () => {
+    assert.throws(
+      () =>
+        parseProjectsFile({
+          projects: {
+            "g/p": {
+              capabilities: {
+                mergeRequest: { writeBusinessCode: true, writeTests: true, writablePaths: ["src/**"] },
+              },
+            },
+          },
+        }),
+      (error: Error) => {
+        assert.match(error.message, /incohérent/);
+        assert.match(error.message, /writeBusinessCode/);
+        return true;
+      },
+    );
+  });
+
+  test("writeBusinessCode dans defaults, motifs dans le projet (croisement entre les deux blocs) : rejeté aussi", () => {
+    assert.throws(
+      () =>
+        parseProjectsFile({
+          defaults: { capabilities: { mergeRequest: { writeBusinessCode: true } } },
+          projects: {
+            "g/p": { capabilities: { mergeRequest: { writeTests: true, writablePaths: ["src/**"] } } },
+          },
+        }),
+      /incohérent/,
+    );
+  });
+
+  test("motifs dans defaults, writeBusinessCode dans le projet (l'autre sens du croisement) : rejeté", () => {
+    assert.throws(
+      () =>
+        parseProjectsFile({
+          defaults: { capabilities: { mergeRequest: { writeTests: true, writablePaths: ["src/**"] } } },
+          projects: {
+            "g/p": { capabilities: { mergeRequest: { writeBusinessCode: true } } },
+          },
+        }),
+      /incohérent/,
+    );
+  });
+
+  test("des motifs non vides ET writeTests: false : rejeté (les motifs élargissent toujours aussi les tests)", () => {
+    assert.throws(
+      () =>
+        parseProjectsFile({
+          projects: {
+            "g/p": {
+              capabilities: { mergeRequest: { writeTests: false, writablePaths: ["src/**"] } },
+            },
+          },
+        }),
+      (error: Error) => {
+        assert.match(error.message, /incohérent/);
+        assert.match(error.message, /writeTests/);
+        return true;
+      },
+    );
+  });
+
+  test("des motifs non vides sans writeTests déclaré nulle part (défaut false hérité) : rejeté aussi", () => {
+    assert.throws(
+      () =>
+        parseProjectsFile({
+          projects: { "g/p": { capabilities: { mergeRequest: { writablePaths: ["src/**"] } } } },
+        }),
+      /incohérent/,
+    );
+  });
+
+  test("writeBusinessCode seul (sans motifs) reste accepté : pas de régression sur le cas déjà couvert", () => {
+    assert.doesNotThrow(() =>
+      parseProjectsFile({
+        projects: { "g/p": { capabilities: { mergeRequest: { writeBusinessCode: true } } } },
+      }),
+    );
+  });
+
+  test("« defaults » seul, déjà incohérent, échoue même sans aucun projet déclaré qui en hérite tel quel", () => {
+    assert.throws(
+      () =>
+        parseProjectsFile({
+          defaults: {
+            capabilities: { mergeRequest: { writeBusinessCode: true, writablePaths: ["src/**"] } },
+          },
+          projects: {},
+        }),
+      /defaults\.capabilities\.mergeRequest/,
+    );
+  });
+});
+
+describe("resolveProject / repoCapabilitiesFor — motifs bout en bout", () => {
+  test("writeTests + motifs : resolveProject reflète les motifs, repoCapabilitiesFor les traduit fidèlement", () => {
+    const file = parseProjectsFile({
+      projects: {
+        "g/p": {
+          capabilities: {
+            mergeRequest: { writeTests: true, writablePaths: ["src/generated/**"], pushToSourceBranch: true },
+          },
+        },
+      },
+    });
+    const resolved = resolveProject(file, "g/p", BASELINE)!;
+    assert.deepEqual(resolved.capabilities.mergeRequest.writablePaths, ["src/generated/**"]);
+
+    const capabilities = repoCapabilitiesFor(resolved.capabilities.mergeRequest);
+    assert.deepEqual(capabilities, {
+      writablePaths: ["src/generated/**"],
+      publishMode: "source-branch",
+    });
+
+    // Bout en bout avec isWritablePath (tasks/guard.ts) : le motif élargit
+    // précisément, les chemins de test restent accordés en plus, et le
+    // rejet des composants "."/".." reste inconditionnel — même invariant
+    // que testé isolément dans guard.test.ts, vérifié ici via la vraie
+    // capacité produite par la configuration, pas un objet fabriqué à la main.
+    assert.equal(isWritablePath("src/generated/schema.ts", capabilities), true);
+    assert.equal(isWritablePath("tests/foo.test.ts", capabilities), true);
+    assert.equal(isWritablePath("src/server.ts", capabilities), false);
+    assert.equal(isWritablePath("src/generated/../../etc/passwd", capabilities), false);
+  });
+
+  test("un projet qui ne déclare pas de motifs garde le comportement inchangé (tableau vide, tests-only)", () => {
+    const file = parseProjectsFile({
+      projects: { "g/p": { capabilities: { mergeRequest: { writeTests: true } } } },
+    });
+    const resolved = resolveProject(file, "g/p", BASELINE)!;
+    assert.deepEqual(resolved.capabilities.mergeRequest.writablePaths, []);
+    assert.deepEqual(repoCapabilitiesFor(resolved.capabilities.mergeRequest).writablePaths, "tests-only");
+  });
+
+  test("projet sans capacités déclarées du tout : writablePaths résolu à [] (fail-closed), pas undefined", () => {
+    const minimal = parseProjectsFile({ projects: { "g/p": { users: ["alice"] } } });
+    const resolved = resolveProject(minimal, "g/p", BASELINE)!;
+    assert.deepEqual(resolved.capabilities.mergeRequest.writablePaths, []);
   });
 });
 

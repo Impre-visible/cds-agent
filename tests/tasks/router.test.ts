@@ -159,11 +159,23 @@ describe("detectIntent (§6.9)", () => {
 describe("intentRefusalReason (chantier « projects.json »)", () => {
   const ALL_GRANTED = {
     issue: { review: true, createMergeRequest: true, writeTests: true, writeBusinessCode: true },
-    mergeRequest: { review: true, writeTests: true, writeBusinessCode: true, pushToSourceBranch: true },
+    mergeRequest: {
+      review: true,
+      writeTests: true,
+      writeBusinessCode: true,
+      pushToSourceBranch: true,
+      writablePaths: [],
+    },
   };
   const NOTHING_GRANTED = {
     issue: { review: false, createMergeRequest: false, writeTests: false, writeBusinessCode: false },
-    mergeRequest: { review: false, writeTests: false, writeBusinessCode: false, pushToSourceBranch: false },
+    mergeRequest: {
+      review: false,
+      writeTests: false,
+      writeBusinessCode: false,
+      pushToSourceBranch: false,
+      writablePaths: [],
+    },
   };
 
   test("review permise pour une MR : null (aucun refus)", () => {

@@ -1,0 +1,7 @@
+{"key":"note:100001","todoId":501,"status":"claimed","at":"2024-03-01T09:00:00.000Z"}
+{"key":"note:100001","todoId":501,"status":"acked","at":"2024-03-01T09:00:01.000Z"}
+{"key":"desc:42:issues:7","todoId":502,"status":"claimed","at":"2024-03-01T09:05:00.000Z"}
+{"key":"desc:42:issues:7","todoId":502,"status":"acked","at":"2024-03-01T09:05:02.000Z"}
+{ceci n'est pas une ligne JSON valide (tronquée par un ancien bug d'écriture)
+{"key":"note:100002","todoId":503,"status":"claimed","at":"2024-03-01T09:10:00.000Z"}
+{"key":"note:100002","todoId":503,"status":"acked","at":"2024-03-01T09:10:01.000Z"}

@@ -162,11 +162,13 @@ export interface RepoCapabilities {
    * contourné par erreur.
    * string[] : motifs glob supplémentaires (voir globToRegExp plus bas),
    * modifiables EN PLUS des chemins de test — un élargissement ciblé, sans
-   * aller jusqu'à "all". N'a plus de source de configuration depuis le
-   * chantier "projects.json" (le schéma validé par le propriétaire n'expose
-   * que des booléens, voir le rapport de la tâche) : conservé ici pour ne
-   * pas casser un appelant direct de isWritablePath/collectChanges qui
-   * construirait encore ce genre de capacité à la main.
+   * aller jusqu'à "all". C'est l'entre-deux entre "tests-only" et "all" que
+   * réclamait l'ancien AGENT_CAPABILITIES sous la forme write:<glob> ;
+   * chantier "capacités par motifs" (voir src/projects.ts::
+   * MergeRequestCapabilities.writablePaths et ::repoCapabilitiesFor) : de
+   * nouveau alimenté depuis projects.json, un motif étant TOUJOURS additif
+   * aux chemins de test (jamais un remplacement) — voir isWritablePath
+   * ci-dessous.
    */
   writablePaths: "tests-only" | "all" | "none" | string[];
   /**
@@ -268,6 +270,42 @@ function globToRegExp(pattern: string): RegExp {
     source += /[.+^${}()|[\]\\]/.test(char) ? `\\${char}` : char;
   }
   return new RegExp(`^${source}$`);
+}
+
+// Ensemble des caractères qu'un motif de projects.json (mergeRequest.
+// writablePaths) a le droit de contenir : lettres, chiffres, et la poignée de
+// signes de ponctuation qu'un chemin de dépôt et globToRegExp savent
+// interpréter ("/" pour les segments, "-"/"_"/"." pour un nom de fichier,
+// "*" pour les deux jokers). Tout le reste ("?", "[", "{", espace...) n'est
+// PAS rejeté par globToRegExp elle-même (elle ne lève jamais, voir son
+// commentaire) : un "?" littéral, par exemple, traverserait tel quel dans la
+// RegExp construite et y agirait comme un quantificateur regex — un piège
+// silencieux, pas une erreur. isWellFormedWritablePathPattern ci-dessous
+// referme ce piège en amont, à la validation de projects.json, plutôt que de
+// laisser un motif mal formé produire un filtre qui ne se comporte pas comme
+// annoncé.
+const WRITABLE_PATH_PATTERN_CHARS = /^[A-Za-z0-9_./*-]+$/;
+
+/**
+ * Un motif bien formé pour `RepoCapabilities.writablePaths` : non vide,
+ * jamais absolu (les chemins produits par `git status --porcelain` sont
+ * toujours relatifs à la racine du dépôt — un motif commençant par "/" ne
+ * matcherait donc jamais rien, une configuration morte plutôt qu'une erreur
+ * visible), sans composant "." ou ".." (même raison que hasUnsafeSegments
+ * ci-dessus : un motif de ce genre ne peut de toute façon jamais matcher un
+ * chemin réel, puisque ces chemins-là sont rejetés avant même d'atteindre la
+ * capacité — l'accepter en configuration donnerait une fausse impression de
+ * portée), et composé uniquement des caractères que globToRegExp interprète
+ * comme prévu (voir WRITABLE_PATH_PATTERN_CHARS ci-dessus).
+ *
+ * Exportée pour que src/projects.ts (validation de projects.json) rejette un
+ * motif mal formé au chargement du fichier, en le nommant — jamais un motif
+ * silencieusement inopérant ou, pire, mal interprété.
+ */
+export function isWellFormedWritablePathPattern(pattern: string): boolean {
+  if (!pattern || pattern.startsWith("/")) return false;
+  if (hasUnsafeSegments(pattern)) return false;
+  return WRITABLE_PATH_PATTERN_CHARS.test(pattern);
 }
 
 /**

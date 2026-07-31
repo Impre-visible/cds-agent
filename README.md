@@ -295,6 +295,15 @@ fichier à jour là où le daemon tourne.
       "commands": { "test": "pytest -q" },
       "docker":   { "image": "python:3.12-slim" },
       "testDirectories": ["e2e", "acceptance"]
+    },
+    "groupe/depot-c": {
+      "users": ["alice"],
+      "capabilities": {
+        "mergeRequest": {
+          "review": true, "writeTests": true,
+          "writablePaths": ["src/generated/**", "docs/*.md"]
+        }
+      }
     }
   }
 }
@@ -320,6 +329,25 @@ que dans l'exemple ci-dessus) :
   `src/tasks/guard.ts::isTestPath`, plus `testDirectories`).
 - **`writeBusinessCode`** — l'agent peut modifier tout le dépôt, code source
   compris (implique `writeTests`).
+- **`writablePaths`** (`mergeRequest` uniquement) — motifs glob (`**`/`*`
+  seulement, voir `src/tasks/guard.ts::globToRegExp`) élargissant
+  *précisément* l'accès en écriture à un sous-ensemble du dépôt, en plus des
+  chemins de test : l'entre-deux entre `writeTests` seul (tests uniquement)
+  et `writeBusinessCode` (dépôt entier) que l'ancien `AGENT_CAPABILITIES`
+  exprimait via `write:src/**|lib/**` et que la migration vers ce fichier
+  avait perdu. Absent ou vide : comportement inchangé. Trois façons de dire
+  "quels chemins sont modifiables" ne s'empilent pas sans règle — combinaison
+  invalide, rejetée **au démarrage** en nommant le dépôt fautif :
+  - `writeBusinessCode: true` accorde déjà tout le dépôt ; des motifs non
+    vides à côté n'auraient aucun effet observable.
+  - un motif élargit *toujours* aussi l'accès aux chemins de test (voir
+    `isWritablePath`, qui vérifie `isTestPath` avant les motifs, quel que
+    soit leur contenu) ; `writeTests: false` à côté de motifs non vides
+    serait donc trompeur. `writeTests: true` est obligatoire dès qu'un motif
+    est déclaré.
+
+  Un motif mal formé (absolu, composant `.`/`..`, ou caractère hors du
+  sous-ensemble glob supporté) échoue lui aussi au démarrage en le citant.
 - **`pushToSourceBranch`** (`mergeRequest` uniquement) — `true` : push direct
   sur la branche source une fois tous les contrôles passés (comportement
   historique). `false` (défaut du bloc `defaults` ci-dessus) : le bot pousse

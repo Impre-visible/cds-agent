@@ -34,6 +34,17 @@
     },
     "groupe/depot-b": {
       "users": ["alice"]
+    },
+    "groupe/depot-c": {
+      "users": ["alice"],
+      "capabilities": {
+        "mergeRequest": {
+          "review": true,
+          "writeTests": true,
+          "writablePaths": ["src/generated/**", "docs/*.md"],
+          "pushToSourceBranch": false
+        }
+      }
     }
   }
 }

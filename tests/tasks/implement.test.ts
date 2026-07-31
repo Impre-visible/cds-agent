@@ -588,6 +588,7 @@ describe("repoCapabilitiesFor (chantier « projects.json »)", () => {
         writeTests: false,
         writeBusinessCode: false,
         pushToSourceBranch: false,
+        writablePaths: [],
       }),
       { writablePaths: "none", publishMode: "dedicated-mr" },
     );
@@ -600,6 +601,7 @@ describe("repoCapabilitiesFor (chantier « projects.json »)", () => {
         writeTests: true,
         writeBusinessCode: false,
         pushToSourceBranch: true,
+        writablePaths: [],
       }),
       { writablePaths: "tests-only", publishMode: "source-branch" },
     );
@@ -612,6 +614,7 @@ describe("repoCapabilitiesFor (chantier « projects.json »)", () => {
         writeTests: false,
         writeBusinessCode: true,
         pushToSourceBranch: false,
+        writablePaths: [],
       }),
       { writablePaths: "all", publishMode: "dedicated-mr" },
     );
@@ -624,8 +627,35 @@ describe("repoCapabilitiesFor (chantier « projects.json »)", () => {
         writeTests: true,
         writeBusinessCode: true,
         pushToSourceBranch: true,
+        writablePaths: [],
       }).publishMode,
       "source-branch",
+    );
+  });
+
+  test("motifs (writablePaths) sans writeBusinessCode : élargit précisément, sans devenir \"all\"", () => {
+    assert.deepEqual(
+      repoCapabilitiesFor({
+        review: true,
+        writeTests: true,
+        writeBusinessCode: false,
+        pushToSourceBranch: false,
+        writablePaths: ["src/generated/**"],
+      }),
+      { writablePaths: ["src/generated/**"], publishMode: "dedicated-mr" },
+    );
+  });
+
+  test("writeBusinessCode l'emporte sur des motifs non vides", () => {
+    assert.deepEqual(
+      repoCapabilitiesFor({
+        review: true,
+        writeTests: true,
+        writeBusinessCode: true,
+        pushToSourceBranch: false,
+        writablePaths: ["src/generated/**"],
+      }),
+      { writablePaths: "all", publishMode: "dedicated-mr" },
     );
   });
 });

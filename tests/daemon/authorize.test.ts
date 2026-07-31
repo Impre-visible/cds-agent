@@ -30,7 +30,13 @@ function makeRequest(overrides: Partial<AgentRequest> = {}): AgentRequest {
 
 const BASE_CAPABILITIES: ResolvedProject["capabilities"] = {
   issue: { review: false, createMergeRequest: false, writeTests: false, writeBusinessCode: false },
-  mergeRequest: { review: true, writeTests: false, writeBusinessCode: false, pushToSourceBranch: false },
+  mergeRequest: {
+    review: true,
+    writeTests: false,
+    writeBusinessCode: false,
+    pushToSourceBranch: false,
+    writablePaths: [],
+  },
 };
 
 function makeProject(overrides: Partial<ResolvedProject> = {}): ResolvedProject {

@@ -227,7 +227,48 @@ describe("RequestStore — rétrocompatibilité du fichier d'état", () => {
     assert.equal(canProcess(store.statusOf("note:100")), true);
   });
 
-  test("charge le vrai fichier state/processed.jsonl (uniquement claimed/acked)", (t) => {
+  test("charge une fixture au format historique (plusieurs clés, paires claimed/acked, une ligne illisible)", () => {
+    // state/processed.jsonl (le vrai fichier d'état) est gitignoré : absent
+    // en CI, et potentiellement vide même en local (voir le test
+    // opportuniste ci-dessous). Ce test-ci ne dépend d'aucun fichier
+    // ambiant : une fixture versionnée, au format historique (uniquement des
+    // paires claimed/acked, écrites avant l'introduction du cycle de vie
+    // complet running/done/failed), avec des identifiants anonymisés — le
+    // vrai fichier contient de vrais identifiants de notes/to-dos GitLab, ne
+    // jamais les recopier ici.
+    const source = join(
+      import.meta.dirname,
+      "..",
+      "fixtures",
+      "legacy-processed.jsonl",
+    );
+    const path = freshPath();
+    copyFileSync(source, path);
+    const store = new RequestStore(path);
+
+    // Plusieurs clés (voir tests/fixtures/legacy-processed.jsonl), chacune
+    // avec une paire claimed puis acked : la dernière entrée de chaque clé
+    // doit rester "acked", rejouable — exactement le format que l'ancienne
+    // version du daemon écrivait, avant que "running"/"done"/"failed"
+    // n'existent.
+    for (const key of ["note:100001", "desc:42:issues:7", "note:100002"]) {
+      assert.equal(store.statusOf(key), "acked");
+      assert.equal(canProcess(store.statusOf(key)), true);
+    }
+
+    // La ligne illisible glissée entre les deux dernières paires (voir la
+    // fixture) n'a produit ni clé ni plantage : exactement 3 clés connues,
+    // pas une quatrième fabriquée à partir de la ligne corrompue.
+    assert.equal(store.interrupted().length, 3);
+  });
+
+  test("vérification opportuniste supplémentaire : si state/processed.jsonl existe réellement et n'est pas vide, mêmes garanties", () => {
+    // Complément du test ci-dessus, jamais un remplacement : celui-ci reste
+    // muet (ni assertion ni t.skip()) quand le fichier réel est absent ou
+    // vide, précisément pour que le NOMBRE de tests exécutés ne varie
+    // jamais d'une machine à l'autre (le point qui faisait qu'une machine
+    // sans state/processed.jsonl tombait sur "1 test sauté" et une autre
+    // non). Un t.skip() aurait réintroduit exactement ce défaut.
     const source = join(
       import.meta.dirname,
       "..",
@@ -236,10 +277,7 @@ describe("RequestStore — rétrocompatibilité du fichier d'état", () => {
       "processed.jsonl",
     );
 
-    if (!existsSync(source)) {
-      t.skip("state/processed.jsonl absent — rien à vérifier");
-      return;
-    }
+    if (!existsSync(source)) return;
 
     const keys = new Set(
       readFileSync(source, "utf8")
@@ -248,10 +286,7 @@ describe("RequestStore — rétrocompatibilité du fichier d'état", () => {
         .map((l) => JSON.parse(l).key as string),
     );
 
-    if (keys.size === 0) {
-      t.skip("state/processed.jsonl vide — rien à vérifier");
-      return;
-    }
+    if (keys.size === 0) return;
 
     const path = freshPath();
     copyFileSync(source, path);

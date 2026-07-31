@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import type { RepoCapabilities } from "./tasks/guard.ts";
+import { isWellFormedWritablePathPattern, type RepoCapabilities } from "./tasks/guard.ts";
 
 // ---------------------------------------------------------------------------
 // Chantier "projects.json" — remplace la configuration par projet éclatée
@@ -49,6 +49,35 @@ export interface MergeRequestCapabilities {
    * jamais lieu, il n'y a rien à publier.
    */
   pushToSourceBranch: boolean;
+  /**
+   * Motifs glob (voir tasks/guard.ts::globToRegExp — "**" et "*" seulement)
+   * élargissant PRÉCISÉMENT l'accès en écriture à un sous-ensemble du dépôt,
+   * en plus des chemins de test — l'entre-deux entre "writeTests" seul
+   * (chemins de test uniquement) et "writeBusinessCode" (dépôt entier) que
+   * l'ancien AGENT_CAPABILITIES exprimait sous la forme write:<glob> et que
+   * la migration vers ce fichier avait perdu. Toujours résolu (jamais
+   * undefined) : [] si non déclaré, comportement inchangé.
+   *
+   * Trois façons de décrire "quels chemins sont modifiables" ne s'empilent
+   * pas sans règle : voir assertCoherentWritablePaths, appliquée à CHAQUE
+   * dépôt déclaré au chargement du fichier (fail-closed, règle 1 — jamais une
+   * combinaison ambiguë silencieusement résolue d'une façon plutôt qu'une
+   * autre) :
+   *  - writeBusinessCode: true accorde déjà tout le dépôt ; des motifs non
+   *    vides à côté n'auraient AUCUN effet observable (repoCapabilitiesFor
+   *    ferait de toute façon primer "all") — configuration rejetée comme
+   *    incohérente plutôt que silencieusement ignorée : mieux vaut que
+   *    l'auteur choisisse explicitement.
+   *  - un motif élargit TOUJOURS aussi l'accès aux chemins de test (voir
+   *    tasks/guard.ts::isWritablePath, qui vérifie isTestPath avant les
+   *    motifs, quel que soit leur contenu) : writeTests: false à côté de
+   *    motifs non vides serait trompeur (l'agent écrirait des tests malgré
+   *    tout) — rejeté pour la même raison. writeTests: true est donc
+   *    obligatoire dès qu'un motif est déclaré.
+   *  - writeTests: true seul (motifs vides) : comportement inchangé,
+   *    "tests-only".
+   */
+  writablePaths: string[];
 }
 
 export interface ResolvedCapabilities {
@@ -105,6 +134,19 @@ const MERGE_REQUEST_CAPABILITY_KEYS = [
   "pushToSourceBranch",
 ] as const;
 
+// Clés acceptées dans le bloc "mergeRequest" au sens large : les booléens
+// ci-dessus, plus "writablePaths" (motifs, pas un booléen — voir
+// MergeRequestCapabilities.writablePaths) qui n'a donc pas sa place dans
+// MERGE_REQUEST_CAPABILITY_KEYS (utilisée par parseBooleanCapabilities, qui
+// ne sait valider QUE des booléens). Distinct d'ISSUE_CAPABILITY_KEYS : le
+// champ est volontairement absent du bloc "issue" (comme pushToSourceBranch),
+// ce flux n'étant pas câblé (voir router.ts) — rien n'empêcherait de l'y
+// ajouter le jour où les issues auront elles aussi un writablePaths à offrir.
+const MERGE_REQUEST_BLOCK_KEYS = [
+  ...MERGE_REQUEST_CAPABILITY_KEYS,
+  "writablePaths",
+] as const;
+
 // Base "tout refusé" : contrairement à commands/docker (qui ont un repli
 // global légitime via ProjectsBaseline, hérité de TEST_COMMAND/
 // INSTALL_COMMAND/DOCKER_DEFAULT_IMAGE), aucune capacité n'a jamais eu de
@@ -124,13 +166,19 @@ const BASE_MERGE_REQUEST_CAPABILITIES: MergeRequestCapabilities = {
   writeTests: false,
   writeBusinessCode: false,
   pushToSourceBranch: false,
+  writablePaths: [],
 };
 
 type PartialCapabilities<K extends string> = Partial<Record<K, boolean>>;
 
+/** Bloc "mergeRequest" tel que parsé : les booléens (partiels), plus "writablePaths" (partiel lui aussi — absent tant que non déclaré, ni par defaults ni par le projet). */
+type ParsedMergeRequestBlock = PartialCapabilities<(typeof MERGE_REQUEST_CAPABILITY_KEYS)[number]> & {
+  writablePaths?: string[];
+};
+
 interface ParsedCapabilitiesBlock {
   issue: PartialCapabilities<(typeof ISSUE_CAPABILITY_KEYS)[number]>;
-  mergeRequest: PartialCapabilities<(typeof MERGE_REQUEST_CAPABILITY_KEYS)[number]>;
+  mergeRequest: ParsedMergeRequestBlock;
 }
 
 interface ParsedCommandsBlock {
@@ -187,17 +235,20 @@ function assertOnlyKeys(
   }
 }
 
-function parseBooleanCapabilities<K extends string>(
-  raw: unknown,
+/**
+ * Lit les champs booléens de `keys` présents dans `raw`, en ignorant ceux qui
+ * ne le sont pas (fusion en profondeur oblige : "absent" doit rester
+ * distinguable de "false", voir resolveProject). Ne valide PAS que `raw` ne
+ * contient que ces clés — c'est la responsabilité de l'appelant (assertOnlyKeys),
+ * car parseMergeRequestCapabilities ci-dessous a besoin d'accepter une clé
+ * supplémentaire ("writablePaths", pas un booléen) que cette fonction ne sait
+ * pas traiter elle-même.
+ */
+function parseBooleanFields<K extends string>(
+  raw: Record<string, unknown>,
   keys: readonly K[],
   path: string,
 ): PartialCapabilities<K> {
-  if (raw === undefined) return {};
-  if (!isPlainObject(raw)) {
-    throw new Error(`projects.json invalide : "${path}" doit être un objet`);
-  }
-  assertOnlyKeys(raw, keys, path);
-
   const result: PartialCapabilities<K> = {};
   for (const key of keys) {
     if (!(key in raw)) continue;
@@ -212,6 +263,85 @@ function parseBooleanCapabilities<K extends string>(
   return result;
 }
 
+function parseBooleanCapabilities<K extends string>(
+  raw: unknown,
+  keys: readonly K[],
+  path: string,
+): PartialCapabilities<K> {
+  if (raw === undefined) return {};
+  if (!isPlainObject(raw)) {
+    throw new Error(`projects.json invalide : "${path}" doit être un objet`);
+  }
+  assertOnlyKeys(raw, keys, path);
+  return parseBooleanFields(raw, keys, path);
+}
+
+/**
+ * Bloc "mergeRequest" : les mêmes booléens que parseBooleanCapabilities,
+ * plus "writablePaths" (motifs glob, voir MergeRequestCapabilities.
+ * writablePaths) — la seule raison pour laquelle ce bloc n'utilise pas
+ * directement parseBooleanCapabilities. Un motif mal formé (voir
+ * tasks/guard.ts::isWellFormedWritablePathPattern) fait échouer le chargement
+ * en le citant, comme toute autre valeur invalide de ce fichier — jamais
+ * silencieusement ignoré ni laissé produire un filtre qui ne se comporte pas
+ * comme annoncé.
+ */
+function parseMergeRequestCapabilities(raw: unknown, path: string): ParsedMergeRequestBlock {
+  if (raw === undefined) return {};
+  if (!isPlainObject(raw)) {
+    throw new Error(`projects.json invalide : "${path}" doit être un objet`);
+  }
+  assertOnlyKeys(raw, MERGE_REQUEST_BLOCK_KEYS, path);
+
+  const booleans = parseBooleanFields(raw, MERGE_REQUEST_CAPABILITY_KEYS, path);
+
+  if (!("writablePaths" in raw)) return booleans;
+
+  const patterns = parseStringArray(raw.writablePaths, `${path}.writablePaths`, "motifs glob") ?? [];
+  for (const pattern of patterns) {
+    if (!isWellFormedWritablePathPattern(pattern)) {
+      throw new Error(
+        `projects.json invalide : "${path}.writablePaths" contient un motif mal formé (${JSON.stringify(pattern)}) — un motif doit être un chemin RELATIF (jamais commencer par "/"), sans composant "." ou "..", et n'utiliser que des lettres/chiffres/"-"/"_"/"."/"/" et les jokers "*"/"**" (voir src/tasks/guard.ts::globToRegExp)`,
+      );
+    }
+  }
+  return { ...booleans, writablePaths: patterns };
+}
+
+/**
+ * Rejette les combinaisons ambiguës entre les trois façons de décrire "quels
+ * chemins sont modifiables" pour une MERGE REQUEST (voir le commentaire de
+ * MergeRequestCapabilities.writablePaths) : appelée avec la capacité déjà
+ * fusionnée (BASE + defaults + entrée du projet, comme resolveProject),
+ * jamais avec un fragment isolé — une ambiguïté peut naître du croisement de
+ * deux blocs qui, pris séparément, semblent chacun cohérents (defaults pose
+ * writeBusinessCode, le projet ne pose que des motifs, par exemple).
+ */
+function assertCoherentWritablePaths(capabilities: MergeRequestCapabilities, path: string): void {
+  if (capabilities.writeBusinessCode && capabilities.writablePaths.length > 0) {
+    throw new Error(
+      `projects.json invalide : "${path}" incohérent — "writeBusinessCode": true accorde déjà tout le dépôt, "writablePaths" (${JSON.stringify(capabilities.writablePaths)}) n'aurait alors aucun effet observable ; retirez l'un des deux pour lever l'ambiguïté`,
+    );
+  }
+  if (!capabilities.writeTests && capabilities.writablePaths.length > 0) {
+    throw new Error(
+      `projects.json invalide : "${path}" incohérent — "writablePaths" (${JSON.stringify(capabilities.writablePaths)}) élargit toujours aussi l'accès aux chemins de test (voir tasks/guard.ts::isWritablePath), donc "writeTests": false à côté de motifs non vides est contradictoire ; passez "writeTests" à true`,
+    );
+  }
+}
+
+/** Fusion en profondeur, champ par champ, de la capacité "mergeRequest" — factorisée pour que la validation (assertCoherentWritablePaths, appliquée au résultat) et resolveProject partagent la MÊME règle de fusion. */
+function mergeMergeRequestCapabilities(
+  defaultsBlock: ParsedMergeRequestBlock,
+  entryBlock: ParsedMergeRequestBlock,
+): MergeRequestCapabilities {
+  return {
+    ...BASE_MERGE_REQUEST_CAPABILITIES,
+    ...defaultsBlock,
+    ...entryBlock,
+  };
+}
+
 function parseCapabilitiesBlock(raw: unknown, path: string): ParsedCapabilitiesBlock {
   if (raw === undefined) return { issue: {}, mergeRequest: {} };
   if (!isPlainObject(raw)) {
@@ -220,11 +350,7 @@ function parseCapabilitiesBlock(raw: unknown, path: string): ParsedCapabilitiesB
   assertOnlyKeys(raw, ["issue", "mergeRequest"], path);
   return {
     issue: parseBooleanCapabilities(raw.issue, ISSUE_CAPABILITY_KEYS, `${path}.issue`),
-    mergeRequest: parseBooleanCapabilities(
-      raw.mergeRequest,
-      MERGE_REQUEST_CAPABILITY_KEYS,
-      `${path}.mergeRequest`,
-    ),
+    mergeRequest: parseMergeRequestCapabilities(raw.mergeRequest, `${path}.mergeRequest`),
   };
 }
 
@@ -323,6 +449,15 @@ export function parseProjectsFile(raw: unknown): ProjectsFile {
     ),
   };
 
+  // "defaults" seul, fusionné avec le socle "tout refusé" (comme le ferait
+  // resolveProject pour un projet qui ne surcharge rien) : une incohérence
+  // posée ici se répercuterait sur tout projet qui ne la corrige pas — autant
+  // la signaler tout de suite plutôt que d'attendre qu'un projet en hérite.
+  assertCoherentWritablePaths(
+    mergeMergeRequestCapabilities(defaults.capabilities.mergeRequest, {}),
+    "defaults.capabilities.mergeRequest",
+  );
+
   const projectsRaw = raw.projects;
   if (!isPlainObject(projectsRaw)) {
     throw new Error(
@@ -347,9 +482,21 @@ export function parseProjectsFile(raw: unknown): ProjectsFile {
       );
     }
 
+    const capabilities = parseCapabilitiesBlock(entryRaw.capabilities, `${path}.capabilities`);
+
+    // Validée sur le résultat FUSIONNÉ (defaults + entrée de ce projet),
+    // exactement ce que resolveProject produira pour de vrai — une ambiguïté
+    // qui ne naît que du croisement des deux blocs (l'un pose
+    // writeBusinessCode, l'autre des motifs) doit échouer ici aussi, pas
+    // seulement quand les deux champs cohabitent dans le même bloc.
+    assertCoherentWritablePaths(
+      mergeMergeRequestCapabilities(defaults.capabilities.mergeRequest, capabilities.mergeRequest),
+      `${path}.capabilities.mergeRequest`,
+    );
+
     projects.set(key, {
       users,
-      capabilities: parseCapabilitiesBlock(entryRaw.capabilities, `${path}.capabilities`),
+      capabilities,
       commands: parseCommandsBlock(entryRaw.commands, `${path}.commands`),
       docker: parseDockerBlock(entryRaw.docker, `${path}.docker`),
       testDirectories: parseStringArray(entryRaw.testDirectories, `${path}.testDirectories`, "noms de répertoire"),
@@ -385,11 +532,10 @@ export function resolveProject(
         ...file.defaults.capabilities.issue,
         ...entry.capabilities.issue,
       },
-      mergeRequest: {
-        ...BASE_MERGE_REQUEST_CAPABILITIES,
-        ...file.defaults.capabilities.mergeRequest,
-        ...entry.capabilities.mergeRequest,
-      },
+      mergeRequest: mergeMergeRequestCapabilities(
+        file.defaults.capabilities.mergeRequest,
+        entry.capabilities.mergeRequest,
+      ),
     },
     commands: {
       install:
@@ -407,22 +553,31 @@ export function resolveProject(
  * Traduit les capacités "mergeRequest" résolues en RepoCapabilities
  * (tasks/guard.ts) — le modèle plus ancien et plus général qu'isWritablePath/
  * collectChanges consomment déjà, inchangé par ce chantier (aucune raison de
- * dupliquer son garde-fou). writeBusinessCode l'emporte sur writeTests s'il
- * est accordé (accès "all" englobe déjà les tests) ; ni l'un ni l'autre ⇒
- * "none", aucun chemin n'est modifiable — voir isWritablePath. Sans
- * équivalent des motifs `write:<glob>` de l'ancien AGENT_CAPABILITIES : la
- * forme validée par le propriétaire (projets.json) n'expose que des
- * booléens, ce niveau de granularité n'a pas migré (voir le rapport de la
- * tâche).
+ * dupliquer son garde-fou). Priorité, du plus large au plus étroit :
+ * writeBusinessCode ("all", englobe déjà tout) > writablePaths non vide
+ * (motifs, l'entre-deux — voir MergeRequestCapabilities.writablePaths) >
+ * writeTests ("tests-only") > "none". Cette priorité ne masque jamais une
+ * combinaison ambiguë en silence : assertCoherentWritablePaths (appelée au
+ * chargement du fichier, avant que ce code ne tourne jamais) a déjà fait
+ * échouer le démarrage si writeBusinessCode et des motifs cohabitaient, ou si
+ * des motifs cohabitaient avec writeTests: false — un appelant qui construit
+ * MergeRequestCapabilities à la main (hors projects.json, par exemple un
+ * test) sans passer par cette validation n'a que cet ordre de priorité pour
+ * seul filet.
  */
 export function repoCapabilitiesFor(
   mergeRequest: MergeRequestCapabilities,
 ): RepoCapabilities {
-  const writablePaths: RepoCapabilities["writablePaths"] = mergeRequest.writeBusinessCode
-    ? "all"
-    : mergeRequest.writeTests
-      ? "tests-only"
-      : "none";
+  let writablePaths: RepoCapabilities["writablePaths"];
+  if (mergeRequest.writeBusinessCode) {
+    writablePaths = "all";
+  } else if (mergeRequest.writablePaths.length > 0) {
+    writablePaths = mergeRequest.writablePaths;
+  } else if (mergeRequest.writeTests) {
+    writablePaths = "tests-only";
+  } else {
+    writablePaths = "none";
+  }
   return {
     writablePaths,
     publishMode: mergeRequest.pushToSourceBranch ? "source-branch" : "dedicated-mr",
