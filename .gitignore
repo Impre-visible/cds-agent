@@ -1,0 +1,5 @@
+.env
+node_modules/
+state/
+todo-dumps/
+context-dump.json

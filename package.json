@@ -1,0 +1,27 @@
+{
+  "name": "cds-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "step1": "tsx src/step1-watch.ts",
+    "step2": "tsx src/step2-ack.ts",
+    "dev": "tsx src/daemon.ts",
+    "check": "tsc --noEmit",
+    "context": "tsx src/dump-context.ts",
+    "review": "tsx src/dry-review.ts",
+    "proxy": "tsx src/proxy.ts",
+    "publish": "tsx src/dry-publish.ts",
+    "implement": "tsx src/dry-implement.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  }
+}
