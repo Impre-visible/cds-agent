@@ -63,22 +63,15 @@ export interface HeadIntegrityOk {
  * auditable (auteur, message) et évite d'avoir à faire confiance à un
  * commit fabriqué par l'agent, aussi anodin soit son contenu.
  */
-export function checkHeadIntegrity(
+export async function checkHeadIntegrity(
   repo: string,
   branch: string,
-): HeadIntegrityOk | HeadIntegrityViolation {
-  git(repo, ["fetch", "origin", branch], true);
-  const remoteHead = git(repo, ["rev-parse", `origin/${branch}`]).trim();
-  const localHead = git(repo, ["rev-parse", "HEAD"]).trim();
+): Promise<HeadIntegrityOk | HeadIntegrityViolation> {
+  await git(repo, ["fetch", "origin", branch], true);
+  const remoteHead = (await git(repo, ["rev-parse", `origin/${branch}`])).trim();
+  const localHead = (await git(repo, ["rev-parse", "HEAD"])).trim();
 
   if (localHead === remoteHead) return { ok: true };
-
-  // Purement informatif pour le message d'erreur : lecture seule, ne change
-  // rien à l'état du dépôt ni à la décision (déjà actée ci-dessus).
-  const shipped = git(repo, ["diff", "--name-only", `${remoteHead}...HEAD`])
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
 
   // Deux causes très différentes derrière un même écart, et il faut les
   // distinguer : si HEAD est un ancêtre de la référence fetchée, personne
@@ -87,8 +80,8 @@ export function checkHeadIntegrity(
   // Le rejet reste la bonne décision, notre push serait refusé de toute
   // façon, mais accuser l'utilisateur d'avoir réécrit l'historique
   // l'enverrait chercher un incident de sécurité qui n'existe pas.
-  const mergeBase = git(repo, ["merge-base", "HEAD", remoteHead]).trim();
-  if (mergeBase === localHead) {
+  const mergeBase = await safeMergeBase(repo, branch, localHead, remoteHead);
+  if (mergeBase !== null && mergeBase === localHead) {
     return {
       ok: false,
       detail:
@@ -98,6 +91,22 @@ export function checkHeadIntegrity(
       files: [],
     };
   }
+
+  // Purement informatif pour le message d'erreur : lecture seule, ne change
+  // rien à l'état du dépôt ni à la décision (déjà actée ci-dessus). On
+  // utilise la base déjà résolue par safeMergeBase plutôt que la notation
+  // triple-point `remoteHead...HEAD`, qui recalculerait elle-même un
+  // merge-base en interne et échouerait pour la même raison dans un clone
+  // superficiel (voir safeMergeBase). Si aucune base n'a pu être établie
+  // (historiques réellement disjoints), repli sur un diff direct
+  // remoteHead..HEAD — moins précis (tout l'écart d'arbre, pas seulement ce
+  // qu'a ajouté HEAD), mais qui ne nécessite aucun ancêtre commun et
+  // n'échoue donc jamais pour cette raison.
+  const diffBase = mergeBase ?? remoteHead;
+  const shipped = (await git(repo, ["diff", "--name-only", diffBase, "HEAD"]))
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
 
   return {
     ok: false,
@@ -110,6 +119,83 @@ export function checkHeadIntegrity(
         : ""),
     files: shipped,
   };
+}
+
+/**
+ * §4.7, piège du clone superficiel : dans un dépôt cloné avec `--depth`,
+ * HEAD est un commit "greffé" (`shallow`) sans parent connu localement, même
+ * quand un ancêtre commun existe réellement plus loin dans l'historique
+ * complet. `git merge-base` échoue alors purement et simplement (code de
+ * sortie non nul, aucune sortie) au lieu de répondre "pas d'ancêtre commun" —
+ * vérifié contre un vrai dépôt cloné en `--depth 1` : voir workspace.test.ts.
+ *
+ * On approfondit donc HEAD à la demande, uniquement dans ce cas précis
+ * (`fetch --unshallow`, jamais au clone initial ni en cas nominal) et on
+ * retente une seule fois. Si le dépôt n'est pas superficiel, ou si
+ * l'approfondissement ne suffit pas (historiques réellement disjoints), on
+ * retombe sur `null` : checkHeadIntegrity traite alors l'écart comme une
+ * altération d'historique (branche par défaut, la plus prudente — jamais
+ * celle qui autoriserait un push), plutôt que de laisser l'exception remonter
+ * jusqu'au worker.
+ */
+async function safeMergeBase(
+  repo: string,
+  branch: string,
+  localHead: string,
+  remoteHead: string,
+): Promise<string | null> {
+  try {
+    return (await git(repo, ["merge-base", localHead, remoteHead])).trim();
+  } catch {
+    // Voir commentaire de la fonction : on ne sait pas encore si c'est le
+    // piège du clone superficiel ou une vraie absence d'ancêtre commun.
+  }
+
+  const isShallow =
+    (await git(repo, ["rev-parse", "--is-shallow-repository"])).trim() ===
+    "true";
+  if (!isShallow) return null;
+
+  try {
+    await git(repo, ["fetch", "--unshallow", "origin", branch], true);
+    return (await git(repo, ["merge-base", localHead, remoteHead])).trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * §1.6 : --ignore-scripts par défaut, configurable (INSTALL_IGNORE_SCRIPTS=0,
+ * voir config.ts). Sans lui, les scripts `postinstall` du dépôt cible
+ * s'exécutent avec network:true (installCommand tourne avec l'accès réseau
+ * ouvert), avant que quoi que ce soit n'ait été vérifié sur ce qu'a produit
+ * l'agent. Compromis assumé : certains dépôts ne s'installent pas
+ * correctement sans leurs scripts (binaires natifs, génération de fichiers) —
+ * l'échappatoire existe pour ceux-là, au cas par cas, pas comme réglage par
+ * défaut. Exportée pour être testée sans dépendre de runCommand/Docker.
+ */
+export function buildInstallCommand(
+  installCommand: string,
+  ignoreScripts: boolean,
+): string {
+  return ignoreScripts ? `${installCommand} --ignore-scripts` : installCommand;
+}
+
+/**
+ * §1.4 : rollback réel sur rejet (fichiers hors périmètre, suppression de
+ * test) — pas seulement `git checkout -- .`, qui ne restaure que les
+ * fichiers suivis et laisse tout fichier non suivi créé par l'agent. Sans
+ * impact aujourd'hui — runImplement `return` juste après l'appel, et le
+ * workspace entier est jeté par son `finally` — mais le nom doit tenir ce
+ * qu'il promet : un futur déplacement de ce `return` (pour réutiliser le
+ * workspace, par exemple) trouverait sinon un rollback qui ne nettoie pas ce
+ * qu'il prétend nettoyer. `reset --hard` restaure les fichiers suivis,
+ * `clean -fdx` supprime tout le reste (non suivis, y compris ignorés).
+ * Exportée pour être testée directement (voir implement.test.ts).
+ */
+export async function rollbackAgentChanges(repo: string): Promise<void> {
+  await git(repo, ["reset", "--hard"]);
+  await git(repo, ["clean", "-fdx"]);
 }
 
 /**
@@ -209,15 +295,24 @@ export async function runImplement(
   branch: string,
 ): Promise<ImplementResult> {
   const started = Date.now();
-  const workspace = createWorkspace(context.projectPath, branch);
+  // §4.7 : clone superficiel par défaut (config.cloneDepth) — voir
+  // safeMergeBase plus haut pour le repli quand merge-base a besoin de plus
+  // d'historique que ce que ce clone contient.
+  const workspace = await createWorkspace(context.projectPath, branch, {
+    depth: config.cloneDepth,
+  });
 
   try {
     const repo = workspace.repo;
-    git(repo, ["config", "user.name", config.gitAuthorName]);
-    git(repo, ["config", "user.email", config.gitAuthorEmail]);
+    await git(repo, ["config", "user.name", config.gitAuthorName]);
+    await git(repo, ["config", "user.email", config.gitAuthorEmail]);
 
     console.log(`    installation des dépendances`);
-    const install = await runCommand(repo, config.installCommand, {
+    const installCommand = buildInstallCommand(
+      config.installCommand,
+      config.installIgnoreScripts,
+    );
+    const install = await runCommand(repo, installCommand, {
       projectPath: context.projectPath,
       network: true,
     });
@@ -297,7 +392,7 @@ export async function runImplement(
       };
     }
 
-    const headIntegrity = checkHeadIntegrity(repo, branch);
+    const headIntegrity = await checkHeadIntegrity(repo, branch);
     if (!headIntegrity.ok) {
       return {
         status: "rejected",
@@ -310,7 +405,7 @@ export async function runImplement(
     // `-z` : voir guard.ts pour le détail du format (pas de quoting, entrées
     // séparées par un octet nul, renommages/copies sur deux entrées).
     const { paths, offending, deletedTests } = collectChanges(
-      git(repo, ["status", "--porcelain=v1", "-uall", "-z"]),
+      await git(repo, ["status", "--porcelain=v1", "-uall", "-z"]),
       config.testDirectoryOverrides.get(context.projectPath.toLowerCase()),
     );
 
@@ -328,7 +423,7 @@ export async function runImplement(
     // (deletedTests, §2.3), distingué ici pour un message d'erreur qui ne
     // fait pas passer une suppression pour une simple modification.
     if (offending.length > 0 || deletedTests.length > 0) {
-      git(repo, ["checkout", "--", "."]);
+      await rollbackAgentChanges(repo);
       const reasons = [
         offending.length > 0
           ? `fichiers hors périmètre modifiés : ${offending.join(", ")}`
@@ -369,13 +464,13 @@ export async function runImplement(
       };
     }
 
-    git(repo, ["add", "--all"]);
-    git(repo, [
+    await git(repo, ["add", "--all"]);
+    await git(repo, [
       "commit",
       "-m",
       `test: ajout de tests demandés par @${context.requester}`,
     ]);
-    git(repo, ["push", "origin", `HEAD:${branch}`], true);
+    await git(repo, ["push", "origin", `HEAD:${branch}`], true);
 
     return {
       status: "pushed",

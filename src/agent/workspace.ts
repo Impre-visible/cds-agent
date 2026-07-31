@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdirSync,
@@ -10,8 +10,30 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { config, gitCredentialEnv, sanitizedEnv } from "../config.ts";
 import { imageFor, runInSandbox } from "./sandbox.ts";
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * §4.5 : toutes les commandes git passent par `execFile` promisifié plutôt
+ * que par `execFileSync`. Un clone ou un push peuvent prendre plusieurs
+ * dizaines de secondes ; en synchrone, ils bloquent la boucle d'événements du
+ * process entier pendant toute leur durée — le polling GitLab s'arrête, les
+ * timeouts programmés ailleurs ne se déclenchent plus, l'arrêt gracieux ne
+ * répond plus. `execFileSync` reste utilisé ailleurs dans ce fichier
+ * (`runCommand`, pour l'exécution directe hors Docker) : hors périmètre de
+ * ce correctif, qui porte spécifiquement sur "la couche git".
+ *
+ * `maxBuffer` explicite : le défaut de Node (1 Mo) est atteint par un simple
+ * `git status --porcelain -uall` sur un dépôt où l'agent a généré beaucoup de
+ * fichiers, ou par un `git diff`/`git show` un peu verbeux. Sans ce plafond
+ * relevé, l'erreur ENOBUFS remonte comme un échec de clone incompréhensible.
+ * 64 Mo couvre tout statut/diff plausible sans autoriser un usage mémoire
+ * déraisonnable pour un process qui ne devrait jamais produire plus que ça.
+ */
+const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 
 /**
  * L'agent tourne dans le clone avec un accès en écriture complet à .git/ :
@@ -51,28 +73,34 @@ export function currentWorkspace(): Workspace | undefined {
   return active;
 }
 
-export function createWorkspace(
+export async function createWorkspace(
   projectPath: string,
   branch: string,
   options: { depth?: number } = {},
-): Workspace {
+): Promise<Workspace> {
   const root = mkdtempSync(join(tmpdir(), "cds-agent-"));
   const repo = join(root, "repo");
   const host = new URL(config.gitlabUrl).host;
   // Aucun credential dans l'URL : il ne doit jamais atterrir dans .git/config.
   const url = `https://${host}/${projectPath}.git`;
+  // §4.7 : sans --depth, chaque review et chaque implémentation reclone tout
+  // l'historique du dépôt — plusieurs minutes et des centaines de Mo sur un
+  // dépôt d'entreprise, pour un usage qui n'a besoin que de l'état courant
+  // de la branche. --single-branch (indépendant de la profondeur) évite en
+  // plus de récupérer les autres branches du dépôt, jamais utilisées ici.
   const depthArgs =
     options.depth && options.depth > 0
       ? ["--depth", String(options.depth)]
       : [];
 
   try {
-    execFileSync(
+    await execFileAsync(
       "git",
       [
         ...NO_HOOKS_ARGS,
         "clone",
         "--quiet",
+        "--single-branch",
         ...depthArgs,
         "--branch",
         branch,
@@ -80,7 +108,7 @@ export function createWorkspace(
         repo,
       ],
       {
-        stdio: "pipe",
+        maxBuffer: GIT_MAX_BUFFER,
         env: { ...sanitizedEnv(), ...gitCredentialEnv() },
       },
     );
@@ -119,20 +147,27 @@ function assertNoSecret(repo: string): void {
   }
 }
 
-/** authenticated=true uniquement pour les opérations réseau (clone, push, fetch). */
-export function git(
+/**
+ * authenticated=true uniquement pour les opérations réseau (clone, push,
+ * fetch). Asynchrone (§4.5) : voir le commentaire sur GIT_MAX_BUFFER
+ * ci-dessus pour les deux raisons de ce choix (non-blocage de la boucle
+ * d'événements, maxBuffer explicite). Tous les appelants (implement.ts,
+ * les tests) doivent désormais `await` cette fonction.
+ */
+export async function git(
   repo: string,
   args: string[],
   authenticated = false,
-): string {
-  return execFileSync("git", [...NO_HOOKS_ARGS, ...args], {
+): Promise<string> {
+  const { stdout } = await execFileAsync("git", [...NO_HOOKS_ARGS, ...args], {
     cwd: repo,
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: GIT_MAX_BUFFER,
     env: authenticated
       ? { ...sanitizedEnv(), ...gitCredentialEnv() }
       : sanitizedEnv(),
   });
+  return stdout;
 }
 
 /**
@@ -153,6 +188,12 @@ export function fingerprintGitMeta(repo: string): string {
   const hash = createHash("sha256");
 
   hash.update(readTextSafe(join(repo, ".git", "config")));
+  // .git/info/exclude et .git/info/attributes : risque marginal (un
+  // .gitattributes ne définit pas de commande à lui seul, les drivers
+  // filter/diff qu'il référence vivent dans .git/config, déjà couvert
+  // ci-dessus) mais ça ne coûte qu'une ligne de plus à couvrir.
+  hash.update(readTextSafe(join(repo, ".git", "info", "exclude")));
+  hash.update(readTextSafe(join(repo, ".git", "info", "attributes")));
 
   const hooksDir = join(repo, ".git", "hooks");
   for (const name of listSafe(hooksDir)) {

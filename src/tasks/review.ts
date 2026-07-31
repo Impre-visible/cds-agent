@@ -360,7 +360,9 @@ export async function runReview(
   context: TaskContext,
   sourceBranch: string,
 ): Promise<ReviewResult> {
-  const workspace = createWorkspace(context.projectPath, sourceBranch);
+  const workspace = await createWorkspace(context.projectPath, sourceBranch, {
+    depth: config.cloneDepth,
+  });
 
   try {
     // Contrairement à implement.ts, aucune commande git n'est relancée côté

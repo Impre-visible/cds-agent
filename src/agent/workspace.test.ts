@@ -15,7 +15,7 @@ import { join } from "node:path";
 // workspace.ts importe (transitivement) config.ts, qui jette au chargement
 // si GITLAB_TOKEN/BOT_USERNAME sont absents. Même parade que review.test.ts :
 // on renseigne l'environnement avant l'import dynamique du module testé.
-let git: (repo: string, args: string[], authenticated?: boolean) => string;
+let git: (repo: string, args: string[], authenticated?: boolean) => Promise<string>;
 let fingerprintGitMeta: (repo: string) => string;
 
 before(async () => {
@@ -65,7 +65,7 @@ function originCommitCount(origin: string): number {
 }
 
 describe("git() neutralise les hooks", () => {
-  test("un pre-commit hostile ne s'exécute pas lors d'un commit passant par git()", () => {
+  test("un pre-commit hostile ne s'exécute pas lors d'un commit passant par git()", async () => {
     const { root, repo } = makeRepoWithOrigin();
     try {
       const marker = join(root, "hook-a-tourne");
@@ -81,14 +81,14 @@ describe("git() neutralise les hooks", () => {
       );
       chmodSync(hookPath, 0o755);
 
-      git(repo, ["config", "user.name", "cds-agent"]);
-      git(repo, ["config", "user.email", "cds-agent@test.local"]);
+      await git(repo, ["config", "user.name", "cds-agent"]);
+      await git(repo, ["config", "user.email", "cds-agent@test.local"]);
       writeFileSync(join(repo, "note.txt"), "contenu\n");
-      git(repo, ["add", "--all"]);
+      await git(repo, ["add", "--all"]);
 
       // Ne doit pas lever : le hook est neutralisé, donc invisible pour git.
-      assert.doesNotThrow(() => {
-        git(repo, ["commit", "-m", "commit de test"]);
+      await assert.doesNotReject(async () => {
+        await git(repo, ["commit", "-m", "commit de test"]);
       });
       assert.equal(
         existsSync(marker),
@@ -102,13 +102,13 @@ describe("git() neutralise les hooks", () => {
 });
 
 describe("fingerprintGitMeta", () => {
-  test("reste stable si rien ne touche .git/config ni .git/hooks", () => {
+  test("reste stable si rien ne touche .git/config ni .git/hooks", async () => {
     const { root, repo } = makeRepoWithOrigin();
     try {
       const before = fingerprintGitMeta(repo);
 
-      git(repo, ["config", "user.name", "cds-agent"]);
-      git(repo, ["config", "user.email", "cds-agent@test.local"]);
+      await git(repo, ["config", "user.name", "cds-agent"]);
+      await git(repo, ["config", "user.email", "cds-agent@test.local"]);
       const afterIdentity = fingerprintGitMeta(repo);
       // Ces deux `git config` sont légitimes (posés par implement.ts lui-même
       // avant de prendre la référence) : ils ne doivent pas fausser une
@@ -121,11 +121,11 @@ describe("fingerprintGitMeta", () => {
     }
   });
 
-  test("ne signale aucun faux positif pour une activité normale d'agent honnête", () => {
+  test("ne signale aucun faux positif pour une activité normale d'agent honnête", async () => {
     const { root, repo } = makeRepoWithOrigin();
     try {
-      git(repo, ["config", "user.name", "cds-agent"]);
-      git(repo, ["config", "user.email", "cds-agent@test.local"]);
+      await git(repo, ["config", "user.name", "cds-agent"]);
+      await git(repo, ["config", "user.email", "cds-agent@test.local"]);
       const baseline = fingerprintGitMeta(repo);
 
       // Ce qu'un agent honnête fait : ajouter des fichiers de test, les
@@ -133,8 +133,8 @@ describe("fingerprintGitMeta", () => {
       // .git/config ni à .git/hooks.
       mkdirSync(join(repo, "tests"), { recursive: true });
       writeFileSync(join(repo, "tests", "foo.test.ts"), "// test\n");
-      git(repo, ["add", "--all"]);
-      git(repo, ["status", "--porcelain=v1", "-uall"]);
+      await git(repo, ["add", "--all"]);
+      await git(repo, ["status", "--porcelain=v1", "-uall"]);
 
       assert.equal(fingerprintGitMeta(repo), baseline);
     } finally {
@@ -142,18 +142,18 @@ describe("fingerprintGitMeta", () => {
     }
   });
 
-  test("détecte une clé de config hostile (core.pager)", () => {
+  test("détecte une clé de config hostile (core.pager)", async () => {
     const { root, repo } = makeRepoWithOrigin();
     try {
       const baseline = fingerprintGitMeta(repo);
-      git(repo, ["config", "core.pager", "sh -c 'touch /tmp/pwned'"]);
+      await git(repo, ["config", "core.pager", "sh -c 'touch /tmp/pwned'"]);
       assert.notEqual(fingerprintGitMeta(repo), baseline);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  test("détecte un hook ajouté après coup", () => {
+  test("détecte un hook ajouté après coup", async () => {
     const { root, repo } = makeRepoWithOrigin();
     try {
       const baseline = fingerprintGitMeta(repo);
@@ -165,14 +165,41 @@ describe("fingerprintGitMeta", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test("détecte une altération de .git/info/exclude (§reliquat)", async () => {
+    const { root, repo } = makeRepoWithOrigin();
+    try {
+      const baseline = fingerprintGitMeta(repo);
+      mkdirSync(join(repo, ".git", "info"), { recursive: true });
+      writeFileSync(join(repo, ".git", "info", "exclude"), "*.secret\n");
+      assert.notEqual(fingerprintGitMeta(repo), baseline);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("détecte une altération de .git/info/attributes (§reliquat)", async () => {
+    const { root, repo } = makeRepoWithOrigin();
+    try {
+      const baseline = fingerprintGitMeta(repo);
+      mkdirSync(join(repo, ".git", "info"), { recursive: true });
+      writeFileSync(
+        join(repo, ".git", "info", "attributes"),
+        "* text=auto\n",
+      );
+      assert.notEqual(fingerprintGitMeta(repo), baseline);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("scénario complet (miroir de runImplement)", () => {
-  test("cas nominal : rien n'a bougé, le push atteint bien origin", () => {
+  test("cas nominal : rien n'a bougé, le push atteint bien origin", async () => {
     const { root, repo, origin } = makeRepoWithOrigin();
     try {
-      git(repo, ["config", "user.name", "cds-agent"]);
-      git(repo, ["config", "user.email", "cds-agent@test.local"]);
+      await git(repo, ["config", "user.name", "cds-agent"]);
+      await git(repo, ["config", "user.email", "cds-agent@test.local"]);
       const baseline = fingerprintGitMeta(repo);
 
       // Agent honnête.
@@ -185,9 +212,9 @@ describe("scénario complet (miroir de runImplement)", () => {
         "pas d'altération : le push doit être autorisé",
       );
 
-      git(repo, ["add", "--all"]);
-      git(repo, ["commit", "-m", "test: ajout"]);
-      git(repo, ["push", "origin", "HEAD:main"]);
+      await git(repo, ["add", "--all"]);
+      await git(repo, ["commit", "-m", "test: ajout"]);
+      await git(repo, ["push", "origin", "HEAD:main"]);
 
       assert.equal(originCommitCount(origin), 2, "seed + commit de l'agent");
     } finally {
@@ -195,11 +222,11 @@ describe("scénario complet (miroir de runImplement)", () => {
     }
   });
 
-  test("cas hostile : l'altération est détectée avant tout git status/add/commit/push, rien n'est poussé", () => {
+  test("cas hostile : l'altération est détectée avant tout git status/add/commit/push, rien n'est poussé", async () => {
     const { root, repo, origin } = makeRepoWithOrigin();
     try {
-      git(repo, ["config", "user.name", "cds-agent"]);
-      git(repo, ["config", "user.email", "cds-agent@test.local"]);
+      await git(repo, ["config", "user.name", "cds-agent"]);
+      await git(repo, ["config", "user.email", "cds-agent@test.local"]);
       const baseline = fingerprintGitMeta(repo);
 
       // Agent hostile : dépose un hook ET une clé de config dangereuse.
@@ -218,6 +245,72 @@ describe("scénario complet (miroir de runImplement)", () => {
       // git et ne rien pousser. On vérifie juste l'effet observable : origin
       // n'a toujours que le commit "seed".
       assert.equal(originCommitCount(origin), 1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("§4.5 : git() est asynchrone et ne bloque pas la boucle d'événements", () => {
+  test("un timer programmé en parallèle se déclenche pendant l'exécution d'une commande git lente", async () => {
+    const { root, repo } = makeRepoWithOrigin();
+    // "git" lent et artificiel : un script shim placé en tête de PATH,
+    // qui dort avant d'exécuter le vrai git. sanitizedEnv() (utilisée par
+    // git()) transmet PATH tel quel, donc git() ira bien chercher ce shim.
+    const binDir = mkdtempSync(join(tmpdir(), "cds-agent-slow-git-bin-"));
+    const realGit = execFileSync("which", ["git"]).toString().trim();
+    const shimPath = join(binDir, "git");
+    writeFileSync(
+      shimPath,
+      `#!/bin/sh\nsleep 0.3\nexec "${realGit}" "$@"\n`,
+    );
+    chmodSync(shimPath, 0o755);
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${originalPath}`;
+
+    try {
+      let timerFired = false;
+      const timer = setTimeout(() => {
+        timerFired = true;
+      }, 30);
+
+      await git(repo, ["status", "--porcelain=v1", "-uall"]);
+
+      clearTimeout(timer);
+      assert.equal(
+        timerFired,
+        true,
+        "le timer (30 ms) programmé avant la commande git (≈300 ms) aurait dû " +
+          "se déclencher pendant son exécution si la boucle d'événements " +
+          "n'était pas bloquée",
+      );
+    } finally {
+      process.env.PATH = originalPath;
+      rmSync(root, { recursive: true, force: true });
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("§4.5 : maxBuffer explicite, une sortie git de plus de 1 Mo ne lève plus ENOBUFS", () => {
+  test("git show sur un fichier de plusieurs Mo réussit intégralement", async () => {
+    const { root, repo } = makeRepoWithOrigin();
+    try {
+      // 2 Mo de contenu texte, largement au-delà du maxBuffer par défaut de
+      // Node (1 Mo) pour execFile/execFileSync.
+      const line = "x".repeat(100) + "\n";
+      const big = line.repeat(20_000);
+      writeFileSync(join(repo, "big.txt"), big);
+      await git(repo, ["add", "--all"]);
+      await git(repo, ["commit", "-m", "gros fichier"]);
+
+      const output = await git(repo, ["show", "HEAD:big.txt"]);
+      assert.equal(
+        output.length,
+        big.length,
+        "la sortie complète doit être récupérée, sans troncature ni ENOBUFS",
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

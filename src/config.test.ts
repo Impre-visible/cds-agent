@@ -192,6 +192,30 @@ describe("buildConfig — configuration valide complète", () => {
   });
 });
 
+describe("buildConfig — installIgnoreScripts (§1.6)", () => {
+  test("activé par défaut : --ignore-scripts protège l'installation tant qu'on ne l'a pas désactivé explicitement", () => {
+    const config = buildConfig(baseEnv());
+    assert.equal(config.installIgnoreScripts, true);
+  });
+
+  test("désactivable via INSTALL_IGNORE_SCRIPTS=0", () => {
+    const config = buildConfig(baseEnv({ INSTALL_IGNORE_SCRIPTS: "0" }));
+    assert.equal(config.installIgnoreScripts, false);
+  });
+});
+
+describe("buildConfig — cloneDepth (§4.7)", () => {
+  test("profondeur par défaut : clone superficiel plutôt que l'historique complet", () => {
+    const config = buildConfig(baseEnv());
+    assert.equal(config.cloneDepth, 20);
+  });
+
+  test("CLONE_DEPTH=0 redonne un clone complet (comportement précédent)", () => {
+    const config = buildConfig(baseEnv({ CLONE_DEPTH: "0" }));
+    assert.equal(config.cloneDepth, 0);
+  });
+});
+
 describe("buildConfig — testDirectoryOverrides (dossiers de test par projet)", () => {
   test("absent, la map est vide (comportement par défaut sûr)", () => {
     const config = buildConfig(baseEnv());

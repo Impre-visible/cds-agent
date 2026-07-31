@@ -241,6 +241,30 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     gitAuthorEmail: env.GIT_AUTHOR_EMAIL ?? "cds-agent@local.invalid",
     testCommand: env.TEST_COMMAND ?? "npm test",
     installCommand: env.INSTALL_COMMAND ?? "npm install",
+    /**
+     * §1.6 : par défaut, l'installation se fait avec les scripts du dépôt
+     * cible désactivés (`--ignore-scripts` ajouté par implement.ts). Sans ce
+     * réglage, un `postinstall` du dépôt cible s'exécute avec un accès
+     * réseau complet (network: true), avant que quoi que ce soit n'ait été
+     * vérifié dans ce qu'a produit l'agent — structurel (il faut bien
+     * installer), mais on ne l'accepte plus par défaut. Compromis assumé :
+     * certains dépôts ne s'installent pas correctement sans leurs scripts
+     * (génération de fichiers, binaires natifs...) ; INSTALL_IGNORE_SCRIPTS=0
+     * retombe sur le comportement précédent pour ceux-là, au cas par cas.
+     */
+    installIgnoreScripts: env.INSTALL_IGNORE_SCRIPTS !== "0",
+    /**
+     * §4.7 : profondeur de clone par défaut. Sans elle, chaque review et
+     * chaque implémentation reclone tout l'historique du dépôt — plusieurs
+     * minutes et des centaines de Mo sur un dépôt d'entreprise, pour un usage
+     * qui n'a besoin que de l'état courant de la branche. 0 désactive la
+     * limite (clone complet, comportement précédent) : utile si un dépôt
+     * particulier a besoin de tout son historique. Une valeur trop petite
+     * n'est pas dangereuse — voir checkHeadIntegrity/safeMergeBase dans
+     * implement.ts, qui approfondit à la demande (`fetch --unshallow`)
+     * quand `merge-base` échoue faute d'ancêtre commun connu localement.
+     */
+    cloneDepth: finiteNumber(env, "CLONE_DEPTH", 20, { min: 0 }),
     // Exprimé en minutes côté env, même logique que agentTimeoutMs.
     commandTimeoutMs:
       finiteNumber(env, "COMMAND_TIMEOUT_MINUTES", 5, { min: 1, max: 60 }) *
