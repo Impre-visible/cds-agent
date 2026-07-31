@@ -1,5 +1,5 @@
 import { config } from "../config.ts";
-import { gitlab, GitLabError } from "../gitlab/client.ts";
+import { gitlab, GitLabError, resourceKind } from "../gitlab/client.ts";
 import { RequestStore } from "./store.ts";
 import type { AgentRequest, GitLabUser, Todo } from "../types.ts";
 import { buildRequest, defuseMentions } from "./request.ts";
@@ -11,6 +11,7 @@ const store = new RequestStore(config.stateFile);
 let bot: GitLabUser;
 const queue = new TaskQueue(runTask);
 const examined = new Set<number>();
+const attempts = new Map<number, number>();
 
 function ackBody(request: AgentRequest, position: number): string {
   const quoted = defuseMentions(request.text)
@@ -63,6 +64,10 @@ async function acknowledge(
 }
 
 async function handle(todo: Todo): Promise<void> {
+  if (process.env.FORCE_HANDLE_ERROR === "1") {
+    throw new Error("échec simulé pour tester le compteur");
+  }
+
   const result = await buildRequest(todo, bot);
 
   if (!result.ok) {
@@ -128,6 +133,25 @@ async function collectTodos(): Promise<Todo[]> {
   );
 }
 
+/** Le demandeur ne doit jamais rester sans réponse, même quand tout casse. */
+async function notifyGiveUp(todo: Todo, reason: string): Promise<void> {
+  const kind = resourceKind(todo.target_type);
+  const projectId = todo.project?.id;
+  const iid = todo.target?.iid;
+  if (!kind || !projectId || !iid) return;
+
+  try {
+    await gitlab.createNote(
+      projectId,
+      kind,
+      iid,
+      `🤖 Demande abandonnée après ${config.maxAttempts} tentatives.\n\n\`\`\`\n${reason.slice(0, 500)}\n\`\`\`\n\n<sub>cds-agent</sub>`,
+    );
+  } catch (error) {
+    console.error(`    notification impossible : ${(error as Error).message}`);
+  }
+}
+
 async function poll(): Promise<void> {
   const todos = (await collectTodos()).filter((todo) => !examined.has(todo.id));
   const stamp = new Date().toLocaleTimeString("fr-FR");
@@ -142,11 +166,27 @@ async function poll(): Promise<void> {
     try {
       await handle(todo);
       examined.add(todo.id);
+      attempts.delete(todo.id);
     } catch (error) {
-      // Pas de marquage : la demande sera réessayée au prochain cycle.
+      const count = (attempts.get(todo.id) ?? 0) + 1;
+      attempts.set(todo.id, count);
+      const message = (error as Error).message;
+
+      if (count < config.maxAttempts) {
+        console.error(
+          `  to-do #${todo.id} en échec (${count}/${config.maxAttempts}) : ${message}`,
+        );
+        continue;
+      }
+
+      // Plafond atteint : on abandonne, mais le demandeur doit être prévenu.
       console.error(
-        `  to-do #${todo.id} en échec : ${(error as Error).message}`,
+        `  to-do #${todo.id} ABANDONNÉ après ${count} tentatives : ${message}`,
       );
+      examined.add(todo.id);
+      attempts.delete(todo.id);
+      await notifyGiveUp(todo, message);
+      await finishTodo(todo.id);
     }
   }
 }

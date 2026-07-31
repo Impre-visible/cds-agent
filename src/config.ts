@@ -82,6 +82,7 @@ export const config = {
   inferenceUrl:
     process.env.CONTAINER_INFERENCE_URL ??
     "http://host.docker.internal:1234/v1",
+  maxAttempts: Number(process.env.MAX_ATTEMPTS ?? 3),
 } as const;
 
 /** Credential git passé par variables d'environnement : rien n'est écrit sur disque. */
