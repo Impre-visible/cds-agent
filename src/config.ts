@@ -36,6 +36,16 @@ function list(name: string): string[] {
     .filter(Boolean);
 }
 
+/** Format : "groupe/depot=image,autre/depot=autre-image" */
+function parseImageMap(raw: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const entry of raw.split(",")) {
+    const [path, image] = entry.split("=").map((part) => part.trim());
+    if (path && image) map.set(path.toLowerCase(), image);
+  }
+  return map;
+}
+
 export const config = {
   gitlabUrl: (process.env.GITLAB_URL ?? "https://gitlab.com").replace(
     /\/+$/,
@@ -61,6 +71,12 @@ export const config = {
   installCommand: process.env.INSTALL_COMMAND ?? "npm install",
   commandTimeoutMs: Number(process.env.COMMAND_TIMEOUT_MINUTES ?? 5) * 60_000,
   fakeAgentScript: process.env.FAKE_AGENT_SCRIPT ?? "",
+  useDocker: process.env.USE_DOCKER === "1",
+  dockerImages: parseImageMap(process.env.DOCKER_IMAGES ?? ""),
+  dockerDefaultImage:
+    process.env.DOCKER_DEFAULT_IMAGE ?? "node:22-bookworm-slim",
+  dockerMemory: process.env.DOCKER_MEMORY ?? "4g",
+  dockerCpus: process.env.DOCKER_CPUS ?? "4",
 } as const;
 
 /** Credential git passé par variables d'environnement : rien n'est écrit sur disque. */

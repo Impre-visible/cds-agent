@@ -4,6 +4,7 @@ import { collectChanges } from "./guard.ts";
 import { gitlab } from "../gitlab/client.ts";
 import { createWorkspace, git, runCommand } from "../agent/workspace.ts";
 import type { TaskContext } from "../types.ts";
+import { basename, resolve } from "node:path";
 
 export interface ImplementResult {
   status: "pushed" | "rejected" | "no-change" | "tests-red";
@@ -43,7 +44,10 @@ export async function runImplement(
     git(repo, ["config", "user.email", config.gitAuthorEmail]);
 
     console.log(`    installation des dépendances`);
-    const install = runCommand(repo, config.installCommand);
+    const install = await runCommand(repo, config.installCommand, {
+      projectPath: context.projectPath,
+      network: true,
+    });
     if (!install.ok) {
       return {
         status: "tests-red",
@@ -54,7 +58,10 @@ export async function runImplement(
     }
 
     // Référence : si la suite est déjà rouge, on ne saura rien conclure ensuite.
-    const baseline = runCommand(repo, config.testCommand);
+    const baseline = await runCommand(repo, config.testCommand, {
+      projectPath: context.projectPath,
+    });
+
     if (!baseline.ok) {
       return {
         status: "tests-red",
@@ -66,7 +73,24 @@ export async function runImplement(
 
     if (config.fakeAgentScript) {
       console.log(`    agent simulé : ${config.fakeAgentScript}`);
-      const fake = runCommand(repo, config.fakeAgentScript);
+
+      // Le script vit sur l'hôte : en mode conteneur il faut le monter et réécrire son chemin.
+      let command = config.fakeAgentScript;
+      let mounts: { host: string; container: string }[] | undefined;
+
+      if (config.useDocker) {
+        const scriptPath = resolve(
+          config.fakeAgentScript.replace(/^bash\s+/, ""),
+        );
+        const fixturesDir = resolve(scriptPath, "..");
+        mounts = [{ host: fixturesDir, container: "/fixtures" }];
+        command = `bash /fixtures/${basename(scriptPath)}`;
+      }
+
+      const fake = await runCommand(repo, command, {
+        projectPath: context.projectPath,
+        mounts,
+      });
       console.log(fake.output);
     } else {
       await runAgent(repo, buildPrompt(context));
@@ -97,7 +121,9 @@ export async function runImplement(
     }
 
     // On ne croit pas l'agent sur parole : on relance la suite nous-mêmes.
-    const verdict = runCommand(repo, config.testCommand);
+    const verdict = await runCommand(repo, config.testCommand, {
+      projectPath: context.projectPath,
+    });
     if (!verdict.ok) {
       return {
         status: "tests-red",

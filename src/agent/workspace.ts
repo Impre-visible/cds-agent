@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config, gitCredentialEnv, sanitizedEnv } from "../config.ts";
+import { imageFor, runInSandbox } from "./sandbox.ts";
 
 export interface Workspace {
   root: string;
@@ -80,7 +81,25 @@ export interface CommandResult {
   output: string;
 }
 
-export function runCommand(repo: string, command: string): CommandResult {
+export interface RunOptions {
+  projectPath: string;
+  network?: boolean;
+  mounts?: { host: string; container: string }[];
+}
+
+export async function runCommand(
+  repo: string,
+  command: string,
+  options: RunOptions,
+): Promise<CommandResult> {
+  if (config.useDocker) {
+    return runInSandbox(repo, imageFor(options.projectPath), command, {
+      network: options.network,
+      mounts: options.mounts,
+    });
+  }
+
+  // Exécution directe : conservée pour le POC local, à proscrire en production.
   try {
     const output = execFileSync("bash", ["-lc", command], {
       cwd: repo,

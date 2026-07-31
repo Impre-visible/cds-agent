@@ -51,13 +51,23 @@ export function validateRemarks(
   const valid: ValidatedRemark[] = [];
   const rejected: string[] = [];
 
+  const seen = new Set<string>();
+
   for (const remark of remarks) {
     const file = byPath.get(remark.file);
     if (!file) {
       rejected.push(`${remark.file} — fichier absent du diff`);
       continue;
     }
+
     const position = lineIndex.get(remark.file)?.get(remark.line) ?? null;
+    const key = `${remark.file}:${position?.newLine ?? "file"}`;
+    if (seen.has(key)) {
+      rejected.push(`${key} — doublon, une seule remarque par ligne`);
+      continue;
+    }
+    seen.add(key);
+
     valid.push({
       file,
       position,
