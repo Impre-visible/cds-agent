@@ -1,0 +1,396 @@
+# cds-agent
+
+POC : un daemon qui surveille les to-dos GitLab d'un compte bot, détecte une
+mention `@bot` dans un commentaire ou une description, et délègue à un agent
+LLM local (via [opencode](https://opencode.ai) + un serveur d'inférence
+compatible OpenAI, typiquement LM Studio) soit une revue de merge request,
+soit l'écriture de tests sur la branche source de la MR. L'agent tourne dans
+un conteneur Docker isolé ; ce que produit une exécution est revérifié côté
+hôte avant toute publication ou tout push.
+
+**C'est un POC**, pas un service prêt pour la production : la file de tâches
+est en mémoire (perte au redémarrage), un seul daemon traite un seul PAT
+GitLab, il n'y a pas de webhook (uniquement du polling), et une grande partie
+des protections documentées ici réduisent un risque sans l'éliminer. La
+section [Limites connues](#limites-connues) liste ce qui est vraiment
+couvert et ce qui ne l'est pas — à lire avant de faire confiance à cet outil
+sur un dépôt qui compte.
+
+## Sommaire
+
+- [Fonctionnement](#fonctionnement)
+- [Prérequis](#prérequis)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Lancement](#lancement)
+- [Scripts npm](#scripts-npm)
+- [Images Docker](#images-docker)
+- [Modèle local](#modèle-local)
+- [Garde-fous de sécurité](#garde-fous-de-sécurité)
+- [Limites connues](#limites-connues)
+- [Tests](#tests)
+- [Documentation complémentaire](#documentation-complémentaire)
+
+## Fonctionnement
+
+```mermaid
+flowchart TD
+    A[Polling GitLab toutes les POLL_INTERVAL_MS] --> B{to-do pending ou\ndone récent, non vu}
+    B -->|mention @bot valide| C[authorize: ALLOWED_PROJECTS / ALLOWED_USERS]
+    C -->|autorisé, pas déjà traité| D[claimed: réservation dans le store]
+    D --> E[file en mémoire, FIFO, 1 worker]
+    E --> F[accusé de réception + réaction emoji, to-do marqué done]
+    F --> G[worker: construction du contexte MR]
+    G --> H{intention}
+    H -->|review| I[clone superficiel, prompt + diff numéroté, agent en sandbox]
+    I --> J[extraction JSON, validation, publication ligne / fichier / général]
+    H -->|implémente les tests| K[clone superficiel, install, tests de référence, agent en sandbox]
+    K --> L[contrôle HEAD + .git, garde-fou de chemin, tests rejoués, push si vert]
+    J --> M[commentaire de résultat posté sur la MR]
+    L --> M
+```
+
+Déroulé, dans l'ordre :
+
+1. **Polling** — toutes les `POLL_INTERVAL_MS` (30 s par défaut), le daemon
+   récupère les to-dos GitLab `pending` du compte bot, plus les `done`
+   récents (fenêtre `LOOKBACK_MINUTES`) pour rattraper un to-do que le bot
+   aurait lui-même résolu avant de l'avoir lu.
+2. **Détection de la demande** — un to-do n'est retenu que si l'action est
+   `mentioned`/`directly_addressed`, la cible une issue ou une MR, et le
+   texte (commentaire ou description) contient littéralement `@BOT_USERNAME`.
+   Une note système, ou écrite par le bot lui-même, est ignorée.
+3. **Autorisation** — `ALLOWED_PROJECTS` puis `ALLOWED_USERS` : listes
+   blanches, *fail-closed* (vides par défaut ⇒ rien n'est autorisé). Un dépôt
+   hors périmètre est refusé silencieusement (pas de commentaire, pour ne pas
+   révéler l'existence du bot) ; un auteur refusé sur un dépôt autorisé reçoit
+   une réponse explicite.
+4. **Réservation** — la demande est enregistrée `claimed` dans un journal
+   append-only (`STATE_FILE`) avant toute autre écriture, pour qu'un crash à
+   ce stade ne rejoue jamais une demande déjà accusée.
+5. **File** — poussée dans une file en mémoire strictement séquentielle (un
+   seul worker à la fois, quel que soit le dépôt).
+6. **Accusé de réception** — réaction `:eyes:` puis commentaire citant la
+   demande et sa position dans la file ; le to-do est marqué `done` côté
+   GitLab à ce stade, avant même que le worker ait commencé.
+7. **Contexte** — le worker récupère la MR, son diff, et le ticket qu'elle
+   ferme (derniers commentaires humains inclus).
+8. **Intention** — détectée par mots-clés dans le texte de la demande :
+   « review/revue/relis » ou « tests… implémente/écris/ajoute/crée ».
+9. **Exécution en sandbox** — clone superficiel du dépôt, prompt construit
+   avec délimiteurs explicites autour de tout texte non fiable (demande,
+   ticket, diff), agent lancé dans un conteneur Docker durci (réseau limité à
+   un proxy d'inférence local, système de fichiers en lecture seule sauf
+   `/repo` et un tmpfs borné, capacités Linux réduites).
+10. **Contrôle et publication** — pour une review : extraction et validation
+    stricte du JSON produit, publication idempotente (une remarque déjà
+    postée n'est jamais republiée) avec repli ligne → fichier → commentaire
+    général. Pour une implémentation de tests : vérification que le
+    daemon reste seul committeur (`checkHeadIntegrity`), que seuls des
+    fichiers de test ont été touchés (`tasks/guard.ts`), que la suite est
+    verte, et que la branche n'est pas protégée — alors seulement, push.
+11. **Rapport** — un commentaire de résultat part toujours vers le
+    demandeur, y compris en cas d'échec.
+
+Le seul flux réellement câblé aujourd'hui est celui des **merge requests** :
+`src/tasks/router.ts` répond poliment sur toute autre cible (« Seules les
+merge requests sont gérées pour l'instant »).
+
+## Prérequis
+
+- **Node.js 26** (le projet exécute directement les `.ts` via le
+  type-stripping natif de Node, sans étape de build — `node --test
+  'src/**/*.test.ts'` et `tsx` en dépendent). Testé avec Node 26.3.0.
+- **Docker** en état de marche, avec un utilisateur autorisé à lancer
+  `docker run` — la sandbox est activée par défaut (voir
+  [Configuration](#configuration)).
+- **Un serveur d'inférence compatible OpenAI** joignable depuis l'hôte
+  (LM Studio en pratique ; voir [Modèle local](#modèle-local)).
+- **`opencode`** : pas requis sur l'hôte pour l'usage normal (il est installé
+  *dans* l'image `docker/agent.Dockerfile`) ; requis en revanche si vous
+  utilisez `ALLOW_UNSANDBOXED=1` (exécution hors Docker), qui appelle le
+  binaire `opencode` directement sur l'hôte (`src/agent/runner.ts`).
+- **Un compte GitLab bot** avec un token d'accès personnel (PAT), et le nom
+  d'utilisateur de ce compte.
+
+## Installation
+
+```bash
+git clone <ce dépôt>
+cd cds-agent
+npm install
+cp .env.example .env
+# éditer .env : au minimum GITLAB_URL, GITLAB_TOKEN, BOT_USERNAME,
+# ALLOWED_PROJECTS, ALLOWED_USERS
+```
+
+`npm install` n'installe que les `devDependencies` du projet lui-même
+(`typescript`, `tsx`, `@types/node`) : le daemon n'a aucune dépendance de
+production, tout est écrit avec les modules natifs de Node.
+
+## Configuration
+
+Toutes les variables sont documentées, une par une, dans
+[`.env.example`](./.env.example) — nom exact, valeur par défaut, bornes de
+validation, comportement si absente. `src/config.ts` charge `.env` lui-même
+(mini-parseur maison, sans dépendance) puis valide chaque variable au
+démarrage : une valeur hors bornes ou mal formée fait échouer le daemon
+immédiatement, avec un message qui nomme la variable fautive plutôt que de
+laisser une valeur absurde se propager silencieusement (timeout à 0,
+`AGENT_MODEL` sans `/`, etc.).
+
+Quelques variables méritent une lecture attentive avant de démarrer :
+
+- **`ALLOW_UNSANDBOXED`** — coupe-circuit vers l'exécution hôte (pas de
+  Docker) : *à réserver au développement local*. L'agent (du code
+  potentiellement écrit par le LLM) tourne alors directement avec le profil
+  de connexion de l'utilisateur qui lance le daemon. `USE_DOCKER=0` **ne
+  suffit plus, à lui seul**, à désactiver la sandbox depuis le durcissement
+  de ce projet : le voir seul dans `.env` fait échouer le démarrage avec un
+  message explicite, précisément pour éviter qu'un réglage hérité d'avant ce
+  changement ne redésactive silencieusement la sandbox. Il faut soit ajouter
+  `ALLOW_UNSANDBOXED=1` en toute connaissance de cause, soit retirer
+  `USE_DOCKER=0`.
+- **`SANITIZED_ENV_EXTRA_KEYS`** — les processus enfants non fiables (git,
+  l'agent, `bash -lc` en mode non sandboxé) ne reçoivent qu'un environnement
+  expurgé (liste blanche : `PATH`, `HOME`, locale, `TMPDIR`, proxies HTTP —
+  voir `sanitizedEnv()` dans `src/config.ts`). Si un dépôt cible a besoin
+  d'une variable de plus (un proxy interne sous un nom maison, par exemple),
+  cette variable l'ajoute à la liste blanche — jamais l'inverse, il n'y a pas
+  de mécanisme pour retirer une clé de base.
+- **`TEST_DIRECTORY_OVERRIDES`** — le garde-fou de chemin
+  (`src/tasks/guard.ts`) reconnaît nativement `tests/`, `test/`,
+  `__tests__/`, `spec/` (à tout niveau du chemin) plus les conventions de
+  nommage usuelles (`*.test.ts`, `*_test.py`, `*Test.java`...). Un dépôt qui
+  range ses tests ailleurs (`e2e/` par exemple) peut le déclarer ici, dépôt
+  par dépôt (`groupe/depot=e2e|integration`), sans élargir la détection pour
+  tous les autres dépôts surveillés.
+- **`CLONE_DEPTH`** — clone superficiel par défaut (20 commits) pour éviter
+  de recloner tout l'historique d'un dépôt d'entreprise à chaque review ou
+  implémentation. `0` désactive la limite (clone complet). Une valeur faible
+  n'est pas dangereuse pour le contrôle de sécurité HEAD : `implement.ts`
+  approfondit à la demande (`git fetch --unshallow`) si `merge-base` échoue
+  faute d'ancêtre commun connu localement.
+- **`INSTALL_IGNORE_SCRIPTS`** — à `1` par défaut (implicite : toute valeur
+  différente de `"0"`) : l'installation du dépôt cible tourne avec
+  `--ignore-scripts`, pour qu'un `postinstall` hostile ne s'exécute pas avec
+  un accès réseau complet avant que quoi que ce soit n'ait été vérifié.
+  `INSTALL_IGNORE_SCRIPTS=0` revient au comportement historique — nécessaire
+  pour certains dépôts qui ne s'installent pas correctement sans leurs
+  scripts (binaires natifs, génération de fichiers).
+- **`GITLAB_REQUEST_TIMEOUT_MS`** — timeout HTTP appliqué à *toute* requête
+  GitLab, écritures comprises (20 s par défaut) : sans lui, une instance
+  GitLab qui pend bloquerait le worker indéfiniment. Les requêtes GET/HEAD
+  bénéficient en plus d'un réessai automatique avec backoff exponentiel à
+  jitter (`GITLAB_MAX_RETRIES`, `GITLAB_RETRY_BASE_MS`,
+  `GITLAB_RETRY_MAX_DELAY_MS`) sur 429/5xx/erreur réseau ; jamais les
+  écritures (POST), pour ne jamais risquer de publier deux fois le même
+  commentaire à cause d'un simple timeout réseau.
+
+Le fichier réel `.env` de ce dépôt (non versionné, voir `.gitignore`) ne
+renseigne aujourd'hui qu'une poignée de ces variables — tout le reste
+tourne sur les valeurs par défaut de `src/config.ts`. `.env.example` liste
+les trente-sept variables lues par `buildConfig()`.
+
+## Lancement
+
+```bash
+npm run dev
+```
+
+Démarre le daemon (`src/daemon/index.ts` via `tsx`, sans étape de build). Au
+démarrage : pose d'un verrou d'instance (`state/daemon.lock` par défaut, à
+côté de `STATE_FILE`), vérification que le PAT appartient bien à
+`BOT_USERNAME`, amorçage silencieux si l'état est vierge (tout ce qui existe
+déjà côté GitLab est marqué vu sans notification, pour ne pas déverser des
+mois de to-dos historiques au premier lancement), puis boucle de polling.
+
+`Ctrl-C` (SIGINT) ou `SIGTERM` déclenchent un arrêt gracieux : la file cesse
+d'accepter de nouvelles tâches, jusqu'à 30 s sont laissées à la tâche en
+cours pour se terminer, puis le daemon sort. Un second signal force la
+sortie immédiate (les conteneurs Docker déjà lancés ne sont alors pas
+attendus).
+
+## Scripts npm
+
+| Script | Commande | Rôle |
+|---|---|---|
+| `npm run dev` | `tsx src/daemon/index.ts` | Lance le daemon (polling + traitement des demandes). |
+| `npm test` | `node --test 'src/**/*.test.ts'` | Suite de tests native Node, 282 tests, aucune dépendance externe, aucun modèle ni token GitLab requis. |
+| `npm run test:watch` | `node --test --watch ...` | Idem, en mode watch. |
+| `npm run check` | `tsc --noEmit` | Seul filet de typage — voir [CI](#documentation-complémentaire), pas câblé automatiquement avant ce chantier. |
+| `npm run context -- <mr\|issue> <iid>` | `tsx src/tools/dump-context.ts` | Construit le `TaskContext` d'une MR ou d'une issue réelle et l'écrit dans `./context-dump.json` — utile pour inspecter ce que le prompt verra, sans lancer l'agent. |
+| `npm run review -- <mr-iid>` | `tsx src/tools/dry-review.ts` | Exécute une review réelle (contexte + agent + validation) sur la première entrée d'`ALLOWED_PROJECTS`, affiche les remarques sans les publier sur GitLab. |
+| `npm run publish -- <mr-iid>` | `tsx src/tools/dry-publish.ts` | Publie trois remarques écrites à la main (ligne ajoutée, ligne de contexte, ligne hors diff) sur une vraie MR, pour vérifier le comportement de `publishReview` (positions, repli, idempotence) sans dépendre du modèle. |
+| `npm run implement -- <mr-iid> <branche>` | `tsx src/tools/dry-implement.ts` | Exécute une implémentation réelle (clone, agent, garde-fous, push) sur la MR et la branche indiquées. |
+| `npm run proxy` | `tsx src/tools/proxy.ts` | Démarre isolément le proxy d'inférence filtrant (voir `INFERENCE_UPSTREAM_URL`/`INFERENCE_PROXY_PORT`), pour observer le trafic opencode ↔ LM Studio hors de tout conteneur. |
+
+Les scripts `review`/`publish`/`implement`/`context` appellent tous de vraies
+API GitLab (`ALLOWED_PROJECTS[0]`) : ils ne fonctionnent pas sans un `.env`
+valide et un token utilisable — contrairement à `npm test`, qui n'en dépend
+jamais.
+
+## Images Docker
+
+Deux Dockerfiles, deux usages distincts :
+
+- **`docker/node22.Dockerfile`** — image d'exécution pour l'installation et
+  les tests du dépôt cible (`DOCKER_DEFAULT_IMAGE`/`DOCKER_IMAGES`). Ne
+  contient qu'un environnement Node 22 + git.
+- **`docker/agent.Dockerfile`** — image dans laquelle tourne l'agent
+  (`AGENT_IMAGE`) : Node 22 + git + ripgrep + `opencode-ai` installé
+  globalement.
+
+```bash
+docker build -f docker/node22.Dockerfile -t cds-agent/node22 .
+docker build -f docker/agent.Dockerfile  -t cds-agent/agent-node22 .
+```
+
+Les deux images tournent sous un utilisateur non root par défaut (`agent`,
+uid 1001), **systématiquement écrasé** au lancement par `docker run --user
+<uid hôte>:<gid hôte>` (voir `hostUser()` dans `src/agent/sandbox.ts`) : le
+`USER` du Dockerfile n'est qu'un filet pour une invocation manuelle sans
+`--user`. `HOME` et le cache npm pointent sous `/tmp` (mondialement
+inscriptible), justement parce que l'uid réellement utilisé à l'exécution
+n'est pas forcément celui baké dans l'image.
+
+Si vos noms d'image diffèrent de ces exemples, ajustez `AGENT_IMAGE` et
+`DOCKER_DEFAULT_IMAGE`/`DOCKER_IMAGES` en conséquence dans `.env`.
+
+## Modèle local
+
+Le daemon ne parle pas directement à un modèle : il génère un prompt, le
+dépose dans le workspace de la tâche, et lance `opencode run --model
+<AGENT_MODEL> "$(cat prompt.txt)"` dans le conteneur agent, avec une config
+opencode générée à la volée pointant vers un fournisseur `openai-compatible`.
+
+Ce qu'il faut avoir en place :
+
+1. Un serveur compatible OpenAI qui écoute sur l'hôte (LM Studio par défaut,
+   `http://127.0.0.1:1234/v1` — `INFERENCE_UPSTREAM_URL`).
+2. Un modèle chargé dont l'identifiant apparaît dans `AGENT_MODEL`, au format
+   `fournisseur/modèle` (ex. `lmstudio/qwen2.5-coder-7b-instruct-mlx`) —
+   validé au démarrage, la partie après `/` sert de clé de modèle dans la
+   config opencode générée.
+3. Par défaut (sans `CONTAINER_INFERENCE_URL`), le conteneur agent ne connaît
+   **que** l'adresse d'un proxy HTTP filtrant démarré localement pour la
+   durée de l'exécution (`src/tools/proxy.ts`), qui relaie exclusivement vers
+   `INFERENCE_UPSTREAM_URL` — jamais un accès direct et ouvert à
+   `host.docker.internal` (donc à tous les ports de l'hôte). Ce proxy ne
+   filtre que le trafic d'inférence d'opencode ; il ne bloque pas un appel
+   réseau que l'agent lancerait lui-même via un outil shell (voir
+   [Limites connues](#limites-connues)).
+
+Aucun modèle n'est fourni ni téléchargé par ce projet : c'est à
+l'opérateur de charger un modèle dans LM Studio (ou tout serveur compatible
+OpenAI) avant de lancer le daemon.
+
+## Garde-fous de sécurité
+
+Résumé ; le raisonnement complet de chacun est dans `docs/adr/` et dans les
+commentaires du code cité :
+
+- **Sandbox Docker par défaut** (`src/agent/sandbox.ts`) : `--user` (uid
+  hôte), `--read-only` + tmpfs borné pour `/tmp`, `--cap-drop ALL`,
+  `--security-opt no-new-privileges`, seccomp par défaut explicite,
+  `--pids-limit`, `--ulimit nofile`, réseau `none` par défaut (`bridge`
+  uniquement pour l'exécution de l'agent, via le proxy d'inférence).
+- **Hooks git neutralisés** et **empreinte de `.git/config`/`.git/hooks`**
+  avant/après l'exécution de l'agent (`src/agent/workspace.ts`,
+  `fingerprintGitMeta`) : toute altération interrompt le flux avant la
+  moindre commande git supplémentaire.
+- **Contrôle de HEAD contre le serveur authentifié**, pas contre l'état local
+  (`checkHeadIntegrity` dans `src/tasks/implement.ts`) : le daemon reste seul
+  committeur légitime.
+- **Garde-fou de chemin** (`src/tasks/guard.ts`) : seuls des fichiers
+  reconnus comme tests peuvent être modifiés en mode implémentation ; une
+  suppression de test existant est distinguée et rejetée explicitement (voir
+  `docs/adr/0002-garde-fou-chemin-tests.md`).
+- **Environnement expurgé** pour tout processus non fiable (`sanitizedEnv()`
+  dans `src/config.ts`) : liste blanche plutôt que liste noire.
+- **Sorties bornées en mémoire** (`src/agent/bounded-output.ts`) : une
+  commande bavarde ou une boucle qui spamme stdout ne fait pas grossir la
+  mémoire du daemon sans limite.
+- **Délimitation explicite des données non fiables** dans les prompts
+  (demande utilisateur, ticket lié, diff) : réduit la surface d'injection
+  sans prétendre l'éliminer — voir `docs/adr/0003-opencode-inference-locale.md`.
+
+## Limites connues
+
+Honnêtement, dans l'ordre où elles comptent le plus :
+
+- **Aucun modèle local n'a pu être exécuté pendant la rédaction de cette
+  documentation** (contrainte de l'environnement) : tout ce qui dépend d'un
+  vrai modèle (qualité des remarques, taux réel de réponses mal formées,
+  respect effectif des délimiteurs anti-injection par un modèle 7B) n'a pas
+  pu être vérifié en conditions réelles. Le code le dit lui-même à plusieurs
+  endroits (`src/tasks/review.ts`, `src/tools/proxy.ts`).
+- **File de tâches en mémoire, perte assumée au redémarrage** : une demande
+  accusée (`acked`) mais pas encore démarrée est purement et simplement
+  perdue si le daemon s'arrête ou crashe avant — le to-do GitLab correspondant
+  est déjà marqué `done`, rien ne la rejouera. Une demande `running`
+  interrompue n'est jamais rejouée automatiquement au redémarrage (elle
+  pourrait être en train de pousser du code) : elle est signalée « à vérifier
+  à la main ». Voir `docs/adr/0004-contrat-fiabilite-file-memoire.md`.
+- **Polling, pas de webhook** : latence de `POLL_INTERVAL_MS` (30 s par
+  défaut), deux appels API GitLab par cycle et par instance. `LOOKBACK_MINUTES`
+  filtre les to-dos `done` sur leur `created_at`, alors que l'événement
+  pertinent est le passage à *done* — un to-do créé longtemps avant d'être
+  résolu peut donc sortir de la fenêtre de rattrapage avant même d'être
+  rattrapé. Voir `docs/adr/0001-polling-plutot-que-webhook.md`.
+- **Le garde-fou de chemin protège *quels fichiers* sont touchés, pas ce
+  qu'ils contiennent** : rien n'empêche un agent d'écrire un fichier de test
+  qui ne teste rien d'utile (assertions vides ou triviales) tant qu'il vit
+  sous un chemin reconnu comme test.
+- **Le proxy d'inférence ne filtre que le trafic d'opencode**, pas un appel
+  réseau que l'agent lancerait lui-même via un outil shell dans le
+  conteneur : celui-ci reste sur un réseau `bridge` avec accès à
+  `host.docker.internal` pendant l'exécution de l'agent (`network: true`
+  dans `runAgentInSandbox`).
+- **La taille du bind mount `/repo` n'est pas plafonnable par `docker run`**
+  (contrairement au tmpfs `/tmp`, borné à 1 Go) : un agent qui écrirait des
+  fichiers volumineux dans le dépôt cloné n'est pas contenu par un flag
+  Docker.
+- **Verrou d'instance non atomique** (`src/daemon/lock.ts`) : fenêtre de
+  course théorique entre la lecture et l'écriture du fichier de verrou — non
+  couvert par une primitive cross-plateforme sans dépendance
+  supplémentaire ; documenté comme suffisant contre le scénario visé (une
+  seconde instance oubliée dans un tmux), pas contre deux démarrages
+  simultanés à la milliseconde près.
+- **`appendFileSync` sans `fsync`** (`src/daemon/store.ts`) : une ligne
+  `claimed` peut ne jamais atteindre le disque en cas de crash brutal
+  (coupure d'alimentation, `kill -9`), auquel cas la demande est rejouée
+  depuis zéro plutôt que simplement perdue — garantie plus faible que ce que
+  suggère le commentaire historique du code.
+- **Un seul daemon par verrou/PAT, un seul worker à la fois** : pas de
+  répartition de charge, un dépôt qui monopolise le worker retarde tous les
+  autres.
+- **`ALLOW_UNSANDBOXED=1`** exécute du code potentiellement écrit par le
+  LLM directement sur l'hôte, avec le profil de connexion complet de
+  l'utilisateur — à ne jamais utiliser hors développement local.
+- **Seules les merge requests sont traitées** : le chemin « issue directe »
+  existe dans `src/tasks/context.ts` (utilisé par `npm run context`) mais
+  `src/tasks/router.ts` refuse explicitement toute autre cible.
+
+## Tests
+
+```bash
+npm test
+```
+
+282 tests, `node --test` natif, aucune dépendance de test ajoutée. Les tests
+qui touchent Docker ou git injectent un faux binaire (voir
+`src/agent/sandbox.test.ts`, `src/agent/workspace.test.ts`) : la suite ne
+nécessite ni Docker réellement lancé, ni modèle d'inférence, ni token GitLab
+valide. `npm run check` (`tsc --noEmit`) est le seul contrôle de types ; les
+deux sont câblés dans `.gitlab-ci.yml`.
+
+## Documentation complémentaire
+
+- [`docs/deployment.md`](./docs/deployment.md) — comment ce POC tourne (ou
+  ne tourne pas) ailleurs qu'un terminal ouvert.
+- [`docs/adr/`](./docs/adr/) — décisions d'architecture : polling vs
+  webhook, garde-fou par chemin, opencode + inférence locale, contrat de
+  fiabilité de la file en mémoire.
+- [`.env.example`](./.env.example) — les trente-sept variables lues par
+  `buildConfig()`, une par une.

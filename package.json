@@ -1,8 +1,12 @@
 {
   "name": "cds-agent",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "POC : daemon GitLab qui délègue revue de MR et écriture de tests à un agent LLM local (opencode + LM Studio), exécuté en sandbox Docker.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=26.0.0"
+  },
   "scripts": {
     "test": "node --test 'src/**/*.test.ts'",
     "test:watch": "node --test --watch 'src/**/*.test.ts'",
@@ -14,13 +18,18 @@
     "publish": "tsx src/tools/dry-publish.ts",
     "implement": "tsx src/tools/dry-implement.ts"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "module",
+  "keywords": [
+    "gitlab",
+    "bot",
+    "llm-agent",
+    "code-review",
+    "poc"
+  ],
+  "author": "TODO: nom et contact du mainteneur — non renseigné à ce stade du POC",
+  "license": "TODO: licence à choisir — aucune n'a été retenue à ce stade du POC",
   "devDependencies": {
-    "@types/node": "^26.1.2",
-    "tsx": "^4.23.1",
-    "typescript": "^7.0.2"
+    "@types/node": "26.1.2",
+    "tsx": "4.23.1",
+    "typescript": "7.0.2"
   }
 }

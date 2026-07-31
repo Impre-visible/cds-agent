@@ -1,0 +1,51 @@
+# CI minimale : ce projet cible GitLab (le daemon lui-même parle à l'API
+# GitLab), .gitlab-ci.yml est donc le choix naturel plutôt qu'une CI GitHub.
+#
+# Deux jobs, alignés sur les scripts npm réellement présents dans
+# package.json — rien de plus n'existe à câbler aujourd'hui : pas de build
+# (le projet exécute les .ts directement via le type-stripping natif de
+# Node 26, voir README), pas de lint ni de formateur (voir la remarque en
+# fin de fichier), pas de déploiement automatisé (voir docs/deployment.md).
+#
+# Ne lance jamais le daemon lui-même : `npm run dev` exigerait un GITLAB_TOKEN
+# valide, un compte bot réel et, pour toute tâche de review/implémentation,
+# un modèle d'inférence local joignable — rien de tout cela n'existe dans un
+# runner CI. `npm test` couvre le code sans dépendre d'aucun des deux (voir
+# README, section Tests) : les points de contact avec Docker et git sont
+# testés via un faux binaire injecté, jamais le vrai.
+
+image: node:26-bookworm-slim
+
+stages:
+  - verify
+
+.node_cache: &node_cache
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - .npm/
+  before_script:
+    - npm ci --cache .npm --prefer-offline
+
+check:
+  stage: verify
+  <<: *node_cache
+  script:
+    - npm run check
+
+test:
+  stage: verify
+  <<: *node_cache
+  script:
+    - npm test
+
+# Pas de formateur câblé ici : le style du dépôt est homogène mais aucun
+# formateur (Prettier ou autre) n'est actuellement une dépendance du projet,
+# et la contrainte de ce chantier est zéro nouvelle dépendance npm. Ajouter
+# un formateur reviendrait à choisir, sans pouvoir le tester en conditions
+# réelles ici, une configuration qui reformatterait potentiellement tout le
+# dépôt en un seul commit — décision qui revient à l'équipe, pas à cette CI.
+# `tsc --noEmit` (job check ci-dessus) reste, comme avant ce chantier, le
+# seul filet de typage : il est désormais au moins exécuté automatiquement.
