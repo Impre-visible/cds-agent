@@ -680,7 +680,9 @@ commentaires du code cité :
 
 - **Sandbox Docker par défaut** (`src/agent/sandbox.ts`) : `--user` (uid
   hôte), `--read-only` + tmpfs borné pour `/tmp`, `--cap-drop ALL`,
-  `--security-opt no-new-privileges`, seccomp par défaut explicite,
+  `--security-opt no-new-privileges`, profil seccomp par défaut de Docker
+  (obtenu en ne passant aucune option `seccomp`, la seule façon correcte :
+  `seccomp=` attend un chemin de fichier de profil, pas un mot-clé),
   `--pids-limit`, `--ulimit nofile`, réseau `none` par défaut (`bridge`
   uniquement pour l'exécution de l'agent, via le proxy d'inférence).
 - **Hooks git neutralisés** et **empreinte de `.git/config`/`.git/hooks`**

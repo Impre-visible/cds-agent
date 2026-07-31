@@ -191,15 +191,24 @@ describe("buildDockerRunArgs", () => {
       assert.match(args[i + 1] ?? "", /^nofile=\d+:\d+$/);
     });
 
-    test("un profil seccomp explicite est déclaré, en plus de no-new-privileges déjà présent", () => {
+    test("aucune option seccomp n'est passée : c'est ainsi qu'on obtient le profil par défaut", () => {
+      // Régression réelle : une version précédente passait
+      // `--security-opt seccomp=default` en croyant « documenter
+      // l'intention ». Docker attend après `seccomp=` un CHEMIN de fichier
+      // de profil ou le littéral `unconfined` ; « default » n'existe pas, et
+      // `docker run` sortait en 125 sans jamais démarrer de conteneur.
+      // Le test d'alors vérifiait que l'option était présente — il est resté
+      // vert pendant que rien ne fonctionnait, parce qu'il contrôlait la
+      // forme de l'argument sans que rien ne vérifie que Docker l'accepte.
       const args = buildDockerRunArgs("/repo", "node:22", "npm test", "cds-x");
       const securityOpts = args
         .map((value, index) => (args[index - 1] === "--security-opt" ? value : undefined))
         .filter((value): value is string => value !== undefined);
       assert.ok(securityOpts.includes("no-new-privileges"));
-      assert.ok(
-        securityOpts.some((opt) => opt.startsWith("seccomp=")),
-        "un profil seccomp doit être explicitement déclaré",
+      assert.equal(
+        securityOpts.some((opt) => opt.startsWith("seccomp")),
+        false,
+        "ne rien passer applique le profil seccomp par défaut ; toute valeur ici doit être un chemin de profil réellement existant",
       );
     });
 

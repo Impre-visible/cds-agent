@@ -429,8 +429,16 @@ export async function runReview(
       channel = "stdout";
     }
     if (!raw) {
+      // La sortie brute, pas seulement le code : sans elle, un échec de
+      // `docker run` lui-même (code 125, profil ou option invalide, image
+      // absente) se présente comme « le modèle n'a rien produit » et envoie
+      // le diagnostic vers le modèle alors que le conteneur n'a jamais
+      // démarré. C'est exactement ce qui s'est produit avec un
+      // --security-opt seccomp invalide.
+      const tail = result.stdout.trim().slice(-600);
       throw new Error(
-        `aucun JSON exploitable, ni fichier ni stdout (code ${result.code})`,
+        `aucun JSON exploitable, ni fichier ni stdout (code ${result.code})` +
+          (tail ? ` — dernière sortie de l'agent :\n${tail}` : " — sortie vide"),
       );
     }
     log.info(`JSON récupéré via ${channel}`);

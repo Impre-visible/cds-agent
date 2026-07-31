@@ -125,14 +125,12 @@ export function buildDockerRunArgs(
     "ALL",
     "--security-opt",
     "no-new-privileges",
-    // Profil seccomp explicite (§4.4) : "default" est déjà celui que Docker
-    // applique implicitement, mais le nommer ici documente l'intention et
-    // protège contre un démon dont la config globale aurait basculé sur
-    // "unconfined" — sans dépendre d'un fichier de profil personnalisé
-    // (portabilité : un chemin de profil doit exister côté démon, pas
-    // toujours le host qui lance ce process, cf. Docker Desktop).
-    "--security-opt",
-    "seccomp=default",
+    // Pas de --security-opt seccomp ici, volontairement : Docker attend
+    // après "seccomp=" un CHEMIN vers un fichier de profil, ou le littéral
+    // "unconfined". Il n'existe pas de mot-clé "default" — le passer fait
+    // échouer `docker run` en code 125 ("opening seccomp profile (default)
+    // failed"), avant même que le conteneur démarre. Le profil par défaut
+    // s'obtient précisément en ne passant rien, ce qui est le cas ici.
     // Système de fichiers racine en lecture seule (§4.4) : seuls /repo (le
     // dépôt monté, ci-dessous) et /tmp (tmpfs, ci-dessous) restent
     // inscriptibles. Couvre le besoin réel (écrire dans le dépôt, cache
