@@ -20,6 +20,17 @@ export interface Todo {
   body: string;
   state: string;
   created_at: string;
+  /**
+   * Horodatage de la dernière modification du to-do lui-même (pas de sa
+   * cible) — confirmé présent sur l'objet top-level dans la documentation de
+   * l'API GitLab (`GET /todos`, exemples de réponse), distinct de
+   * `target.updated_at` qui porte sur l'issue/MR. C'est ce champ que
+   * `collectTodos()` (`daemon/todos.ts`) utilise pour filtrer les to-dos
+   * `done` récents : GitLab n'expose pas de `completed_at` séparé, mais un
+   * changement d'état (pending → done) met à jour ce champ comme toute
+   * autre modification du to-do — voir docs/adr/0001-polling-plutot-que-webhook.md.
+   */
+  updated_at: string;
   author: GitLabUser;
   project?: { id: number; path_with_namespace: string } | null;
 }

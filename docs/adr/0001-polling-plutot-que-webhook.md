@@ -49,19 +49,21 @@ projet ni chaque MR individuellement pour détecter une mention.
   [1 s, 1 h] par `config.ts`). Pas un problème pour un usage asynchrone
   (revue de code, tests), mais à ne jamais présenter comme temps réel.
 - **Fenêtre de rattrapage nécessaire, et imparfaite.** Un to-do peut être
-  auto-résolu par le bot lui-même (voir le commentaire de `collectTodos()`)
-  avant que le daemon ait eu l'occasion de le lire comme `pending` — d'où le
-  rattrapage des `done` récents. **Défaut non corrigé, à noter ici
-  explicitement** : ce filtre s'appuie sur `todo.created_at`
-  (`Date.parse(todo.created_at) >= cutoff` dans `collectTodos()`), alors que
-  l'événement réellement pertinent est le moment où le to-do **passe** à
-  `done` — GitLab n'expose pas ce second horodatage dans la même réponse. Un
-  to-do créé avant la fenêtre `LOOKBACK_MINUTES` mais résolu (marqué done)
-  dans cette fenêtre peut donc être manqué : le filtre regarde la mauvaise
-  date. C'est un défaut de code, volontairement non corrigé par ce chantier
-  de documentation (§ hors périmètre : ADR, pas correctif) — seulement
-  signalé ici pour qu'il ne reste pas implicite dans un commentaire perdu au
-  milieu de `index.ts`.
+  auto-résolu par le bot lui-même (voir le commentaire de `collectTodos()`,
+  `src/daemon/todos.ts`) avant que le daemon ait eu l'occasion de le lire
+  comme `pending` — d'où le rattrapage des `done` récents. **Corrigé** (ce
+  chantier de hardening) : ce filtre s'appuyait à l'origine sur
+  `todo.created_at`, alors que l'événement réellement pertinent est le
+  moment où le to-do **passe** à `done`. GitLab n'expose pas de `completed_at`
+  séparé, mais l'objet to-do porte bien un champ `updated_at` distinct de
+  `created_at` (confirmé dans la documentation de l'API GitLab, exemples de
+  réponse de `GET /todos`) — mis à jour par GitLab lors du passage
+  pending → done comme pour toute autre modification du to-do. Le filtre
+  utilise désormais `Date.parse(todo.updated_at) >= cutoff` (voir
+  `collectTodos()` dans `todos.ts`, couvert par `todos.test.ts`) ; le tri FIFO
+  reste, lui, basé sur `created_at` — c'est l'ordre d'arrivée de la demande
+  qui doit gouverner l'ordre de traitement, pas celui, indépendant, de sa
+  résolution.
 - **Aucune notion de « je n'ai rien manqué »** : contrairement à un webhook
   (qui garantit, sous réserve de disponibilité, la livraison de chaque
   événement), le polling ne fournit qu'une approximation « ce qui existe

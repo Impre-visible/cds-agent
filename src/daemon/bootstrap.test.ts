@@ -13,6 +13,7 @@ function makeTodo(id: number, state: "pending" | "done"): Todo {
     body: "@test-bot fais un truc",
     state,
     created_at: "2020-01-01T00:00:00.000Z",
+    updated_at: "2020-01-01T00:00:00.000Z",
     author: { id: 1, username: "alice", name: "Alice" },
     project: { id: 1, path_with_namespace: "grp/repo" },
   };

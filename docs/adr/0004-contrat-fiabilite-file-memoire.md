@@ -46,12 +46,16 @@ garantie forte non tenue :
   crashe avant) est purement perdue — et c'est déjà trop tard pour s'en
   excuser côté GitLab : le to-do correspondant a déjà été marqué `done` au
   moment de l'accusé de réception, avant même que la tâche n'entre dans la
-  file. `ackBody()` le dit explicitement dans le commentaire posté au
-  demandeur (« file en mémoire, non garantie en cas de redémarrage »), et
-  `shutdownSequence()` marque ces demandes `failed` avec une raison
+  file. `shutdownSequence()` marque ces demandes `failed` avec une raison
   explicite plutôt que de les laisser à `acked` pour toujours — ce qui
   aurait, à tort, laissé croire à un rejeu automatique possible au
-  redémarrage suivant.
+  redémarrage suivant. **`ackBody()` (`src/daemon/ack.ts`) ne le dit plus au
+  demandeur** — décision ultérieure du propriétaire du projet : aucun
+  contrat de fiabilité, faible ou fort, ne doit être annoncé dans le message
+  posté sur GitLab. L'information reste vraie, le comportement ci-dessus ne
+  change pas (`shutdownSequence()` continue de marquer `failed` ces
+  demandes), seule sa présence dans le message adressé à l'utilisateur a été
+  retirée ; elle reste documentée ici et dans le README (§ Limites connues).
 - **`appendFileSync` sans `fsync`** : le commentaire de `record()`
   (`store.ts`) le documente lui-même — une ligne `claimed` peut ne jamais
   atteindre le disque en cas de crash brutal (coupure d'alimentation,

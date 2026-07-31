@@ -3,7 +3,7 @@ import { config } from "../config.ts";
 import { gitlab, GitLabError, resourceKind } from "../gitlab/client.ts";
 import { RequestStore, canProcess } from "./store.ts";
 import type { AckHandle, AgentRequest, GitLabUser, Todo } from "../types.ts";
-import { buildRequest, defuseMentions } from "./request.ts";
+import { buildRequest } from "./request.ts";
 import { authorize } from "./authorize.ts";
 import { TaskQueue } from "./queue.ts";
 import { ShutdownController, drain } from "./shutdown.ts";
@@ -12,6 +12,8 @@ import { currentContainer, killContainer } from "../agent/sandbox.ts";
 import { currentWorkspace } from "../agent/workspace.ts";
 import { SeenTracker } from "./seen.ts";
 import { bootstrapIfFresh } from "./bootstrap.ts";
+import { collectTodos as collectTodosWith } from "./todos.ts";
+import { ackBody } from "./ack.ts";
 import { InstanceLock } from "./lock.ts";
 import { log, withRequestContext } from "../log.ts";
 import { daemonStatus } from "./status.ts";
@@ -142,32 +144,12 @@ class HandleFailure extends Error {
   }
 }
 
-function ackBody(request: AgentRequest, position: number): string {
-  const quoted = defuseMentions(request.text)
-    .split("\n")
-    .map((line) => `> ${line}`)
-    .join("\n");
-
-  const status =
-    position <= 1
-      ? "traitement en cours."
-      : `mise en file d'attente, position ${position}.`;
-
-  return [
-    `🤖 Demande reçue de @${request.requester}, ${status}`,
-    "",
-    quoted,
-    "",
-    // La file d'attente est en mémoire (voir queue.ts) : un arrêt ou un
-    // crash du daemon avant que cette tâche ne démarre la perd purement et
-    // simplement, sans notification ultérieure — le to-do GitLab est déjà
-    // marqué "done" par finishTodo() au moment où cet accusé de réception
-    // part, donc rien ne la fera réapparaître au redémarrage. Mieux vaut le
-    // dire ici que laisser croire à une garantie de traitement qui n'existe
-    // pas (voir aussi le commentaire au-dessus de onStranded dans main()).
-    `<sub>cds-agent · POC local · clé \`${request.key}\` · file en mémoire, non garantie en cas de redémarrage du daemon avant traitement</sub>`,
-  ].join("\n");
-}
+// ackBody() est extrait dans ack.ts (pur, testable indépendamment de main()
+// — voir ack.test.ts) : ne mentionne plus le contrat de fiabilité de la file
+// en mémoire dans le message posté sur GitLab (décision du propriétaire du
+// projet, aucune annonce de contrat de fiabilité à l'utilisateur), voir le
+// commentaire de ackBody() dans ack.ts pour où cette information vit
+// désormais.
 
 async function finishTodo(todoId: number): Promise<void> {
   if (config.skipMarkDone) {
@@ -309,26 +291,16 @@ async function handle(todo: Todo): Promise<void> {
   );
 }
 
-async function collectTodos(): Promise<Todo[]> {
-  const [pending, done] = await Promise.all([
-    gitlab.pendingTodos(),
-    gitlab.doneTodos(),
-  ]);
-
-  // Un to-do peut avoir été auto-résolu par une écriture du bot avant
-  // qu'on l'ait lu. On rattrape donc les « done » récents.
-  const cutoff = Date.now() - config.lookbackMs;
-  const recentDone = done.filter(
-    (todo) => Date.parse(todo.created_at) >= cutoff,
-  );
-
-  const byId = new Map<number, Todo>();
-  for (const todo of [...pending, ...recentDone]) byId.set(todo.id, todo);
-
-  // FIFO par date de création de la demande, pas par ordre de découverte.
-  return [...byId.values()].sort(
-    (a, b) => Date.parse(a.created_at) - Date.parse(b.created_at),
-  );
+// collectTodos() est extrait dans todos.ts (dépendances injectées, testable
+// sans réseau — voir todos.test.ts) : le filtre de rattrapage des to-dos
+// "done" récents porte sur `updated_at`, pas `created_at` — voir le
+// commentaire de collectTodos() dans todos.ts pour le raisonnement complet.
+function collectTodos(): Promise<Todo[]> {
+  return collectTodosWith({
+    pendingTodos: gitlab.pendingTodos,
+    doneTodos: gitlab.doneTodos,
+    lookbackMs: config.lookbackMs,
+  });
 }
 
 /**

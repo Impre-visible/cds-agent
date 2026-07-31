@@ -36,6 +36,7 @@ function makeTodo(id: number): Todo {
     body: "",
     state: "pending",
     created_at: new Date(2026, 0, 1, 0, 0, id).toISOString(),
+    updated_at: new Date(2026, 0, 1, 0, 0, id).toISOString(),
     author: { id: 1, username: "someone", name: "Someone" },
   };
 }

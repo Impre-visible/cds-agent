@@ -428,13 +428,18 @@ Honnêtement, dans l'ordre où elles comptent le plus :
   est déjà marqué `done`, rien ne la rejouera. Une demande `running`
   interrompue n'est jamais rejouée automatiquement au redémarrage (elle
   pourrait être en train de pousser du code) : elle est signalée « à vérifier
-  à la main ». Voir `docs/adr/0004-contrat-fiabilite-file-memoire.md`.
+  à la main ». Voir `docs/adr/0004-contrat-fiabilite-file-memoire.md`. **Cette
+  limite n'est plus annoncée dans le message d'accusé de réception posté sur
+  GitLab** (`ackBody()`, `src/daemon/ack.ts`) : décision du propriétaire du
+  projet de n'afficher à l'utilisateur aucun contrat de fiabilité, ni faible
+  ni fort — l'information reste vraie et documentée ici, mais n'a plus sa
+  place dans un message adressé au demandeur.
 - **Polling, pas de webhook** : latence de `POLL_INTERVAL_MS` (30 s par
   défaut), deux appels API GitLab par cycle et par instance. `LOOKBACK_MINUTES`
-  filtre les to-dos `done` sur leur `created_at`, alors que l'événement
-  pertinent est le passage à *done* — un to-do créé longtemps avant d'être
-  résolu peut donc sortir de la fenêtre de rattrapage avant même d'être
-  rattrapé. Voir `docs/adr/0001-polling-plutot-que-webhook.md`.
+  filtre les to-dos `done` récents sur leur `updated_at` (`src/daemon/todos.ts`)
+  — c'est ce champ, et non `created_at`, qui reflète le passage à *done*, un
+  to-do pouvant être créé bien avant sa résolution. Voir
+  `docs/adr/0001-polling-plutot-que-webhook.md`.
 - **Le garde-fou de chemin protège *quels fichiers* sont touchés, pas ce
   qu'ils contiennent** : rien n'empêche un agent d'écrire un fichier de test
   qui ne teste rien d'utile (assertions vides ou triviales) tant qu'il vit
