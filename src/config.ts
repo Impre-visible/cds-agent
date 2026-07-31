@@ -263,6 +263,36 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
       env.CONTAINER_INFERENCE_URL ?? "http://host.docker.internal:1234/v1",
     // maxAttempts=0 désactiverait silencieusement les réessais.
     maxAttempts: finiteNumber(env, "MAX_ATTEMPTS", 3, { min: 1, max: 20 }),
+    // Au-delà, un GitLab qui pend (routeur en carafe, upstream mort...)
+    // bloquerait le worker indéfiniment — voir gitlab/client.ts. Plancher
+    // bas (50ms) délibérément permissif : sert surtout à garder les tests
+    // rapides contre un vrai serveur HTTP local (voir gitlab/client.test.ts) ;
+    // 5 min de plafond, au-delà autant dire qu'il n'y a plus de timeout.
+    gitlabRequestTimeoutMs: finiteNumber(
+      env,
+      "GITLAB_REQUEST_TIMEOUT_MS",
+      20_000,
+      { min: 50, max: 300_000 },
+    ),
+    // Nombre de réessais (en plus de la tentative initiale) pour les requêtes
+    // idempotentes (GET) face à une erreur transitoire (429, 5xx, réseau).
+    // 0 désactive les réessais sans désactiver le timeout ci-dessus — utile
+    // en test.
+    gitlabMaxRetries: finiteNumber(env, "GITLAB_MAX_RETRIES", 4, {
+      min: 0,
+      max: 10,
+    }),
+    // Délai de base et plafond du backoff exponentiel (avec jitter complet,
+    // voir gitlab/client.ts) entre deux tentatives. Le plafond évite qu'un
+    // 429 mal réglé ne fasse attendre le worker des minutes entières.
+    gitlabRetryBaseMs: finiteNumber(env, "GITLAB_RETRY_BASE_MS", 500, {
+      min: 1,
+      max: 60_000,
+    }),
+    gitlabRetryMaxDelayMs: finiteNumber(env, "GITLAB_RETRY_MAX_DELAY_MS", 8_000, {
+      min: 1,
+      max: 120_000,
+    }),
     // Porte de sortie pour sanitizedEnv() (voir plus bas) : la liste blanche
     // de base couvre les besoins génériques (PATH, HOME, proxies...), mais
     // un dépôt ou un environnement particulier peut avoir besoin d'une
