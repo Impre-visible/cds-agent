@@ -5,10 +5,50 @@ import type { AgentRequest, GitLabUser, Todo } from "../types.ts";
 import { buildRequest, defuseMentions } from "./request.ts";
 import { authorize } from "./authorize.ts";
 import { TaskQueue } from "./queue.ts";
+import { ShutdownController, drain } from "./shutdown.ts";
 import { runTask } from "../tasks/router.ts";
+import { currentContainer, killContainer } from "../agent/sandbox.ts";
+import { currentWorkspace } from "../agent/workspace.ts";
 
 const store = new RequestStore(config.stateFile);
 let bot: GitLabUser;
+
+/**
+ * Délai maximal laissé à la tâche en cours pour se terminer d'elle-même
+ * quand un arrêt est demandé (SIGINT/SIGTERM), avant qu'on abandonne et
+ * sorte quand même. Volontairement une constante locale plutôt qu'une
+ * variable d'environnement de plus dans config.ts (déjà bien chargé) : ce
+ * réglage n'a jamais eu besoin d'être ajusté en pratique, contrairement à
+ * pollIntervalMs ou aux timeouts de commande.
+ */
+const SHUTDOWN_GRACE_MS = 30_000;
+
+const shutdown = new ShutdownController();
+
+/**
+ * Premier SIGINT/SIGTERM : bascule en arrêt gracieux (voir shutdown.ts),
+ * réveille immédiatement une attente de polling en cours, et laisse la
+ * boucle principale dérouler la séquence de drain jusqu'à sa fin naturelle.
+ * Second signal : "forced" — quelqu'un qui tape Ctrl-C deux fois veut que ça
+ * s'arrête maintenant, on ne tente donc plus rien de propre et on sort tout
+ * de suite (process.exit ne tue pas les processus enfants déjà lancés —
+ * docker run, notamment — mais c'est le prix d'une sortie immédiate).
+ */
+function onSignal(signal: NodeJS.Signals): void {
+  const phase = shutdown.registerSignal();
+  if (phase === "draining") {
+    console.warn(
+      `\n⚠︎ ${signal} reçu : arrêt gracieux (jusqu'à ${SHUTDOWN_GRACE_MS / 1000} s pour finir la tâche en cours). ` +
+        `${signal} de nouveau pour forcer la sortie immédiate.`,
+    );
+    return;
+  }
+  console.error(`\n⚠︎ second ${signal} reçu : sortie immédiate, sans attendre.`);
+  process.exit(130);
+}
+
+process.on("SIGINT", () => onSignal("SIGINT"));
+process.on("SIGTERM", () => onSignal("SIGTERM"));
 
 /**
  * Le worker ne connaissait jusqu'ici que sa propre exécution : ni le
@@ -72,7 +112,14 @@ function ackBody(request: AgentRequest, position: number): string {
     "",
     quoted,
     "",
-    `<sub>cds-agent · POC local · clé \`${request.key}\`</sub>`,
+    // La file d'attente est en mémoire (voir queue.ts) : un arrêt ou un
+    // crash du daemon avant que cette tâche ne démarre la perd purement et
+    // simplement, sans notification ultérieure — le to-do GitLab est déjà
+    // marqué "done" par finishTodo() au moment où cet accusé de réception
+    // part, donc rien ne la fera réapparaître au redémarrage. Mieux vaut le
+    // dire ici que laisser croire à une garantie de traitement qui n'existe
+    // pas (voir aussi le commentaire au-dessus de onStranded dans main()).
+    `<sub>cds-agent · POC local · clé \`${request.key}\` · file en mémoire, non garantie en cas de redémarrage du daemon avant traitement</sub>`,
   ].join("\n");
 }
 
@@ -215,6 +262,16 @@ async function poll(): Promise<void> {
 
   console.log(`[${stamp}] ${todos.length} to-do(s) à examiner :`);
   for (const todo of todos) {
+    // Arrêt demandé en cours de cycle : on ne réclame (store.record("claimed"))
+    // ni ne poste d'accusé de réception pour aucun to-do supplémentaire. Ceux
+    // qui restent ici n'ont pas encore été touchés : ils seront repris tels
+    // quels au prochain démarrage du daemon.
+    if (shutdown.isStopping) {
+      console.log(
+        `  arrêt en cours : to-do #${todo.id} laissé de côté, sera repris au prochain démarrage`,
+      );
+      break;
+    }
     try {
       await handle(todo);
       examined.add(todo.id);
@@ -287,7 +344,7 @@ async function main(): Promise<void> {
   console.log(`Journal : ${config.stateFile}`);
   console.log(`Polling toutes les ${config.pollIntervalMs / 1000} s.\n`);
 
-  for (;;) {
+  while (!shutdown.isStopping) {
     try {
       await poll();
     } catch (error) {
@@ -297,7 +354,96 @@ async function main(): Promise<void> {
       }
       console.error(`[erreur] ${(error as Error).message}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, config.pollIntervalMs));
+    if (shutdown.isStopping) break;
+    // sleep() (et non un setTimeout brut) : un signal doit réveiller cette
+    // attente immédiatement, pas seulement après pollIntervalMs — jusqu'à 1h
+    // avec les bornes de config.ts. Voir shutdown.ts.
+    await shutdown.sleep(config.pollIntervalMs);
+  }
+
+  await shutdownSequence();
+}
+
+/**
+ * Séquence de sortie une fois la boucle de polling arrêtée : ferme la file
+ * (plus aucun push()), rend explicite dans le store la perte de ce qui n'a
+ * jamais démarré, puis attend au plus SHUTDOWN_GRACE_MS que la tâche en
+ * cours (s'il y en a une) se termine avant d'abandonner.
+ *
+ * Sur ce dernier point : une tâche "running" au moment de l'abandon n'est
+ * PAS marquée "failed" ici — c'est canProcess() qui en décide (voir
+ * store.ts), et il l'interdit délibérément : on ne sait pas si le worker a
+ * déjà poussé du code. Le prochain démarrage la signalera via
+ * store.interrupted() comme "à vérifier à la main", exactement comme un
+ * crash (voir plus haut dans main()) : un arrêt volontaire n'est pas plus
+ * sûr qu'un crash pour une tâche déjà en vol.
+ */
+async function shutdownSequence(): Promise<void> {
+  console.log("\nArrêt du daemon : fin du polling, drainage de la file...");
+
+  const outcome = await drain({
+    queue,
+    gracePeriodMs: SHUTDOWN_GRACE_MS,
+    // Ce qui n'a jamais démarré n'a, par construction de handle(), plus
+    // rien à voir avec GitLab : l'accusé de réception a déjà été posté et
+    // le to-do déjà marqué "done" avant même que push() ne rende la main
+    // (voir handle()). Rien ne le rejouera jamais tout seul. Le laisser à
+    // "acked" ferait croire à tort, via interrupted() au prochain
+    // démarrage, qu'un rejeu automatique est possible — on le marque donc
+    // "failed" ici, avec une raison qui dit la vérité : la perte devient un
+    // fait consigné plutôt qu'une promesse non tenue silencieuse.
+    onStranded: (stranded) => {
+      for (const request of stranded) {
+        store.record(
+          request.key,
+          request.todoId,
+          "failed",
+          "file en mémoire perdue à l'arrêt du daemon (jamais démarrée)",
+        );
+        console.warn(
+          `   ${request.key} abandonnée avant démarrage (arrêt du daemon)`,
+        );
+      }
+    },
+  });
+
+  if (outcome === "clean") {
+    console.log("Arrêt propre.");
+    process.exit(0);
+  }
+
+  console.error(
+    `⚠︎ la tâche en cours n'a pas fini dans le délai de grâce (${SHUTDOWN_GRACE_MS / 1000} s) : abandon.`,
+  );
+  await cleanupActiveResources();
+  process.exit(1);
+}
+
+/**
+ * Nettoyage best-effort de ce que la tâche abandonnée ci-dessus a pu
+ * laisser ouvert. Un seul worker tourne à la fois (voir queue.ts), donc au
+ * plus un conteneur et un workspace sont concernés — voir currentContainer()
+ * dans sandbox.ts et currentWorkspace() dans workspace.ts. Ne prétend pas
+ * couvrir tous les cas (le "second signal" ci-dessus sort avant même
+ * d'appeler cette fonction) : une vraie comptabilité des ressources actives
+ * demanderait de suivre chaque tâche individuellement, ce qui n'est pas
+ * justifié tant qu'il n'y a jamais qu'une tâche en vol.
+ */
+async function cleanupActiveResources(): Promise<void> {
+  const container = currentContainer();
+  if (container) {
+    console.warn(`   conteneur ${container} encore actif : kill...`);
+    await killContainer(container);
+  }
+
+  const workspace = currentWorkspace();
+  if (workspace) {
+    console.warn(`   workspace ${workspace.root} encore présent : suppression...`);
+    try {
+      workspace.dispose();
+    } catch (error) {
+      console.error(`   nettoyage du workspace impossible : ${(error as Error).message}`);
+    }
   }
 }
 

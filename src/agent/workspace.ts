@@ -36,6 +36,21 @@ export interface Workspace {
   dispose: () => void;
 }
 
+/**
+ * Workspace actuellement utilisé, s'il y en a un. Comme pour activeContainer
+ * dans sandbox.ts, un seul slot suffit tant qu'un seul worker tourne à la
+ * fois (voir queue.ts) : ni implement.ts ni review.ts n'en créent plus d'un
+ * en parallèle. Sert au nettoyage best-effort à l'arrêt forcé du daemon
+ * (voir index.ts) : dispose() est déjà appelé dans un `finally` par
+ * implement.ts/review.ts en fonctionnement normal, mais un `process.exit()`
+ * après épuisement du délai de grâce n'attend pas ce `finally`.
+ */
+let active: Workspace | undefined;
+
+export function currentWorkspace(): Workspace | undefined {
+  return active;
+}
+
 export function createWorkspace(
   projectPath: string,
   branch: string,
@@ -81,12 +96,17 @@ export function createWorkspace(
   const meta = join(root, "meta");
   mkdirSync(meta, { recursive: true });
 
-  return {
+  const workspace: Workspace = {
     root,
     repo,
     meta,
-    dispose: () => rmSync(root, { recursive: true, force: true }),
+    dispose: () => {
+      rmSync(root, { recursive: true, force: true });
+      if (active === workspace) active = undefined;
+    },
   };
+  active = workspace;
+  return workspace;
 }
 
 /** Ceinture et bretelles : on vérifie plutôt que de supposer. */

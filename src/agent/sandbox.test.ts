@@ -38,11 +38,14 @@ let runInSandbox: (
   output: string;
   timedOut: boolean;
 }>;
+let currentContainer: () => string | undefined;
+let killContainer: (name: string, dockerBin?: string) => Promise<void>;
 
 before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
-  ({ buildDockerRunArgs, runInSandbox } = await import("./sandbox.ts"));
+  ({ buildDockerRunArgs, runInSandbox, currentContainer, killContainer } =
+    await import("./sandbox.ts"));
 });
 
 describe("buildDockerRunArgs", () => {
@@ -206,5 +209,45 @@ describe("runInSandbox", () => {
     // en aveugle.
     assert.equal(result.code, 137);
     assert.equal(result.ok, false);
+  });
+
+  describe("currentContainer() / killContainer() — nettoyage à l'arrêt (voir index.ts)", () => {
+    test("currentContainer() suit le conteneur en cours, puis se libère à sa fin", async () => {
+      assert.equal(
+        currentContainer(),
+        undefined,
+        "rien ne tourne avant le démarrage du test",
+      );
+
+      const run = runInSandbox("/repo", "node:22", "CDS_TEST_HANG", {
+        dockerBin,
+        timeoutMs: 5_000,
+      });
+
+      // Laisse le temps au faux "docker run" de démarrer avant de lire le nom.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const name = currentContainer();
+      assert.ok(
+        name?.startsWith("cds-"),
+        "le nom suit le format cds-<uuid> (commit 2baa0be), qui rend le conteneur identifiable pour un nettoyage ciblé",
+      );
+
+      // Reproduit ce que ferait index.ts au nettoyage forcé : tuer par nom
+      // plutôt que d'attendre le timeout interne de runInSandbox.
+      await killContainer(name as string, dockerBin);
+      await run;
+
+      assert.equal(
+        currentContainer(),
+        undefined,
+        "le slot doit être libéré une fois le conteneur terminé, sinon un nettoyage suivant ciblerait un nom périmé",
+      );
+    });
+
+    test("killContainer() ne lève jamais, même vers un binaire docker inexistant", async () => {
+      await assert.doesNotReject(() =>
+        killContainer("cds-inexistant", "/chemin/vers/rien"),
+      );
+    });
   });
 });

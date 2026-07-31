@@ -11,6 +11,31 @@ export interface SandboxResult {
   timedOut: boolean;
 }
 
+/**
+ * Nom du conteneur actuellement en cours d'exécution, s'il y en a un. Un
+ * seul worker tourne à la fois (TaskQueue est strictement séquentiel, voir
+ * queue.ts), donc un simple slot suffit — pas besoin d'une vraie
+ * comptabilité multi-ressources. Sert uniquement au nettoyage best-effort à
+ * l'arrêt forcé du daemon (voir index.ts) : si le délai de grâce expire
+ * pendant qu'un conteneur tourne encore, on peut le cibler par son nom
+ * plutôt que d'abandonner en le laissant tourner indéfiniment.
+ */
+let activeContainer: string | undefined;
+
+export function currentContainer(): string | undefined {
+  return activeContainer;
+}
+
+/** Best-effort : ignore toute erreur (docker absent, conteneur déjà parti...). */
+export function killContainer(
+  name: string,
+  dockerBin = "docker",
+): Promise<void> {
+  return new Promise((resolve) => {
+    execFile(dockerBin, ["kill", name], () => resolve());
+  });
+}
+
 export function imageFor(projectPath: string): string {
   return (
     config.dockerImages.get(projectPath.toLowerCase()) ??
@@ -99,6 +124,7 @@ export function runInSandbox(
     // implement en parallèle, retries...) et il faut pouvoir cibler CE
     // conteneur précis au moment du kill, sans toucher aux autres.
     const containerName = `cds-${randomUUID()}`;
+    activeContainer = containerName;
     const args = buildDockerRunArgs(repo, image, command, containerName, options);
 
     console.log(
@@ -141,6 +167,7 @@ export function runInSandbox(
     child.on("error", (error) => {
       clearTimeout(timer);
       clearTimeout(killGrace);
+      if (activeContainer === containerName) activeContainer = undefined;
       resolve({
         ok: false,
         code: null,
@@ -151,6 +178,7 @@ export function runInSandbox(
     child.on("close", (code) => {
       clearTimeout(timer);
       clearTimeout(killGrace);
+      if (activeContainer === containerName) activeContainer = undefined;
       resolve({ ok: code === 0, code, output, timedOut });
     });
   });

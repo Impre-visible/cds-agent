@@ -101,4 +101,78 @@ describe("TaskQueue", () => {
 
     assert.deepEqual(executed, ["demande", "demande"]);
   });
+
+  describe("close() / waitForIdle() — drain à l'arrêt (voir shutdown.ts)", () => {
+    test("close() renvoie les tâches jamais démarrées et refuse tout push() ultérieur", async () => {
+      let release: (() => void) | undefined;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const queue = new TaskQueue<Item>(async (item) => {
+        if (item.key === "occupant") await blocked;
+      }, keyOf);
+
+      queue.push({ key: "occupant" });
+      await drain();
+      queue.push({ key: "en-attente-1" });
+      queue.push({ key: "en-attente-2" });
+
+      const stranded = queue.close();
+      assert.deepEqual(
+        stranded.map((item) => item.key),
+        ["en-attente-1", "en-attente-2"],
+        "les tâches encore en file, jamais démarrées, doivent être rendues à l'appelant",
+      );
+
+      assert.throws(
+        () => queue.push({ key: "trop-tard" }),
+        /file fermée/,
+        "une file fermée ne doit plus accepter de nouvelle tâche",
+      );
+
+      release?.();
+      await drain();
+    });
+
+    test("waitForIdle() attend la fin de la tâche en cours dans la limite du délai", async () => {
+      let release: (() => void) | undefined;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let finished = false;
+      const queue = new TaskQueue<Item>(async () => {
+        await blocked;
+        finished = true;
+      }, keyOf);
+
+      queue.push({ key: "occupant" });
+      await drain();
+
+      const waited = queue.waitForIdle(1_000);
+      release?.();
+
+      assert.equal(await waited, true, "waitForIdle() doit résoudre true dès que la tâche se termine");
+      assert.equal(finished, true);
+    });
+
+    test("waitForIdle() rend false si le délai expire avant la fin de la tâche", async () => {
+      const blocked = new Promise<void>(() => {
+        /* ne se résout jamais : simule une tâche qui ne finit pas */
+      });
+      const queue = new TaskQueue<Item>(async () => {
+        await blocked;
+      }, keyOf);
+
+      queue.push({ key: "bloquée" });
+      await drain();
+
+      const idle = await queue.waitForIdle(20);
+      assert.equal(idle, false, "le délai doit être respecté même si la tâche ne finit jamais");
+    });
+
+    test("waitForIdle() rend true immédiatement quand la file est déjà vide", async () => {
+      const queue = new TaskQueue<Item>(async () => {}, keyOf);
+      assert.equal(await queue.waitForIdle(1_000), true);
+    });
+  });
 });
