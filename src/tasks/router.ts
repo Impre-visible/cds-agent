@@ -3,6 +3,7 @@ import { gitlab } from "../gitlab/client.ts";
 import { publishReview } from "./publish.ts";
 import { runReview } from "./review.ts";
 import { runImplement } from "./implement.ts";
+import { defuseMentions } from "../daemon/request.ts";
 import type { AgentRequest } from "../types.ts";
 
 type Intent = "review" | "implement" | "unknown";
@@ -65,10 +66,17 @@ export async function runTask(request: AgentRequest): Promise<void> {
       const result = await runImplement(context, context.sourceBranch);
       const seconds = Math.round(result.durationMs / 1000);
 
+      // result.detail republie parfois du texte non maîtrisé : une sortie de
+      // commande (npm install, suite de tests) ou une liste de fichiers dont
+      // le nom vient du dépôt relu par l'agent. defuseMentions() neutralise
+      // mentions et quick actions avant republication, même logique qu'en
+      // publish.ts (§5.6). Appliqué sur le texte final (après troncature du
+      // "tests-red", pas avant) : c'est ce texte-là, exactement, qui part
+      // dans le commentaire.
       const messages: Record<typeof result.status, string> = {
-        pushed: `✅ Tests poussés sur \`${context.sourceBranch}\` en ${seconds} s — ${result.detail}`,
-        rejected: `⛔ Modifications refusées après ${seconds} s — ${result.detail}`,
-        "tests-red": `❌ Les tests ne passent pas après ${seconds} s, rien n'a été poussé.\n\n<details><summary>Sortie</summary>\n\n\`\`\`\n${result.detail.slice(-1500)}\n\`\`\`\n\n</details>`,
+        pushed: `✅ Tests poussés sur \`${context.sourceBranch}\` en ${seconds} s — ${defuseMentions(result.detail)}`,
+        rejected: `⛔ Modifications refusées après ${seconds} s — ${defuseMentions(result.detail)}`,
+        "tests-red": `❌ Les tests ne passent pas après ${seconds} s, rien n'a été poussé.\n\n<details><summary>Sortie</summary>\n\n\`\`\`\n${defuseMentions(result.detail.slice(-1500))}\n\`\`\`\n\n</details>`,
         "no-change": `🤷 L'agent n'a produit aucune modification en ${seconds} s.`,
       };
 
@@ -105,12 +113,20 @@ export async function runTask(request: AgentRequest): Promise<void> {
       {},
     );
 
+    // outcomes peut être vide alors que remarks ne l'était pas : toutes les
+    // remarques avaient déjà été publiées lors d'un précédent passage sur
+    // cette même MR (§5.5, voir publishReview). Le détail par emplacement
+    // n'a alors aucun sens à afficher (parenthèses vides).
+    const detail =
+      outcomes.length > 0
+        ? ` (${Object.entries(byPlacement)
+            .map(([k, v]) => `${v} ${k}`)
+            .join(", ")}).`
+        : " — déjà publiée(s) lors d'un précédent passage, rien de neuf à poster.";
+
     await report(
       request,
-      `🤖 Revue terminée en ${seconds} s — ${outcomes.length} remarque(s) publiée(s) ` +
-        `(${Object.entries(byPlacement)
-          .map(([k, v]) => `${v} ${k}`)
-          .join(", ")}).`,
+      `🤖 Revue terminée en ${seconds} s — ${outcomes.length} remarque(s) publiée(s)${detail}`,
     );
 
     console.log(
@@ -119,9 +135,16 @@ export async function runTask(request: AgentRequest): Promise<void> {
   } catch (error) {
     const message = (error as Error).message;
     console.error(`  [worker] échec ${request.key} : ${message}`);
-    // Le demandeur ne doit jamais rester sans réponse après un accusé de réception.
-    await report(request, `🤖 La tâche a échoué : \`${message}\``).catch(
-      () => {},
-    );
+    // Le demandeur ne doit jamais rester sans réponse après un accusé de
+    // réception. Le message d'erreur peut recopier du texte non maîtrisé
+    // (une réponse d'API, une sortie de commande) : on le défuse avant de le
+    // republier, comme pour result.detail plus haut (§5.6). Le simple
+    // entourage par des backticks ne suffit pas à lui seul : un message sur
+    // plusieurs lignes y ferait quand même apparaître une ligne en tout
+    // début de ligne côté GitLab.
+    await report(
+      request,
+      `🤖 La tâche a échoué : \`${defuseMentions(message)}\``,
+    ).catch(() => {});
   }
 }

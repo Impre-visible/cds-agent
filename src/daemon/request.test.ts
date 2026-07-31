@@ -6,11 +6,12 @@ import assert from "node:assert/strict";
 // l'environnement. On les injecte avant l'import dynamique pour rester
 // reproductible sans .env local (cf. review.test.ts pour la même astuce).
 let defuseMentions: (text: string) => string;
+let ZERO_WIDTH_SPACE: string;
 
 before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
-  ({ defuseMentions } = await import("./request.ts"));
+  ({ defuseMentions, ZERO_WIDTH_SPACE } = await import("./request.ts"));
 });
 
 describe("defuseMentions", () => {
@@ -51,13 +52,60 @@ describe("defuseMentions", () => {
     assert.equal(defuseMentions(""), "");
   });
 
-  // Comportement actuel, non corrigé par cette tâche : la regex ne vérifie
-  // pas qu'un « @ » est en début de mention (précédé d'un espace ou d'un
-  // début de chaîne) — un fragment d'adresse mail est donc lui aussi défusé.
-  test("un fragment d'adresse mail est aussi entouré de backticks", () => {
+  // Corrigé (§5.6) : le « @ » doit démarrer la mention, pas suivre un
+  // caractère alphanumérique — sans ce garde-fou, un fragment d'adresse mail
+  // était lui aussi défusé ("foo@bar.com" → "foo`@bar.com`").
+  test("une adresse mail n'est plus défigurée", () => {
     assert.equal(
       defuseMentions("contact : foo@bar.com"),
-      "contact : foo`@bar.com`",
+      "contact : foo@bar.com",
+    );
+  });
+
+  test("une vraie mention juste après une adresse mail reste défusée", () => {
+    assert.equal(
+      defuseMentions("contact : foo@bar.com, cc @bob"),
+      "contact : foo@bar.com, cc `@bob`",
+    );
+  });
+});
+
+describe("defuseMentions — quick actions", () => {
+  test("une ligne qui commence par une quick action est neutralisée", () => {
+    const result = defuseMentions("/close");
+    // Le texte visible (une fois l'espace invisible ôté) est inchangé...
+    assert.equal(result.replace(new RegExp(ZERO_WIDTH_SPACE, "g"), ""), "/close");
+    // ...mais la ligne ne commence plus littéralement par "/".
+    assert.ok(!result.startsWith("/"));
+  });
+
+  test("quick action précédée d'espaces (indentation) : toujours neutralisée", () => {
+    const result = defuseMentions("  /assign bob");
+    assert.equal(result.replace(new RegExp(ZERO_WIDTH_SPACE, "g"), ""), "  /assign bob");
+    assert.ok(!/^\s*\//.test(result));
+  });
+
+  test("une seule ligne d'un message multi-lignes est concernée", () => {
+    const input = "Bonne remarque.\n/merge\nSuite du message.";
+    const result = defuseMentions(input);
+    const lines = result.split("\n");
+    assert.equal(lines[0], "Bonne remarque.");
+    assert.ok(!lines[1]!.startsWith("/"));
+    assert.equal(lines[1]!.replace(new RegExp(ZERO_WIDTH_SPACE, "g"), ""), "/merge");
+    assert.equal(lines[2], "Suite du message.");
+  });
+
+  test("une mention au milieu d'une phrase, comme /api/users, reste intacte", () => {
+    assert.equal(
+      defuseMentions("Le point d'entrée /api/users renvoie 404 sans body."),
+      "Le point d'entrée /api/users renvoie 404 sans body.",
+    );
+  });
+
+  test("texte sans quick action ni mention reste inchangé", () => {
+    assert.equal(
+      defuseMentions("rien de spécial, juste du texte normal."),
+      "rien de spécial, juste du texte normal.",
     );
   });
 });

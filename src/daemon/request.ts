@@ -12,8 +12,62 @@ function extractNoteId(targetUrl: string): number | null {
   return match?.[1] ? Number(match[1]) : null;
 }
 
+// Espace de largeur nulle (invisible à l'affichage, y compris une fois
+// rendu en markdown) : voir neutralizeQuickActions ci-dessous.
+export const ZERO_WIDTH_SPACE = "​";
+
+// Une mention n'en est une que si le "@" démarre un nom d'utilisateur, pas
+// s'il est précédé d'un caractère alphanumérique — sans ce lookbehind,
+// "foo@bar.com" matchait sur "@bar.com" et se retrouvait défusé en
+// "foo`@bar.com`" (bug corrigé ici, voir request.test.ts).
+const MENTION_RE = /(?<![a-zA-Z0-9])@[a-zA-Z0-9_.-]+/g;
+
+/**
+ * GitLab interprète toute ligne d'un commentaire ou d'une description qui
+ * COMMENCE par "/" comme une quick action (`/close`, `/assign @x`,
+ * `/merge`, `/label ~x`...), exécutée avec les droits du PAT du bot au
+ * moment où le texte est enregistré. Le texte republié ici (remarques du
+ * LLM, sorties de commandes...) peut contenir une telle ligne sans aucune
+ * intention malveillante côté modèle — il recopie parfois un chemin ou une
+ * commande en tout début de ligne — mais GitLab ne fait pas la différence.
+ *
+ * On casse l'ancrage "premier caractère de la ligne" en insérant un espace
+ * de largeur nulle juste avant le "/" : la ligne ne commence plus,
+ * littéralement, par "/", et rien ne change à l'affichage (contrairement à
+ * un entourage par des guillemets de code, qui aurait changé la police de
+ * toute la ligne pour un simple "/api/users" placé en début de phrase).
+ * Seule une ligne dont le contenu, espaces de tête mis à part, commence par
+ * "/" est visée : une occurrence au milieu d'une phrase ("le point d'entrée
+ * /api/users renvoie 404") n'est jamais en tout début de ligne et reste
+ * donc intacte.
+ */
+function neutralizeQuickActions(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const leading = /^[ \t]*/.exec(line)?.[0] ?? "";
+      const rest = line.slice(leading.length);
+      return rest.startsWith("/")
+        ? `${leading}${ZERO_WIDTH_SPACE}${rest}`
+        : line;
+    })
+    .join("\n");
+}
+
+/**
+ * Neutralise dans un texte non fiable (remarque du LLM, message d'erreur,
+ * sortie de commande...) tout ce que GitLab pourrait interpréter comme une
+ * action plutôt que du texte : les mentions (`@quelqu'un`, qui notifient
+ * réellement la personne visée) et les quick actions (une ligne commençant
+ * par "/", exécutée avec les droits du PAT du bot). À appliquer à tout texte
+ * d'origine tierce avant de le republier dans un commentaire GitLab — voir
+ * publish.ts et router.ts.
+ */
 export function defuseMentions(text: string): string {
-  return text.replace(/@[a-zA-Z0-9_.-]+/g, (mention) => `\`${mention}\``);
+  return neutralizeQuickActions(text).replace(
+    MENTION_RE,
+    (mention) => `\`${mention}\``,
+  );
 }
 
 export async function buildRequest(
