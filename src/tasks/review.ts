@@ -1,10 +1,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config.ts";
-import { runAgent } from "../agent/runner.ts";
+import { runAgent, type AgentResult } from "../agent/runner.ts";
 import { createWorkspace } from "../agent/workspace.ts";
 import type { TaskContext } from "../types.ts";
 import { validateRemarks, type ValidatedRemark } from "./diff.ts";
+import { runAgentInSandbox } from "../agent/sandbox.ts";
 
 export interface Remark {
   file: string;
@@ -75,7 +76,22 @@ export async function runReview(
       },
     );
 
-    const result = await runAgent(workspace.repo, buildPrompt(context));
+    let result: AgentResult;
+
+    if (config.useDocker) {
+      writeFileSync(
+        join(workspace.meta, "prompt.txt"),
+        buildPrompt(context),
+        "utf8",
+      );
+      result = await runAgentInSandbox(
+        workspace.repo,
+        workspace.meta,
+        context.projectPath,
+      );
+    } else {
+      result = await runAgent(workspace.repo, buildPrompt(context));
+    }
 
     if (result.timedOut)
       throw new Error(

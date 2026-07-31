@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { config } from "../config.ts";
+import type { AgentResult } from "./runner.ts";
 
 export interface SandboxResult {
   ok: boolean;
@@ -15,6 +16,7 @@ export function imageFor(projectPath: string): string {
 
 export interface SandboxOptions {
   network?: boolean;
+  hostGateway?: boolean;
   env?: Record<string, string>;
   mounts?: { host: string; container: string }[];
 }
@@ -59,6 +61,11 @@ export function runInSandbox(
       args.push("-e", `${key}=${value}`);
     }
 
+    if (options.hostGateway) {
+      // Nécessaire sur Linux ; sans effet sur Docker Desktop où l'alias existe déjà.
+      args.push("--add-host", "host.docker.internal:host-gateway");
+    }
+
     args.push(image, "bash", "-c", command);
 
     console.log(
@@ -87,4 +94,45 @@ export function runInSandbox(
       resolve({ ok: code === 0, output });
     });
   });
+}
+
+export async function runAgentInSandbox(
+  repo: string,
+  meta: string,
+  _projectPath: string,
+): Promise<AgentResult> {
+  const started = Date.now();
+
+  const opencodeConfig = JSON.stringify({
+    $schema: "https://opencode.ai/config.json",
+    provider: {
+      lmstudio: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "LM Studio",
+        options: { baseURL: config.inferenceUrl, apiKey: "lm-studio" },
+        models: { [config.agentModel.split("/")[1] ?? ""]: { name: "agent" } },
+      },
+    },
+  });
+
+  const result = await runInSandbox(
+    repo,
+    config.agentImage,
+    `opencode run --model ${config.agentModel} "$(cat /task/prompt.txt)"`,
+    {
+      network: true,
+      hostGateway: true,
+      mounts: [{ host: meta, container: "/task" }],
+      env: { OPENCODE_CONFIG_CONTENT: opencodeConfig },
+    },
+  );
+
+  return {
+    code: result.ok ? 0 : 1,
+    stdout: result.output,
+    stderr: "",
+    // Le timeout est appliqué par docker kill dans runInSandbox.
+    timedOut: false,
+    durationMs: Date.now() - started,
+  };
 }

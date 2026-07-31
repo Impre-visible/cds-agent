@@ -77,6 +77,11 @@ export const config = {
     process.env.DOCKER_DEFAULT_IMAGE ?? "node:22-bookworm-slim",
   dockerMemory: process.env.DOCKER_MEMORY ?? "4g",
   dockerCpus: process.env.DOCKER_CPUS ?? "4",
+  agentImage: process.env.AGENT_IMAGE ?? "cds-agent/agent-node22",
+  /** Vue depuis le conteneur : l'hôte n'est pas localhost. */
+  inferenceUrl:
+    process.env.CONTAINER_INFERENCE_URL ??
+    "http://host.docker.internal:1234/v1",
 } as const;
 
 /** Credential git passé par variables d'environnement : rien n'est écrit sur disque. */

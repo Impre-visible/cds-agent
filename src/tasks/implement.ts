@@ -4,7 +4,9 @@ import { collectChanges } from "./guard.ts";
 import { gitlab } from "../gitlab/client.ts";
 import { createWorkspace, git, runCommand } from "../agent/workspace.ts";
 import type { TaskContext } from "../types.ts";
-import { basename, resolve } from "node:path";
+import { basename, resolve, join } from "node:path";
+import { writeFileSync } from "node:fs";
+import { runAgentInSandbox } from "../agent/sandbox.ts";
 
 export interface ImplementResult {
   status: "pushed" | "rejected" | "no-change" | "tests-red";
@@ -92,6 +94,13 @@ export async function runImplement(
         mounts,
       });
       console.log(fake.output);
+    } else if (config.useDocker) {
+      writeFileSync(
+        join(workspace.meta, "prompt.txt"),
+        buildPrompt(context),
+        "utf8",
+      );
+      await runAgentInSandbox(repo, workspace.meta, context.projectPath);
     } else {
       await runAgent(repo, buildPrompt(context));
     }
