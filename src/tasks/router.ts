@@ -3,7 +3,8 @@ import { config } from "../config.ts";
 import { gitlab } from "../gitlab/client.ts";
 import { publishReview } from "./publish.ts";
 import { runReview } from "./review.ts";
-import { runImplement } from "./implement.ts";
+import { runImplement, resolveCapabilities } from "./implement.ts";
+import { describeCapabilities, isDefaultCapabilities } from "./guard.ts";
 import { defuseMentions } from "../daemon/request.ts";
 import type { AckHandle, AgentRequest } from "../types.ts";
 import { TESTS_RED_REPORT_TAIL_CHARS } from "../limits.ts";
@@ -217,12 +218,31 @@ export async function runTask(request: AgentRequest): Promise<void> {
       // dans le commentaire.
       const messages: Record<typeof result.status, string> = {
         pushed: `✅ Tests poussés sur \`${context.sourceBranch}\` en ${seconds} s — ${defuseMentions(result.detail)}`,
+        "mr-opened": `✅ Merge request dédiée ouverte en ${seconds} s — ${defuseMentions(result.detail)}`,
         rejected: `⛔ Modifications refusées après ${seconds} s — ${defuseMentions(result.detail)}`,
         "tests-red": `❌ Les tests ne passent pas après ${seconds} s, rien n'a été poussé.\n\n<details><summary>Sortie</summary>\n\n\`\`\`\n${defuseMentions(result.detail.slice(-TESTS_RED_REPORT_TAIL_CHARS))}\n\`\`\`\n\n</details>`,
         "no-change": `🤷 L'agent n'a produit aucune modification en ${seconds} s.`,
       };
 
-      await report(request, messages[result.status], result.status === "pushed");
+      // Chantier "capacités" : si ce dépôt a des capacités élargies par
+      // rapport au défaut (tests-only, source-branch), le rapport le dit
+      // explicitement — quelqu'un qui relit la MR/l'issue doit pouvoir
+      // savoir que l'agent avait le droit d'aller au-delà du périmètre
+      // habituel, pas seulement le déduire en constatant qu'un fichier
+      // source a changé. resolveCapabilities() est la même fonction que
+      // celle utilisée par runImplement() ci-dessus : un seul calcul du
+      // "que peut faire l'agent sur ce dépôt", jamais deux qui pourraient
+      // diverger.
+      const capabilities = resolveCapabilities(
+        context.projectPath,
+        config.agentCapabilities,
+      );
+      const capabilityNote = isDefaultCapabilities(capabilities)
+        ? ""
+        : `\n\n🔓 Capacités élargies pour ce dépôt : ${describeCapabilities(capabilities)}.`;
+
+      const ok = result.status === "pushed" || result.status === "mr-opened";
+      await report(request, messages[result.status] + capabilityNote, ok);
       log.info(`[worker] terminé ${request.key} — ${result.status}`);
       return;
     }

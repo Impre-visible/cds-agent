@@ -121,6 +121,169 @@ export function isTestPath(
   return TEST_FILENAME_PATTERNS.some((pattern) => pattern.test(basename));
 }
 
+// ---------------------------------------------------------------------------
+// Modèle de capacités de l'agent (chantier "capacités")
+// ---------------------------------------------------------------------------
+//
+// Avant ce chantier, "quels chemins l'agent peut modifier" était une question
+// dont la réponse était éparpillée : isTestPath ci-dessus (en dur), plus
+// checkHeadIntegrity et le refus de branche protégée dans implement.ts, plus
+// deux intentions figées dans router.ts. RepoCapabilities rassemble ça en UN
+// point de configuration par dépôt (voir config.ts::parseCapabilitiesMap
+// pour le format AGENT_CAPABILITIES), et isWritablePath ci-dessous est
+// désormais LE point unique qui répond à « l'agent avait-il le droit de
+// modifier ce chemin ? » — implement.ts (collectChanges) et router.ts
+// (rapport) s'y réfèrent tous les deux plutôt que de réévaluer la question
+// chacun à sa façon.
+//
+// Ce que ce modèle NE couvre PAS, et laisse inconditionnel à dessein (voir le
+// rapport du chantier) : fingerprintGitMeta/checkHeadIntegrity (le daemon
+// reste seul committeur, quelle que soit la capacité accordée), le refus des
+// chemins contenant un composant "." ou ".." (hasUnsafeSegments ci-dessous,
+// appliqué avant toute capacité), et le refus de pousser sur une branche
+// protégée (implement.ts, pour le mode "source-branch" — le mode
+// "dedicated-mr" pousse par construction sur une branche neuve créée par le
+// bot, jamais sur une branche existante).
+
+export interface RepoCapabilities {
+  /**
+   * "tests-only" (défaut, comportement historique) : seuls les chemins
+   * reconnus par isTestPath (plus testDirectoryOverrides) sont modifiables —
+   * le code source reste intouchable, sans exception.
+   * "all" : tout chemin du dépôt est modifiable, y compris le code source.
+   * string[] : motifs glob supplémentaires (voir globToRegExp plus bas),
+   * modifiables EN PLUS des chemins de test — un élargissement ciblé, sans
+   * aller jusqu'à "all".
+   */
+  writablePaths: "tests-only" | "all" | string[];
+  /**
+   * "source-branch" (défaut, comportement historique) : push direct sur la
+   * branche source de la MR une fois tous les contrôles passés.
+   * "dedicated-mr" : le bot pousse sur une branche cds-agent/... et ouvre une
+   * merge request dédiée (voir tasks/implement.ts::openDedicatedMergeRequest)
+   * — à faire relire par un humain avant fusion. C'est cette option qui rend
+   * acceptable d'élargir writablePaths : le filet de sécurité se déplace de
+   * "seuls des tests peuvent être touchés" à "une revue humaine est requise
+   * avant que quoi que ce soit n'atteigne la branche source".
+   */
+  publishMode: "source-branch" | "dedicated-mr";
+  // Emplacement réservé pour une future capacité "appliquer le résultat dans
+  // un clone frais isolé plutôt que dans le clone manipulé par l'agent" (pas
+  // implémentée à ce stade — voir le rapport du chantier "capacités"). Un
+  // jeton non reconnu par parseCapabilitiesMap (config.ts) échoue déjà
+  // bruyamment au démarrage : rien à faire ici pour qu'une tentative
+  // prématurée d'utiliser cette capacité soit rejetée plutôt qu'ignorée.
+}
+
+/** Comportement historique, reproduit exactement sans configuration. */
+export const DEFAULT_CAPABILITIES: Readonly<RepoCapabilities> = Object.freeze({
+  writablePaths: "tests-only",
+  publishMode: "source-branch",
+});
+
+export function isDefaultCapabilities(capabilities: RepoCapabilities): boolean {
+  return (
+    capabilities.writablePaths === "tests-only" &&
+    capabilities.publishMode === "source-branch"
+  );
+}
+
+/**
+ * Résumé humain d'une capacité non par défaut, pour le rapport posté sur
+ * GitLab (router.ts) : quelqu'un qui relit une MR doit pouvoir savoir que
+ * l'agent avait le droit d'élargir son périmètre, pas seulement le déduire
+ * en constatant qu'un fichier source a changé.
+ */
+export function describeCapabilities(capabilities: RepoCapabilities): string {
+  const parts: string[] = [];
+  if (capabilities.writablePaths === "all") {
+    parts.push("tout le dépôt modifiable (code source compris)");
+  } else if (Array.isArray(capabilities.writablePaths)) {
+    parts.push(
+      `motifs supplémentaires modifiables : ${capabilities.writablePaths.join(", ")}`,
+    );
+  }
+  if (capabilities.publishMode === "dedicated-mr") {
+    parts.push("résultat proposé via une merge request dédiée, pas de push direct");
+  }
+  return parts.join(" ; ");
+}
+
+/**
+ * Un composant "." ou ".." dans le chemin (voir le commentaire équivalent
+ * dans isTestPath ci-dessus, qui applique le même refus). Extrait en
+ * fonction indépendante — plutôt que réutilisé depuis l'intérieur
+ * d'isTestPath — pour qu'isWritablePath puisse l'appliquer AVANT même de
+ * regarder la capacité accordée : ce refus est inconditionnel, y compris
+ * pour writablePaths="all" (voir le rapport du chantier "capacités" —
+ * "une capacité élargit ce que l'agent a le droit de produire, jamais ce que
+ * le daemon accepte de ne pas vérifier").
+ */
+function hasUnsafeSegments(path: string): boolean {
+  return path
+    .split("/")
+    .filter(Boolean)
+    .some((segment) => segment === "." || segment === "..");
+}
+
+/**
+ * Traduit un motif glob simple ("src/**", "docs/*.md") en RegExp ancrée sur
+ * le chemin entier. Sous-ensemble volontairement restreint aux deux jokers
+ * utiles pour une liste de chemins/répertoires de dépôt : "**" (n'importe
+ * quelle suite de caractères, traverse les "/") et "*" (n'importe quoi sauf
+ * "/", reste à l'intérieur d'un segment). Pas de classes de caractères
+ * ("[abc]") ni de "?" : un vrai moteur glob n'apporterait rien ici et
+ * ajouterait des pièges (échappement, ReDoS) pour un usage qui reste une
+ * simple liste de motifs de configuration, pas un langage à exposer tel quel
+ * à une donnée non fiable.
+ */
+function globToRegExp(pattern: string): RegExp {
+  let source = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i] ?? "";
+    if (char === "*" && pattern[i + 1] === "*") {
+      source += ".*";
+      i++;
+      continue;
+    }
+    if (char === "*") {
+      source += "[^/]*";
+      continue;
+    }
+    source += /[.+^${}()|[\]\\]/.test(char) ? `\\${char}` : char;
+  }
+  return new RegExp(`^${source}$`);
+}
+
+/**
+ * LE point unique qui répond à « l'agent avait-il le droit de modifier ce
+ * chemin ? » (voir l'en-tête de section ci-dessus). collectChanges
+ * (guard.ts) et le prompt de l'agent (implement.ts::buildPrompt) s'y
+ * réfèrent tous les deux plutôt que de réévaluer isTestPath chacun à leur
+ * façon.
+ *
+ * Sans capacités renseignées (DEFAULT_CAPABILITIES), équivalent strict à
+ * `isTestPath(path, extraTestDirectories)` — c'est ce qui garantit le
+ * comportement par défaut inchangé (voir guard.test.ts).
+ */
+export function isWritablePath(
+  path: string,
+  capabilities: RepoCapabilities = DEFAULT_CAPABILITIES,
+  extraTestDirectories: string[] = [],
+): boolean {
+  // Inconditionnel : évalué avant toute capacité, y compris "all".
+  if (hasUnsafeSegments(path)) return false;
+
+  if (capabilities.writablePaths === "all") return true;
+  if (isTestPath(path, extraTestDirectories)) return true;
+  if (Array.isArray(capabilities.writablePaths)) {
+    return capabilities.writablePaths.some((pattern) =>
+      globToRegExp(pattern).test(path),
+    );
+  }
+  return false;
+}
+
 /**
  * Un statut XY que ce flux ne devrait normalement jamais produire : un
  * conflit de fusion non résolu, un changement de type (fichier <-> lien
@@ -157,10 +320,25 @@ function isDeleteStatus(code: string): boolean {
   return code[0] === "D" || code[1] === "D";
 }
 
-/** Lit l'état réel du dépôt, sans faire confiance à ce que l'agent déclare. */
+/**
+ * Lit l'état réel du dépôt, sans faire confiance à ce que l'agent déclare.
+ *
+ * `capabilities` (défaut DEFAULT_CAPABILITIES, soit "tests-only") élargit ce
+ * qui compte comme "dans le périmètre" via isWritablePath ci-dessus, à la
+ * place du strict isTestPath d'avant ce chantier — c'est ce qui garde le
+ * comportement par défaut inchangé sans capacités renseignées. Avec
+ * writablePaths="all", la protection deletedTests (pensée pour un agent
+ * limité aux tests, qui pourrait être tenté de supprimer un test gênant
+ * plutôt que d'en écrire un qui passe) n'a plus lieu d'être distinguée du
+ * reste : le dépôt entier étant modifiable, supprimer un test est une action
+ * légitime comme une autre, pas un contournement à signaler à part — le
+ * filet de sécurité se déplace alors vers publishMode="dedicated-mr" (revue
+ * humaine), voir le rapport du chantier "capacités".
+ */
 export function collectChanges(
   porcelain: string,
   extraDirectories: string[] = [],
+  capabilities: RepoCapabilities = DEFAULT_CAPABILITIES,
 ): ChangeSet {
   // Format `--porcelain=v1 -z` (implement.ts est responsable de passer -z à
   // git) : chaque entrée est terminée par un octet nul et n'est JAMAIS
@@ -206,17 +384,20 @@ export function collectChanges(
     // suppression qui le touche et qui reste, malgré tout, sous un chemin
     // de test est le scénario de contournement visé par §2.3 — distingué
     // de "offending" pour un message d'erreur qui ne prête pas à confusion
-    // avec un simple fichier hors périmètre.
-    if (isDeleteStatus(code) && isTestPath(path, extraDirectories)) {
+    // avec un simple fichier hors périmètre. Non pertinent quand
+    // writablePaths="all" (voir le commentaire de la fonction) : la
+    // suppression y est alors une modification permise comme une autre.
+    const fullAccess = capabilities.writablePaths === "all";
+    if (!fullAccess && isDeleteStatus(code) && isTestPath(path, extraDirectories)) {
       deletedTests.add(path);
-    } else if (!isTestPath(path, extraDirectories)) {
+    } else if (!isWritablePath(path, capabilities, extraDirectories)) {
       offending.add(path);
     }
 
     // Le chemin d'origine d'un renommage/copie n'est pas une suppression :
     // son contenu survit sous le nouveau nom. Seul compte, comme pour tout
     // autre chemin, son appartenance ou non au périmètre de test.
-    if (originPath && !isTestPath(originPath, extraDirectories)) {
+    if (originPath && !isWritablePath(originPath, capabilities, extraDirectories)) {
       offending.add(originPath);
     }
   }

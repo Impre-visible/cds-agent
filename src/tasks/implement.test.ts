@@ -4,7 +4,10 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { TaskContextBase } from "../types.ts";
+import type { RepoCapabilities } from "./guard.ts";
 
 // implement.ts importe (transitivement) config.ts, qui jette au chargement
 // si GITLAB_TOKEN/BOT_USERNAME sont absents. Même parade que
@@ -15,16 +18,93 @@ let checkHeadIntegrity: (
   repo: string,
   branch: string,
 ) => Promise<{ ok: true } | { ok: false; detail: string; files: string[] }>;
-let buildPrompt: (context: TaskContextBase) => string;
+let buildPrompt: (
+  context: TaskContextBase,
+  testCommand?: string,
+  capabilities?: RepoCapabilities,
+) => string;
 let buildInstallCommand: (installCommand: string, ignoreScripts: boolean) => string;
 let rollbackAgentChanges: (repo: string) => Promise<void>;
+let resolveCapabilities: (
+  projectPath: string,
+  overrides: Map<string, RepoCapabilities>,
+) => RepoCapabilities;
+let resolveCommand: (
+  projectPath: string,
+  overrides: Map<string, string>,
+  fallback: string,
+) => string;
+let buildBotBranchName: (targetIid: number) => string;
+let openDedicatedMergeRequest: (
+  repo: string,
+  projectId: number,
+  targetIid: number,
+  targetBranch: string,
+  requester: string,
+  requestText: string,
+) => Promise<{ branchName: string; mrUrl: string }>;
+
+// Chantier "capacités" (§A.3) : openDedicatedMergeRequest passe par
+// gitlab.createMergeRequest, donc par une vraie requête HTTP vers
+// config.gitlabUrl. Même approche que tasks/publish.test.ts : un vrai
+// serveur node:http jetable plutôt qu'un mock, démarré AVANT l'import
+// dynamique du module testé (gitlabUrl est figé au premier import, cache
+// ESM). Les autres tests de ce fichier (checkHeadIntegrity, buildPrompt...)
+// ne parlent jamais à ce serveur ; le démarrer ici ne les affecte pas.
+interface ReceivedMergeRequest {
+  source_branch: string;
+  target_branch: string;
+  title: string;
+  description: string;
+}
+let receivedMergeRequests: ReceivedMergeRequest[] = [];
+let mergeRequestServer: Server;
+let mergeRequestServerUrl: string;
 
 before(async () => {
+  mergeRequestServer = createServer((req, res: ServerResponse) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8");
+      if (req.method === "POST" && /\/merge_requests$/.test(req.url ?? "")) {
+        const form = new URLSearchParams(raw);
+        receivedMergeRequests.push({
+          source_branch: form.get("source_branch") ?? "",
+          target_branch: form.get("target_branch") ?? "",
+          title: form.get("title") ?? "",
+          description: form.get("description") ?? "",
+        });
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ iid: 99, web_url: `${mergeRequestServerUrl}/mr/99` }));
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("route non gérée par le faux GitLab");
+    });
+  });
+  await new Promise<void>((resolve) => mergeRequestServer.listen(0, "127.0.0.1", resolve));
+  const address = mergeRequestServer.address() as AddressInfo;
+  mergeRequestServerUrl = `http://127.0.0.1:${address.port}`;
+
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
+  process.env.GITLAB_URL = mergeRequestServerUrl;
   ({ git } = await import("../agent/workspace.ts"));
-  ({ checkHeadIntegrity, buildPrompt, buildInstallCommand, rollbackAgentChanges } =
-    await import("./implement.ts"));
+  ({
+    checkHeadIntegrity,
+    buildPrompt,
+    buildInstallCommand,
+    rollbackAgentChanges,
+    resolveCapabilities,
+    resolveCommand,
+    buildBotBranchName,
+    openDedicatedMergeRequest,
+  } = await import("./implement.ts"));
+});
+
+after(async () => {
+  await new Promise<void>((resolve) => mergeRequestServer.close(() => resolve()));
 });
 
 // §6.8 : buildPrompt() (implement.ts) ne lit que les champs communs
@@ -468,5 +548,145 @@ describe("buildPrompt (§1.1 / §5.7)", () => {
     // La description tronquée doit rester nettement plus courte que
     // l'originale : le prompt entier ne doit pas contenir les 5000 "a".
     assert.ok(!prompt.includes("a".repeat(5000)));
+  });
+});
+
+describe("buildPrompt — capacités (chantier « capacités »)", () => {
+  test("sans capacités renseignées, le texte est identique à avant ce chantier (tests/ uniquement)", () => {
+    const prompt = buildPrompt(context());
+    assert.match(prompt, /Écris des tests automatisés dans le dossier tests\//);
+    assert.match(prompt, /INTERDIT.*hors de tests\//);
+    assert.match(prompt, /Lance `npm test`/);
+  });
+
+  test("testCommand est répercuté dans le prompt quand renseigné explicitement", () => {
+    const prompt = buildPrompt(context(), "pytest -q");
+    assert.match(prompt, /Lance `pytest -q`/);
+  });
+
+  test('writablePaths="all" : le prompt autorise explicitement le code source, plus d\'"INTERDIT"', () => {
+    const prompt = buildPrompt(context(), "npm test", {
+      writablePaths: "all",
+      publishMode: "source-branch",
+    });
+    assert.match(prompt, /modifie le code source si besoin/);
+    assert.ok(!prompt.includes("INTERDIT"));
+  });
+
+  test("writablePaths=motifs : le prompt cite les motifs autorisés en plus de tests/", () => {
+    const prompt = buildPrompt(context(), "npm test", {
+      writablePaths: ["src/generated/**"],
+      publishMode: "source-branch",
+    });
+    assert.match(prompt, /src\/generated\/\*\*/);
+    assert.match(prompt, /tests\//);
+  });
+});
+
+describe("resolveCapabilities / resolveCommand (chantier « capacités »)", () => {
+  test("resolveCapabilities retombe sur DEFAULT_CAPABILITIES si le dépôt n'a pas d'entrée", () => {
+    const capabilities = resolveCapabilities("groupe/depot", new Map());
+    assert.deepEqual(capabilities, {
+      writablePaths: "tests-only",
+      publishMode: "source-branch",
+    });
+  });
+
+  test("resolveCapabilities lit l'entrée du dépôt, insensible à la casse du chemin", () => {
+    const overrides = new Map([
+      ["groupe/depot", { writablePaths: "all" as const, publishMode: "source-branch" as const }],
+    ]);
+    assert.deepEqual(resolveCapabilities("Groupe/Depot", overrides), {
+      writablePaths: "all",
+      publishMode: "source-branch",
+    });
+  });
+
+  test("resolveCommand retombe sur le défaut global si le dépôt n'a pas d'entrée", () => {
+    assert.equal(resolveCommand("groupe/depot", new Map(), "npm test"), "npm test");
+  });
+
+  test("resolveCommand privilégie l'entrée du dépôt sur le défaut global", () => {
+    const overrides = new Map([["groupe/depot", "pytest -q"]]);
+    assert.equal(resolveCommand("groupe/depot", overrides, "npm test"), "pytest -q");
+    assert.equal(resolveCommand("autre/depot", overrides, "npm test"), "npm test");
+  });
+});
+
+describe("buildBotBranchName (§A.3)", () => {
+  test("préfixe cds-agent/, inclut l'iid cible, et deux appels ne collisionnent pas", () => {
+    const first = buildBotBranchName(7);
+    const second = buildBotBranchName(7);
+    assert.match(first, /^cds-agent\/implement-7-[0-9a-f]+$/);
+    assert.notEqual(first, second);
+  });
+});
+
+describe("openDedicatedMergeRequest (§A.3 : mode publishMode=\"dedicated-mr\")", () => {
+  test("pousse le commit du bot sur une branche cds-agent/... dédiée et ouvre une MR ciblant la branche source, sans toucher à cette dernière", async () => {
+    const { root, repo, origin } = makeRepoWithOrigin();
+    try {
+      mkdirSync(join(repo, "tests"), { recursive: true });
+      writeFileSync(join(repo, "tests", "foo.test.js"), "// test\n");
+      await git(repo, ["add", "--all"]);
+      await git(repo, ["commit", "-m", "test: ajout de tests demandés par @alice"]);
+      const headSha = (await git(repo, ["rev-parse", "HEAD"])).trim();
+
+      receivedMergeRequests = [];
+      const { branchName, mrUrl } = await openDedicatedMergeRequest(
+        repo,
+        42,
+        7,
+        "main",
+        "alice",
+        "implémente des tests pour ce module",
+      );
+
+      assert.match(branchName, /^cds-agent\/implement-7-[0-9a-f]+$/);
+      assert.equal(mrUrl, `${mergeRequestServerUrl}/mr/99`);
+
+      // La branche dédiée existe bien côté remote (bare origin) et pointe
+      // exactement sur le commit du bot.
+      const branchSha = execFileSync("git", [
+        "--git-dir",
+        origin,
+        "rev-parse",
+        branchName,
+      ])
+        .toString()
+        .trim();
+      assert.equal(branchSha, headSha);
+
+      // "main" (la branche source) n'a pas bougé : rien n'y a été poussé
+      // directement, c'est tout le sens du mode "dedicated-mr".
+      const mainSha = execFileSync("git", ["--git-dir", origin, "rev-parse", "main"])
+        .toString()
+        .trim();
+      assert.notEqual(mainSha, headSha);
+
+      assert.equal(receivedMergeRequests.length, 1);
+      assert.equal(receivedMergeRequests[0]?.source_branch, branchName);
+      assert.equal(receivedMergeRequests[0]?.target_branch, "main");
+      assert.match(receivedMergeRequests[0]?.title ?? "", /alice/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("deux demandes successives sur la même MR ouvrent deux branches distinctes, sans collision", async () => {
+    const { root, repo } = makeRepoWithOrigin();
+    try {
+      mkdirSync(join(repo, "tests"), { recursive: true });
+      writeFileSync(join(repo, "tests", "premier.test.js"), "// test\n");
+      await git(repo, ["add", "--all"]);
+      await git(repo, ["commit", "-m", "test: premier passage"]);
+
+      const first = await openDedicatedMergeRequest(repo, 42, 7, "main", "alice", "d1");
+      const second = await openDedicatedMergeRequest(repo, 42, 7, "main", "alice", "d2");
+
+      assert.notEqual(first.branchName, second.branchName);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

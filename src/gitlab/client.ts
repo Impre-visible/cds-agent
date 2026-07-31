@@ -441,4 +441,26 @@ export const gitlab = {
     api<{ name: string; protected: boolean }>(
       `/projects/${projectId}/repository/branches/${encodeURIComponent(name)}`,
     ),
+
+  /**
+   * Chantier "capacités" (§A.3, publishMode "dedicated-mr") : ouvre une
+   * merge request depuis une branche déjà poussée par le bot
+   * (tasks/implement.ts::openDedicatedMergeRequest) vers la branche source
+   * d'origine, plutôt qu'un push direct dessus. `apiForm` (déjà utilisée par
+   * createDiscussion ci-dessus) suffit : aucun besoin d'un nouveau mécanisme
+   * HTTP pour cet appel.
+   */
+  createMergeRequest: (
+    projectId: number,
+    form: {
+      source_branch: string;
+      target_branch: string;
+      title: string;
+      description?: string;
+    },
+  ) =>
+    apiForm<{ iid: number; web_url: string }>(
+      `/projects/${projectId}/merge_requests`,
+      form,
+    ),
 };

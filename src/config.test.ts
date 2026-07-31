@@ -468,3 +468,135 @@ describe("gitCredentialEnv (§4.9 : en-tête restreint à l'instance GitLab)", (
     }
   });
 });
+
+// Chantier "capacités" (§A) — voir tasks/guard.ts pour RepoCapabilities.
+describe("buildConfig — agentCapabilities (AGENT_CAPABILITIES)", () => {
+  test("absent, la map est vide : chaque dépôt retombe sur DEFAULT_CAPABILITIES (comportement par défaut sûr)", () => {
+    const config = buildConfig(baseEnv());
+    assert.equal((config.agentCapabilities as Map<string, unknown>).size, 0);
+  });
+
+  test('"write-all" élargit writablePaths à "all" pour le dépôt déclaré, sans toucher aux autres', () => {
+    const config = buildConfig(
+      baseEnv({ AGENT_CAPABILITIES: "Groupe/Depot=write-all" }),
+    );
+    const capabilities = config.agentCapabilities as Map<
+      string,
+      { writablePaths: unknown; publishMode: unknown }
+    >;
+    assert.deepEqual(capabilities.get("groupe/depot"), {
+      writablePaths: "all",
+      publishMode: "source-branch",
+    });
+    assert.equal(capabilities.get("autre/depot"), undefined);
+  });
+
+  test('"write:motif1|motif2" déclare une liste de motifs', () => {
+    const config = buildConfig(
+      baseEnv({ AGENT_CAPABILITIES: "groupe/depot=write:src/generated/**|docs/**" }),
+    );
+    const capabilities = config.agentCapabilities as Map<
+      string,
+      { writablePaths: unknown }
+    >;
+    assert.deepEqual(capabilities.get("groupe/depot")?.writablePaths, [
+      "src/generated/**",
+      "docs/**",
+    ]);
+  });
+
+  test('"dedicated-mr" bascule publishMode, indépendamment de writablePaths', () => {
+    const config = buildConfig(
+      baseEnv({ AGENT_CAPABILITIES: "groupe/depot=dedicated-mr" }),
+    );
+    const capabilities = config.agentCapabilities as Map<
+      string,
+      { writablePaths: unknown; publishMode: unknown }
+    >;
+    assert.deepEqual(capabilities.get("groupe/depot"), {
+      writablePaths: "tests-only",
+      publishMode: "dedicated-mr",
+    });
+  });
+
+  test("plusieurs capacités combinées (\";\") sur un même dépôt, plusieurs dépôts (\",\")", () => {
+    const config = buildConfig(
+      baseEnv({
+        AGENT_CAPABILITIES: "groupe/depot-a=write-all;dedicated-mr,groupe/depot-b=write:e2e/**",
+      }),
+    );
+    const capabilities = config.agentCapabilities as Map<
+      string,
+      { writablePaths: unknown; publishMode: unknown }
+    >;
+    assert.deepEqual(capabilities.get("groupe/depot-a"), {
+      writablePaths: "all",
+      publishMode: "dedicated-mr",
+    });
+    assert.deepEqual(capabilities.get("groupe/depot-b"), {
+      writablePaths: ["e2e/**"],
+      publishMode: "source-branch",
+    });
+  });
+
+  test("une capacité inconnue ou mal orthographiée fait échouer le démarrage avec un message clair", () => {
+    assert.throws(
+      () => buildConfig(baseEnv({ AGENT_CAPABILITIES: "groupe/depot=write-al" })),
+      (error: Error) => {
+        assert.match(error.message, /AGENT_CAPABILITIES/);
+        assert.match(error.message, /write-al/);
+        assert.match(error.message, /capacité inconnue/);
+        return true;
+      },
+    );
+  });
+
+  test('"write:" sans aucun motif est rejeté', () => {
+    assert.throws(
+      () => buildConfig(baseEnv({ AGENT_CAPABILITIES: "groupe/depot=write:" })),
+      /AGENT_CAPABILITIES/,
+    );
+  });
+
+  test("une entrée sans '=' fait échouer le démarrage", () => {
+    assert.throws(
+      () => buildConfig(baseEnv({ AGENT_CAPABILITIES: "sans-egal" })),
+      /AGENT_CAPABILITIES/,
+    );
+  });
+});
+
+// Chantier "capacités" (§B) — TEST_COMMANDS/INSTALL_COMMANDS par dépôt, avec
+// repli sur le défaut global TEST_COMMAND/INSTALL_COMMAND (résolution testée
+// dans tasks/implement.test.ts::resolveCommand, ici seulement le parsing).
+describe("buildConfig — testCommands / installCommands par dépôt", () => {
+  test("absents, les maps sont vides : tous les dépôts utilisent le défaut global", () => {
+    const config = buildConfig(baseEnv());
+    assert.equal((config.testCommands as Map<string, string>).size, 0);
+    assert.equal((config.installCommands as Map<string, string>).size, 0);
+    assert.equal(config.testCommand, "npm test");
+    assert.equal(config.installCommand, "npm install");
+  });
+
+  test("une commande par dépôt est lue telle quelle, casse préservée", () => {
+    const config = buildConfig(
+      baseEnv({
+        TEST_COMMANDS: "Groupe/Depot=pytest -q,autre/depot=mvn test",
+        INSTALL_COMMANDS: "groupe/depot=pip install -r requirements.txt",
+      }),
+    );
+    const testCommands = config.testCommands as Map<string, string>;
+    const installCommands = config.installCommands as Map<string, string>;
+    assert.equal(testCommands.get("groupe/depot"), "pytest -q");
+    assert.equal(testCommands.get("autre/depot"), "mvn test");
+    assert.equal(installCommands.get("groupe/depot"), "pip install -r requirements.txt");
+  });
+
+  test("une valeur de commande contenant elle-même un '=' n'est pas tronquée (splitOnce, pas split)", () => {
+    const config = buildConfig(
+      baseEnv({ TEST_COMMANDS: "groupe/depot=CI=1 npm test" }),
+    );
+    const testCommands = config.testCommands as Map<string, string>;
+    assert.equal(testCommands.get("groupe/depot"), "CI=1 npm test");
+  });
+});

@@ -22,6 +22,7 @@ sur un dépôt qui compte.
 - [Prérequis](#prérequis)
 - [Installation](#installation)
 - [Configuration](#configuration)
+- [Capacités de l'agent](#capacités-de-lagent)
 - [Lancement](#lancement)
 - [Scripts npm](#scripts-npm)
 - [Images Docker](#images-docker)
@@ -95,8 +96,12 @@ Déroulé, dans l'ordre :
     postée n'est jamais republiée) avec repli ligne → fichier → commentaire
     général. Pour une implémentation de tests : vérification que le
     daemon reste seul committeur (`checkHeadIntegrity`), que seuls des
-    fichiers de test ont été touchés (`tasks/guard.ts`), que la suite est
-    verte, et que la branche n'est pas protégée — alors seulement, push.
+    chemins autorisés ont été touchés (`tasks/guard.ts` — tests uniquement
+    par défaut, élargissable dépôt par dépôt via `AGENT_CAPABILITIES`, voir
+    [Capacités de l'agent](#capacités-de-lagent)), que la suite est verte, et
+    que la branche n'est pas protégée — alors seulement, push direct sur la
+    branche source (défaut) ou ouverture d'une merge request dédiée du bot
+    (capacité `dedicated-mr`).
 11. **Rapport** — la note d'accusé de réception (étape 6) est éditée pour
     porter le résultat, et sa réaction passe de 👀 à ✅ ou ❌. Le demandeur
     est toujours informé, y compris en cas d'échec. Si l'édition échoue —
@@ -176,6 +181,18 @@ Quelques variables méritent une lecture attentive avant de démarrer :
   range ses tests ailleurs (`e2e/` par exemple) peut le déclarer ici, dépôt
   par dépôt (`groupe/depot=e2e|integration`), sans élargir la détection pour
   tous les autres dépôts surveillés.
+- **`AGENT_CAPABILITIES`** — modèle de capacités de l'agent, dépôt par
+  dépôt : quels chemins il peut modifier (`write-all` pour tout le dépôt,
+  `write:motif1|motif2` pour des motifs supplémentaires ciblés, en plus de
+  `tests/` toujours autorisé) et où va le résultat (`dedicated-mr` pour une
+  merge request dédiée du bot plutôt qu'un push direct sur la branche
+  source). **Vide par défaut : comportement historique inchangé**
+  (tests uniquement, push direct). Voir
+  [Capacités de l'agent](#capacités-de-lagent) ci-dessous pour le détail.
+- **`TEST_COMMANDS`** / **`INSTALL_COMMANDS`** — commande de test/installation
+  par dépôt (`groupe/depot=pytest -q`), en plus du défaut global
+  `TEST_COMMAND`/`INSTALL_COMMAND` : un système multi-écosystème n'a pas
+  qu'une seule commande de test pertinente pour tous les dépôts surveillés.
 - **`CLONE_DEPTH`** — clone superficiel par défaut (20 commits) pour éviter
   de recloner tout l'historique d'un dépôt d'entreprise à chaque review ou
   implémentation. `0` désactive la limite (clone complet). Une valeur faible
@@ -220,8 +237,61 @@ Quelques variables méritent une lecture attentive avant de démarrer :
 Le fichier réel `.env` de ce dépôt (non versionné, voir `.gitignore`) ne
 renseigne aujourd'hui qu'une poignée de ces variables — tout le reste
 tourne sur les valeurs par défaut de `src/config.ts`. `.env.example` liste
-les quarante-trois variables lues par `buildConfig()`, plus `LOG_LEVEL`/
+les quarante-six variables lues par `buildConfig()`, plus `LOG_LEVEL`/
 `LOG_PRETTY` lues indépendamment par `src/log.ts`.
+
+## Capacités de l'agent
+
+Par défaut, sans aucune configuration, le daemon reproduit exactement le
+comportement historique : l'agent ne peut écrire que des fichiers reconnus
+comme tests (`src/tasks/guard.ts`), le daemon reste seul committeur
+(`checkHeadIntegrity`), et le résultat est poussé directement sur la branche
+source de la MR. `AGENT_CAPABILITIES` (voir [Configuration](#configuration))
+permet d'élargir ça, dépôt par dépôt :
+
+- **quels chemins** l'agent peut modifier — `write-all` (tout le dépôt, code
+  source compris) ou `write:motif1|motif2` (des motifs glob supplémentaires,
+  en plus de `tests/`) ;
+- **où va le résultat** — `dedicated-mr` : au lieu d'un push direct, le bot
+  pousse sur une branche `cds-agent/...` dédiée et ouvre une merge request
+  qui cible la branche source, à faire relire par un humain avant fusion.
+
+Un seul point du code répond à « l'agent avait-il le droit de faire ça ? » :
+`src/tasks/guard.ts::isWritablePath`, utilisé à la fois par le garde-fou de
+chemin (`collectChanges`) et par le prompt de l'agent (`implement.ts::
+buildPrompt`) — plus de logique dupliquée entre guard.ts, implement.ts et
+router.ts comme avant ce chantier. Une capacité inconnue ou mal orthographiée
+dans `AGENT_CAPABILITIES` (`write-al`, `dedicate-mr`...) fait échouer le
+démarrage avec un message explicite, plutôt que d'être ignorée en silence.
+
+**Ce qui reste inconditionnel, quelle que soit la capacité accordée** — une
+capacité élargit ce que l'agent a le droit de *produire*, jamais ce que le
+daemon accepte de ne pas *vérifier* :
+
+- `fingerprintGitMeta` / `checkHeadIntegrity` : le daemon reste seul
+  committeur légitime, quelle que soit l'étendue des chemins modifiables.
+- Le rejet des chemins contenant un composant `.` ou `..` (tentative de
+  contournement du garde-fou par un chemin qui, une fois résolu, ne pointe
+  plus vers l'endroit qu'il prétend).
+- Le refus de pousser sur une branche protégée, en mode `source-branch`. En
+  mode `dedicated-mr`, ce contrôle ne s'applique pas à la branche neuve créée
+  par le bot (elle ne peut, par construction, pas être déjà protégée) : le
+  risque qu'il couvre — écraser une branche protégée existante — ne se pose
+  structurellement pas dans ce mode.
+
+Quand les capacités effectivement accordées à une demande dépassent ce
+défaut, le rapport posté sur GitLab le mentionne explicitement (`🔓 Capacités
+élargies pour ce dépôt : ...`) : quelqu'un qui relit la MR sait que l'agent
+avait le droit de toucher au code source, pas seulement le déduire en
+constatant qu'un fichier source a changé.
+
+**Non implémenté, place réservée** : une capacité "appliquer le résultat dans
+un clone frais isolé plutôt que dans le clone manipulé par l'agent" (défense
+en profondeur supplémentaire contre un clone dont l'agent aurait pu altérer
+autre chose que ce qui est vérifié) est anticipée dans la forme du modèle
+(`RepoCapabilities` dans `src/tasks/guard.ts`) mais n'a pas de jeton dans
+`AGENT_CAPABILITIES` aujourd'hui — une tentative de l'utiliser échoue donc
+bruyamment ("capacité inconnue") plutôt que d'être silencieusement ignorée.
 
 ## Lancement
 
@@ -247,7 +317,7 @@ attendus).
 | Script | Commande | Rôle |
 |---|---|---|
 | `npm run dev` | `tsx src/daemon/index.ts` | Lance le daemon (polling + traitement des demandes). |
-| `npm test` | `node --test 'src/**/*.test.ts'` | Suite de tests native Node, 282 tests, aucune dépendance externe, aucun modèle ni token GitLab requis. |
+| `npm test` | `node --test 'src/**/*.test.ts'` | Suite de tests native Node, 374 tests, aucune dépendance externe, aucun modèle ni token GitLab requis. |
 | `npm run test:watch` | `node --test --watch ...` | Idem, en mode watch. |
 | `npm run check` | `tsc --noEmit` | Seul filet de typage — voir [CI](#documentation-complémentaire), pas câblé automatiquement avant ce chantier. |
 | `npm run context -- <mr\|issue> <iid>` | `tsx src/tools/dump-context.ts` | Construit le `TaskContext` d'une MR ou d'une issue réelle et l'écrit dans `./context-dump.json` — utile pour inspecter ce que le prompt verra, sans lancer l'agent. |
@@ -399,10 +469,16 @@ commentaires du code cité :
 - **Contrôle de HEAD contre le serveur authentifié**, pas contre l'état local
   (`checkHeadIntegrity` dans `src/tasks/implement.ts`) : le daemon reste seul
   committeur légitime.
-- **Garde-fou de chemin** (`src/tasks/guard.ts`) : seuls des fichiers
-  reconnus comme tests peuvent être modifiés en mode implémentation ; une
-  suppression de test existant est distinguée et rejetée explicitement (voir
-  `docs/adr/0002-garde-fou-chemin-tests.md`).
+- **Garde-fou de chemin, gouverné par un modèle de capacités** (`src/tasks/
+  guard.ts::isWritablePath`) : par défaut, seuls des fichiers reconnus comme
+  tests peuvent être modifiés en mode implémentation ; une suppression de
+  test existant est distinguée et rejetée explicitement (voir
+  `docs/adr/0002-garde-fou-chemin-tests.md`). `AGENT_CAPABILITIES` permet
+  d'élargir ce périmètre dépôt par dépôt (voir
+  [Capacités de l'agent](#capacités-de-lagent)) — un seul point du code
+  répond à « l'agent avait-il le droit de faire ça ? », et les contrôles
+  ci-dessus (HEAD, hooks git, branche protégée) restent inconditionnels
+  quelle que soit la capacité accordée.
 - **Environnement expurgé** pour tout processus non fiable (`sanitizedEnv()`
   dans `src/config.ts`) : liste blanche plutôt que liste noire.
 - **Sorties bornées en mémoire** (`src/agent/bounded-output.ts`) : une
@@ -480,7 +556,7 @@ Honnêtement, dans l'ordre où elles comptent le plus :
 npm test
 ```
 
-282 tests, `node --test` natif, aucune dépendance de test ajoutée. Les tests
+374 tests, `node --test` natif, aucune dépendance de test ajoutée. Les tests
 qui touchent Docker ou git injectent un faux binaire (voir
 `src/agent/sandbox.test.ts`, `src/agent/workspace.test.ts`) : la suite ne
 nécessite ni Docker réellement lancé, ni modèle d'inférence, ni token GitLab
@@ -494,5 +570,5 @@ deux sont câblés dans `.gitlab-ci.yml`.
 - [`docs/adr/`](./docs/adr/) — décisions d'architecture : polling vs
   webhook, garde-fou par chemin, opencode + inférence locale, contrat de
   fiabilité de la file en mémoire.
-- [`.env.example`](./.env.example) — les trente-sept variables lues par
+- [`.env.example`](./.env.example) — les quarante-six variables lues par
   `buildConfig()`, une par une.

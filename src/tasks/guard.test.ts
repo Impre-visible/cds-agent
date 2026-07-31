@@ -4,7 +4,15 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isTestPath, collectChanges } from "./guard.ts";
+import {
+  isTestPath,
+  collectChanges,
+  isWritablePath,
+  isDefaultCapabilities,
+  describeCapabilities,
+  DEFAULT_CAPABILITIES,
+  type RepoCapabilities,
+} from "./guard.ts";
 
 /**
  * Un vrai dépôt git jetable, avec un fichier de test déjà commité — pour les
@@ -387,5 +395,154 @@ describe("collectChanges", () => {
         rmSync(root, { recursive: true, force: true });
       }
     });
+  });
+});
+
+// Chantier "capacités" : isWritablePath est désormais LE point unique qui
+// décide si un chemin est dans le périmètre accordé, à la place de l'usage
+// direct d'isTestPath par collectChanges — ces tests vérifient à la fois le
+// comportement par défaut inchangé et les capacités élargies.
+describe("isWritablePath — capacités (chantier « capacités »)", () => {
+  test("sans capacités (défaut), équivalent strict à isTestPath", () => {
+    assert.equal(isWritablePath("tests/foo.js"), isTestPath("tests/foo.js"));
+    assert.equal(isWritablePath("src/foo.ts"), isTestPath("src/foo.ts"));
+    assert.equal(isWritablePath("src/foo.ts", DEFAULT_CAPABILITIES), false);
+  });
+
+  test('writablePaths="all" : un fichier hors tests devient modifiable, y compris du code source', () => {
+    const capabilities: RepoCapabilities = {
+      writablePaths: "all",
+      publishMode: "source-branch",
+    };
+    assert.equal(isWritablePath("src/server.js", capabilities), true);
+    assert.equal(isWritablePath("package.json", capabilities), true);
+  });
+
+  test('writablePaths sous forme de motifs : élargit précisément, sans devenir "all"', () => {
+    const capabilities: RepoCapabilities = {
+      writablePaths: ["src/generated/**"],
+      publishMode: "source-branch",
+    };
+    assert.equal(isWritablePath("src/generated/schema.ts", capabilities), true);
+    assert.equal(isWritablePath("src/server.js", capabilities), false);
+    // Les chemins de test restent modifiables en plus des motifs déclarés.
+    assert.equal(isWritablePath("tests/foo.test.js", capabilities), true);
+  });
+
+  test('"**" traverse les segments, "*" reste dans un segment', () => {
+    const capabilities: RepoCapabilities = {
+      writablePaths: ["docs/*.md"],
+      publishMode: "source-branch",
+    };
+    assert.equal(isWritablePath("docs/readme.md", capabilities), true);
+    assert.equal(isWritablePath("docs/sub/readme.md", capabilities), false);
+
+    const deepCapabilities: RepoCapabilities = {
+      writablePaths: ["docs/**"],
+      publishMode: "source-branch",
+    };
+    assert.equal(isWritablePath("docs/sub/readme.md", deepCapabilities), true);
+  });
+
+  test("le refus des chemins avec un composant \".\" ou \"..\" reste inconditionnel, même avec writablePaths=\"all\"", () => {
+    const capabilities: RepoCapabilities = {
+      writablePaths: "all",
+      publishMode: "source-branch",
+    };
+    assert.equal(isWritablePath("vendor/test/../../server.js", capabilities), false);
+    assert.equal(isWritablePath("./server.js", capabilities), false);
+  });
+});
+
+describe("collectChanges — capacités (chantier « capacités »)", () => {
+  test("sans capacités renseignées, comportement strictement identique à avant ce chantier", () => {
+    const withoutCapabilities = collectChanges("A  src/server.js\0A  tests/foo.test.js\0");
+    const withDefaultCapabilities = collectChanges(
+      "A  src/server.js\0A  tests/foo.test.js\0",
+      [],
+      DEFAULT_CAPABILITIES,
+    );
+    assert.deepEqual(withoutCapabilities, withDefaultCapabilities);
+    assert.deepEqual(withoutCapabilities.offending, ["src/server.js"]);
+  });
+
+  test('capacité writablePaths="all" : un fichier hors tests ne remonte plus en "offending"', () => {
+    const capabilities: RepoCapabilities = {
+      writablePaths: "all",
+      publishMode: "source-branch",
+    };
+    const withCapability = collectChanges(
+      "A  src/server.js\0A  tests/foo.test.js\0",
+      [],
+      capabilities,
+    );
+    assert.deepEqual(withCapability.offending, []);
+
+    // Sans la capacité, le même statut est refusé : la capacité change
+    // effectivement l'issue, elle n'est pas cosmétique.
+    const without = collectChanges("A  src/server.js\0A  tests/foo.test.js\0");
+    assert.deepEqual(without.offending, ["src/server.js"]);
+  });
+
+  test("capacité writablePaths=motifs : élargit précisément un dossier déclaré, rien d'autre", () => {
+    const capabilities: RepoCapabilities = {
+      writablePaths: ["src/generated/**"],
+      publishMode: "source-branch",
+    };
+    const result = collectChanges(
+      "A  src/generated/schema.ts\0A  src/server.js\0",
+      [],
+      capabilities,
+    );
+    assert.deepEqual(result.offending, ["src/server.js"]);
+  });
+
+  test('writablePaths="all" : supprimer un test existant n\'est plus distingué en deletedTests (action permise comme une autre)', () => {
+    const capabilities: RepoCapabilities = {
+      writablePaths: "all",
+      publishMode: "source-branch",
+    };
+    const result = collectChanges("D  tests/existant.test.js\0", [], capabilities);
+    assert.deepEqual(result.deletedTests, []);
+    assert.deepEqual(result.offending, []);
+
+    // Sans la capacité, le même statut reste refusé comme suppression de test.
+    const without = collectChanges("D  tests/existant.test.js\0");
+    assert.deepEqual(without.deletedTests, ["tests/existant.test.js"]);
+  });
+
+  test('le rejet des chemins ".."/"." reste inconditionnel même avec writablePaths="all"', () => {
+    const capabilities: RepoCapabilities = {
+      writablePaths: "all",
+      publishMode: "source-branch",
+    };
+    const result = collectChanges("A  vendor/test/../../server.js\0", [], capabilities);
+    assert.deepEqual(result.offending, ["vendor/test/../../server.js"]);
+  });
+});
+
+describe("isDefaultCapabilities / describeCapabilities", () => {
+  test("DEFAULT_CAPABILITIES est bien reconnu comme le défaut", () => {
+    assert.equal(isDefaultCapabilities(DEFAULT_CAPABILITIES), true);
+  });
+
+  test("une capacité élargie n'est plus le défaut", () => {
+    assert.equal(
+      isDefaultCapabilities({ writablePaths: "all", publishMode: "source-branch" }),
+      false,
+    );
+    assert.equal(
+      isDefaultCapabilities({ writablePaths: "tests-only", publishMode: "dedicated-mr" }),
+      false,
+    );
+  });
+
+  test("describeCapabilities mentionne ce qui dépasse le défaut", () => {
+    const description = describeCapabilities({
+      writablePaths: "all",
+      publishMode: "dedicated-mr",
+    });
+    assert.match(description, /tout le dépôt/);
+    assert.match(description, /merge request dédiée/);
   });
 });

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import type { RepoCapabilities } from "./tasks/guard.ts";
 
 function loadDotEnv(path = ".env"): void {
   if (!existsSync(path)) return;
@@ -36,12 +37,42 @@ function list(env: NodeJS.ProcessEnv, name: string): string[] {
     .filter(Boolean);
 }
 
-/** Format : "groupe/depot=image,autre/depot=autre-image" */
-function parseImageMap(raw: string): Map<string, string> {
+/**
+ * Coupe `text` à la PREMIÈRE occurrence de `separator` seulement (contrairement
+ * à `String.split`, qui les coupe toutes) : `null` si absent. Sert à
+ * parseStringMap ci-dessous, où la valeur d'une entrée peut légitimement
+ * contenir elle-même un "=" (une commande comme "CI=1 npm test") — un simple
+ * `entry.split("=")` la tronquerait silencieusement à la première occurrence
+ * trouvée dans la valeur, pas seulement à celle qui sépare le chemin de
+ * dépôt de sa valeur.
+ */
+function splitOnce(text: string, separator: string): [string, string] | null {
+  const index = text.indexOf(separator);
+  if (index === -1) return null;
+  return [text.slice(0, index), text.slice(index + separator.length)];
+}
+
+/**
+ * Format générique "groupe/depot=valeur,autre/depot=autre-valeur" : une
+ * entrée par dépôt, chemin insensible à la casse, valeur prise telle quelle
+ * (espaces de bord retirés). Sert à DOCKER_IMAGES, TEST_COMMANDS et
+ * INSTALL_COMMANDS (voir buildConfig) — même forme pour les trois,
+ * contrairement à parseTestDirectoryMap ci-dessous qui a en plus le
+ * séparateur "|" pour une liste de valeurs par dépôt.
+ *
+ * Une entrée malformée (sans "=", ou chemin/valeur vide) est ignorée en
+ * silence : configuration de commodité par dépôt, pas un réglage de
+ * sécurité — contrairement à AGENT_CAPABILITIES plus bas, qui échoue
+ * bruyamment sur une entrée invalide.
+ */
+function parseStringMap(raw: string): Map<string, string> {
   const map = new Map<string, string>();
-  for (const entry of raw.split(",")) {
-    const [path, image] = entry.split("=").map((part) => part.trim());
-    if (path && image) map.set(path.toLowerCase(), image);
+  for (const rawEntry of raw.split(",")) {
+    const split = splitOnce(rawEntry.trim(), "=");
+    if (!split) continue;
+    const path = split[0].trim().toLowerCase();
+    const value = split[1].trim();
+    if (path && value) map.set(path, value);
   }
   return map;
 }
@@ -67,6 +98,103 @@ function parseTestDirectoryMap(raw: string): Map<string, string[]> {
       .filter(Boolean);
     if (names.length) map.set(path.toLowerCase(), names);
   }
+  return map;
+}
+
+/**
+ * Format : "groupe/depot=capacite1;capacite2,autre/depot=capacite3" — repos
+ * séparés par ",", capacités d'un même dépôt séparées par ";" (voir
+ * tasks/guard.ts pour la sémantique de RepoCapabilities). Jetons reconnus :
+ *
+ * - "write-all" : tout le dépôt est modifiable (writablePaths: "all") ;
+ * - "write:motif1|motif2" : motifs glob supplémentaires modifiables, en plus
+ *   des chemins de test reconnus par isTestPath (writablePaths: motifs) ;
+ * - "dedicated-mr" : push sur une branche cds-agent/... dédiée et ouverture
+ *   d'une merge request, au lieu d'un push direct sur la branche source
+ *   (publishMode: "dedicated-mr").
+ *
+ * Une entrée sans "capacités" du tout (absente d'AGENT_CAPABILITIES, ou
+ * "groupe/depot=" sans rien après le "=") retombe sur DEFAULT_CAPABILITIES
+ * pour ce dépôt — comportement historique.
+ *
+ * Contrairement à parseStringMap/parseTestDirectoryMap ci-dessus
+ * (silencieusement permissifs sur une entrée malformée — une simple
+ * commodité de configuration), un jeton absent de la liste ci-dessus, mal
+ * orthographié ("write-al", "dedicate-mr"...), ou une entrée sans "=" fait
+ * échouer le démarrage avec un message explicite : AGENT_CAPABILITIES
+ * décide ce que l'agent a le droit de produire, une faute de frappe ici ne
+ * doit jamais se traduire par un périmètre silencieusement différent de
+ * celui qu'on croit avoir configuré — dans un sens (élargissement non
+ * voulu) comme dans l'autre (élargissement qu'on croyait accordé et qui ne
+ * l'est pas).
+ *
+ * Limite assumée, comme pour les autres maps par dépôt ci-dessus : un motif
+ * glob contenant lui-même une virgule casserait le découpage par dépôt —
+ * utiliser "|" pour lister plusieurs motifs plutôt qu'une virgule.
+ */
+function parseCapabilitiesMap(raw: string): Map<string, RepoCapabilities> {
+  const map = new Map<string, RepoCapabilities>();
+  if (!raw.trim()) return map;
+
+  for (const rawEntry of raw.split(",")) {
+    const entry = rawEntry.trim();
+    if (!entry) continue;
+
+    const split = splitOnce(entry, "=");
+    if (!split) {
+      throw new Error(
+        `Variable d'environnement invalide : AGENT_CAPABILITIES contient une entrée sans "=" ("${entry}") — voir .env`,
+      );
+    }
+    const path = split[0].trim().toLowerCase();
+    if (!path) {
+      throw new Error(
+        `Variable d'environnement invalide : AGENT_CAPABILITIES contient une entrée sans chemin de dépôt ("${entry}") — voir .env`,
+      );
+    }
+
+    let writablePaths: RepoCapabilities["writablePaths"] = "tests-only";
+    let publishMode: RepoCapabilities["publishMode"] = "source-branch";
+
+    for (const rawToken of split[1].split(";")) {
+      const token = rawToken.trim();
+      if (!token) continue;
+
+      if (token === "write-all") {
+        writablePaths = "all";
+        continue;
+      }
+      if (token === "dedicated-mr") {
+        publishMode = "dedicated-mr";
+        continue;
+      }
+      if (token.startsWith("write:")) {
+        const patterns = token
+          .slice("write:".length)
+          .split("|")
+          .map((pattern) => pattern.trim())
+          .filter(Boolean);
+        if (patterns.length === 0) {
+          throw new Error(
+            `Variable d'environnement invalide : AGENT_CAPABILITIES="${entry}" — ` +
+              `"write:" doit lister au moins un motif (ex. "write:src/**") — voir .env`,
+          );
+        }
+        // "write-all" (tout le dépôt) l'emporte s'il apparaît par ailleurs
+        // dans la même entrée : pas d'ordre de jetons imposé.
+        writablePaths = writablePaths === "all" ? "all" : patterns;
+        continue;
+      }
+
+      throw new Error(
+        `Variable d'environnement invalide : AGENT_CAPABILITIES="${entry}" — capacité inconnue "${token}" ` +
+          `(attendu : "write-all", "write:<motif1>|<motif2>", "dedicated-mr") — voir .env`,
+      );
+    }
+
+    map.set(path, { writablePaths, publishMode });
+  }
+
   return map;
 }
 
@@ -239,8 +367,24 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     maxRemarks: finiteNumber(env, "MAX_REMARKS", 5, { min: 1, max: 50 }),
     gitAuthorName: env.GIT_AUTHOR_NAME ?? "cds-agent",
     gitAuthorEmail: env.GIT_AUTHOR_EMAIL ?? "cds-agent@local.invalid",
+    // Défauts globaux — repli quand un dépôt n'a pas sa propre entrée dans
+    // testCommands/installCommands ci-dessous (§B du chantier "capacités" :
+    // TEST_COMMAND/INSTALL_COMMAND restent le réglage global, comme avant ce
+    // chantier, mais ne sont plus les seuls leviers disponibles).
     testCommand: env.TEST_COMMAND ?? "npm test",
     installCommand: env.INSTALL_COMMAND ?? "npm install",
+    /**
+     * Commande de test par dépôt, en plus du défaut global ci-dessus — même
+     * format et même raison d'être que DOCKER_IMAGES/TEST_DIRECTORY_OVERRIDES
+     * (voir parseStringMap) : un système multi-écosystème n'a pas qu'une
+     * seule commande de test pertinente pour tous les dépôts surveillés
+     * (npm test, pytest, mvn test...). Résolue par tasks/implement.ts
+     * (resolveCommand) : `testCommands.get(projectPath) ?? testCommand`.
+     * Vide par défaut (tous les dépôts utilisent testCommand).
+     */
+    testCommands: parseStringMap(env.TEST_COMMANDS ?? ""),
+    /** Commande d'installation par dépôt — même mécanique que testCommands ci-dessus. */
+    installCommands: parseStringMap(env.INSTALL_COMMANDS ?? ""),
     /**
      * §1.6 : par défaut, l'installation se fait avec les scripts du dépôt
      * cible désactivés (`--ignore-scripts` ajouté par implement.ts). Sans ce
@@ -271,10 +415,22 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
       60_000,
     fakeAgentScript: env.FAKE_AGENT_SCRIPT ?? "",
     useDocker: resolveUseDocker(env),
-    dockerImages: parseImageMap(env.DOCKER_IMAGES ?? ""),
+    dockerImages: parseStringMap(env.DOCKER_IMAGES ?? ""),
     testDirectoryOverrides: parseTestDirectoryMap(
       env.TEST_DIRECTORY_OVERRIDES ?? "",
     ),
+    /**
+     * Modèle de capacités de l'agent (chantier "capacités"), par dépôt —
+     * voir tasks/guard.ts (RepoCapabilities, DEFAULT_CAPABILITIES,
+     * isWritablePath) pour la sémantique complète et parseCapabilitiesMap
+     * ci-dessus pour le format AGENT_CAPABILITIES. Vide par défaut : chaque
+     * dépôt retombe alors sur DEFAULT_CAPABILITIES (tests-only,
+     * source-branch) — comportement strictement identique à avant ce
+     * chantier. Résolu par dépôt via `agentCapabilities.get(projectPath) ??
+     * DEFAULT_CAPABILITIES` (voir tasks/implement.ts::resolveCapabilities),
+     * même mécanique que dockerImages/testDirectoryOverrides ci-dessus.
+     */
+    agentCapabilities: parseCapabilitiesMap(env.AGENT_CAPABILITIES ?? ""),
     dockerDefaultImage: env.DOCKER_DEFAULT_IMAGE ?? "node:22-bookworm-slim",
     // Format docker --memory : un nombre suivi d'une unité optionnelle
     // (b/k/m/g).

@@ -1,6 +1,6 @@
 import { config } from "../config.ts";
 import { runAgent } from "../agent/runner.ts";
-import { collectChanges } from "./guard.ts";
+import { collectChanges, DEFAULT_CAPABILITIES, type RepoCapabilities } from "./guard.ts";
 import { gitlab } from "../gitlab/client.ts";
 import {
   createWorkspace,
@@ -11,15 +11,112 @@ import {
 import type { TaskContextBase } from "../types.ts";
 import { basename, resolve, join } from "node:path";
 import { writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { runAgentInSandbox } from "../agent/sandbox.ts";
 import { MAX_ISSUE_DESCRIPTION_CHARS, COMMAND_OUTPUT_TAIL_CHARS } from "../limits.ts";
 import { log } from "../log.ts";
 
 export interface ImplementResult {
-  status: "pushed" | "rejected" | "no-change" | "tests-red";
+  status: "pushed" | "rejected" | "no-change" | "tests-red" | "mr-opened";
   detail: string;
   files: string[];
   durationMs: number;
+  /**
+   * URL de la merge request ouverte par le bot — renseigné uniquement quand
+   * status vaut "mr-opened" (capacité publishMode="dedicated-mr", voir
+   * openDedicatedMergeRequest plus bas). `undefined` dans tous les autres cas,
+   * y compris "pushed" (push direct : pas de MR à référencer ici).
+   */
+  mrUrl?: string;
+}
+
+/**
+ * Résout la capacité effective d'un dépôt : sa propre entrée dans
+ * `overrides` (config.agentCapabilities), sinon DEFAULT_CAPABILITIES —
+ * même mécanique que resolveCommand ci-dessous et que
+ * config.dockerImages/testDirectoryOverrides ailleurs dans le projet.
+ * Fonction pure (Map + defaut passés en paramètres, pas de lecture directe
+ * de `config`) : testable avec une Map fabriquée, sans dépendre du process
+ * réellement chargé — voir implement.test.ts. Réutilisée telle quelle par
+ * tasks/router.ts pour savoir si le rapport doit mentionner une capacité
+ * élargie.
+ */
+export function resolveCapabilities(
+  projectPath: string,
+  overrides: Map<string, RepoCapabilities>,
+): RepoCapabilities {
+  return overrides.get(projectPath.toLowerCase()) ?? DEFAULT_CAPABILITIES;
+}
+
+/**
+ * Résout une commande (test ou installation) par dépôt, avec repli sur le
+ * défaut global (§B du chantier "capacités" : TEST_COMMAND/INSTALL_COMMAND
+ * restent le réglage global, testCommands/installCommands l'affinent par
+ * dépôt). Même remarque que resolveCapabilities ci-dessus sur le choix
+ * d'une fonction pure plutôt que d'une lecture directe de `config`.
+ */
+export function resolveCommand(
+  projectPath: string,
+  overrides: Map<string, string>,
+  fallback: string,
+): string {
+  return overrides.get(projectPath.toLowerCase()) ?? fallback;
+}
+
+/**
+ * Nom de branche pour le mode "dedicated-mr" (publishMode) : préfixée
+ * `cds-agent/` pour qu'un mainteneur reconnaisse immédiatement une branche
+ * créée par le bot, jamais par un humain. Suffixe aléatoire (pas seulement
+ * l'iid de la MR cible) : une même MR peut légitimement recevoir plusieurs
+ * demandes d'implémentation (relances, itérations) — chacune doit pouvoir
+ * ouvrir sa propre branche/MR sans collision avec une précédente encore
+ * ouverte.
+ */
+export function buildBotBranchName(targetIid: number): string {
+  return `cds-agent/implement-${targetIid}-${randomBytes(4).toString("hex")}`;
+}
+
+/**
+ * Mode "dedicated-mr" (RepoCapabilities.publishMode) : au lieu du push
+ * direct historique sur la branche source, pousse le commit du bot sur une
+ * branche dédiée puis ouvre une merge request qui cible la branche source
+ * d'origine — à faire relire par un humain avant fusion. C'est cette option
+ * qui rend acceptable un élargissement de writablePaths (voir guard.ts) :
+ * rien n'atteint plus jamais la branche source sans passer par une revue.
+ *
+ * Le contrôle de branche protégée (gitlab.branch(...).protected, voir
+ * runImplement) ne s'applique pas ici : la branche créée est neuve, sous
+ * l'espace de noms du bot, jamais une branche existante qu'on pousserait en
+ * force — le risque que ce contrôle couvre (écraser une branche protégée
+ * existante) ne se pose structurellement pas dans ce mode.
+ *
+ * Exportée séparément de runImplement pour être testée directement contre un
+ * vrai dépôt jetable (bare remote locale) et un vrai serveur HTTP local
+ * simulant l'endpoint GitLab de création de MR — même approche que
+ * checkHeadIntegrity ci-dessous et que publishReview (tasks/publish.test.ts).
+ */
+export async function openDedicatedMergeRequest(
+  repo: string,
+  projectId: number,
+  targetIid: number,
+  targetBranch: string,
+  requester: string,
+  requestText: string,
+): Promise<{ branchName: string; mrUrl: string }> {
+  const branchName = buildBotBranchName(targetIid);
+  await git(repo, ["push", "origin", `HEAD:${branchName}`], true);
+
+  const mr = await gitlab.createMergeRequest(projectId, {
+    source_branch: branchName,
+    target_branch: targetBranch,
+    title: `cds-agent : tests demandés par @${requester}`,
+    description:
+      `Merge request ouverte automatiquement par cds-agent (capacité ` +
+      `"dedicated-mr" : le résultat n'est jamais poussé directement sur ` +
+      `\`${targetBranch}\`, à relire avant fusion).\n\nDemande d'origine : ${requestText}`,
+  });
+
+  return { branchName, mrUrl: mr.web_url };
 }
 
 export interface HeadIntegrityViolation {
@@ -267,11 +364,55 @@ function visibleTruncate(text: string, maxChars: number): string {
 // tasks/review.ts, même troncature pour la même raison (voir là-bas).
 
 /**
+ * Instructions de périmètre d'écriture données à l'agent, dérivées de
+ * RepoCapabilities.writablePaths — un simple TEXTE informatif : ce que
+ * l'agent a RÉELLEMENT le droit de produire est vérifié après coup par
+ * guard.ts::collectChanges (isWritablePath), indépendamment de ce que ce
+ * prompt lui demande ou de ce qu'il prétend avoir respecté.
+ *
+ * Cas par défaut (writablePaths: "tests-only") : texte strictement
+ * identique à celui d'avant ce chantier, mot pour mot — condition du
+ * comportement par défaut inchangé (voir implement.test.ts).
+ */
+function writeScopeInstructions(
+  capabilities: RepoCapabilities,
+): { write: string; forbidden: string } {
+  if (capabilities.writablePaths === "all") {
+    return {
+      write:
+        "Écris des tests automatisés, et modifie le code source si besoin pour faire passer la suite.",
+      forbidden:
+        "Le dépôt entier est modifiable pour cette demande (capacité élargie) : reste néanmoins discipliné, ne modifie que ce que la demande justifie.",
+    };
+  }
+  if (Array.isArray(capabilities.writablePaths)) {
+    const patterns = capabilities.writablePaths.join(", ");
+    return {
+      write: `Écris des tests automatisés dans le dossier tests/ (ou sous l'un de ces motifs, si besoin : ${patterns}).`,
+      forbidden: `INTERDIT : modifier un fichier hors de tests/ ou de ces motifs autorisés (${patterns}).`,
+    };
+  }
+  return {
+    write: `Écris des tests automatisés dans le dossier tests/.`,
+    forbidden: `INTERDIT : modifier un fichier hors de tests/. Le code source ne doit pas être touché.`,
+  };
+}
+
+/**
  * Exportée pour être testée unitairement (voir implement.test.ts) : mêmes
  * garanties recherchées que côté review.ts — délimiteurs présents,
  * troncature visible, contenu hostile neutralisé.
+ *
+ * `testCommand` et `capabilities` ont chacun un défaut qui reproduit le
+ * texte historique (config.testCommand global, DEFAULT_CAPABILITIES) : les
+ * appels existants (buildPrompt(context) seul) restent inchangés au
+ * caractère près.
  */
-export function buildPrompt(context: TaskContextBase): string {
+export function buildPrompt(
+  context: TaskContextBase,
+  testCommand: string = config.testCommand,
+  capabilities: RepoCapabilities = DEFAULT_CAPABILITIES,
+): string {
   const issue = context.linkedIssue;
   const linked = issue
     ? `## Ticket lié #${issue.iid} (contexte uniquement)\n${wrapUntrusted(
@@ -280,15 +421,21 @@ export function buildPrompt(context: TaskContextBase): string {
       )}`
     : "";
 
+  const scope = writeScopeInstructions(capabilities);
+  const bugInstruction =
+    capabilities.writablePaths === "all"
+      ? "Si un test échoue à cause d'un bug du code source, corrige ce bug."
+      : "Si un test échoue à cause d'un bug du code source, écris quand même le test correct et arrête-toi.";
+
   return [
     DATA_PREAMBLE,
     `Dépôt ${context.projectPath}, cloné dans le répertoire courant.`,
     `## Demande de @${context.requester}\n${wrapUntrusted("demande utilisateur", context.requestText)}`,
     linked,
-    `Écris des tests automatisés dans le dossier tests/.`,
-    `Lance \`${config.testCommand}\` et corrige tes tests jusqu'à ce que tout passe.`,
-    `INTERDIT : modifier un fichier hors de tests/. Le code source ne doit pas être touché.`,
-    `Si un test échoue à cause d'un bug du code source, écris quand même le test correct et arrête-toi.`,
+    scope.write,
+    `Lance \`${testCommand}\` et corrige tes tests jusqu'à ce que tout passe.`,
+    scope.forbidden,
+    bugInstruction,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -299,6 +446,26 @@ export async function runImplement(
   branch: string,
 ): Promise<ImplementResult> {
   const started = Date.now();
+  // Chantier "capacités" (§A/§B) : résolus une seule fois ici, propagés
+  // explicitement à ce qui en a besoin plus bas (buildPrompt, collectChanges,
+  // le choix push direct / MR dédiée) plutôt que relus depuis `config` à
+  // chaque usage — un seul calcul, une seule source de vérité pour cette
+  // exécution.
+  const capabilities = resolveCapabilities(
+    context.projectPath,
+    config.agentCapabilities,
+  );
+  const testCommand = resolveCommand(
+    context.projectPath,
+    config.testCommands,
+    config.testCommand,
+  );
+  const installCommandBase = resolveCommand(
+    context.projectPath,
+    config.installCommands,
+    config.installCommand,
+  );
+
   // §4.7 : clone superficiel par défaut (config.cloneDepth) — voir
   // safeMergeBase plus haut pour le repli quand merge-base a besoin de plus
   // d'historique que ce que ce clone contient.
@@ -313,7 +480,7 @@ export async function runImplement(
 
     log.info(`installation des dépendances`);
     const installCommand = buildInstallCommand(
-      config.installCommand,
+      installCommandBase,
       config.installIgnoreScripts,
     );
     const install = await runCommand(repo, installCommand, {
@@ -330,7 +497,7 @@ export async function runImplement(
     }
 
     // Référence : si la suite est déjà rouge, on ne saura rien conclure ensuite.
-    const baseline = await runCommand(repo, config.testCommand, {
+    const baseline = await runCommand(repo, testCommand, {
       projectPath: context.projectPath,
     });
 
@@ -377,12 +544,12 @@ export async function runImplement(
     } else if (config.useDocker) {
       writeFileSync(
         join(workspace.meta, "prompt.txt"),
-        buildPrompt(context),
+        buildPrompt(context, testCommand, capabilities),
         "utf8",
       );
       await runAgentInSandbox(repo, workspace.meta, context.projectPath);
     } else {
-      await runAgent(repo, buildPrompt(context));
+      await runAgent(repo, buildPrompt(context, testCommand, capabilities));
     }
 
     // On revérifie AVANT la moindre commande git côté hôte, y compris ce
@@ -412,9 +579,13 @@ export async function runImplement(
 
     // `-z` : voir guard.ts pour le détail du format (pas de quoting, entrées
     // séparées par un octet nul, renommages/copies sur deux entrées).
+    // `capabilities` : voir guard.ts::isWritablePath — c'est ce paramètre qui
+    // élargit (ou non) ce qui compte comme "dans le périmètre", à la place
+    // du strict isTestPath d'avant ce chantier.
     const { paths, offending, deletedTests } = collectChanges(
       await git(repo, ["status", "--porcelain=v1", "-uall", "-z"]),
       config.testDirectoryOverrides.get(context.projectPath.toLowerCase()),
+      capabilities,
     );
 
     if (paths.length === 0) {
@@ -450,7 +621,7 @@ export async function runImplement(
     }
 
     // On ne croit pas l'agent sur parole : on relance la suite nous-mêmes.
-    const verdict = await runCommand(repo, config.testCommand, {
+    const verdict = await runCommand(repo, testCommand, {
       projectPath: context.projectPath,
     });
     if (!verdict.ok) {
@@ -459,6 +630,38 @@ export async function runImplement(
         detail: `les tests écrits ne passent pas :\n${verdict.output.slice(-COMMAND_OUTPUT_TAIL_CHARS)}`,
         files: paths,
         durationMs: Date.now() - started,
+      };
+    }
+
+    // Le refus de pousser sur une branche protégée reste inconditionnel,
+    // MAIS ne s'applique qu'au mode "source-branch" : en mode "dedicated-mr"
+    // (ci-dessous), on ne pousse jamais sur `branch` elle-même, seulement sur
+    // une branche neuve sous l'espace de noms du bot — voir
+    // openDedicatedMergeRequest, qui documente pourquoi ce contrôle ne se
+    // pose structurellement pas dans ce mode.
+    if (capabilities.publishMode === "dedicated-mr") {
+      await git(repo, ["add", "--all"]);
+      await git(repo, [
+        "commit",
+        "-m",
+        `test: ajout de tests demandés par @${context.requester}`,
+      ]);
+
+      const { mrUrl } = await openDedicatedMergeRequest(
+        repo,
+        context.projectId,
+        context.targetIid,
+        branch,
+        context.requester,
+        context.requestText,
+      );
+
+      return {
+        status: "mr-opened",
+        detail: `${paths.length} fichier(s) de test proposé(s) via une merge request dédiée : ${mrUrl}`,
+        files: paths,
+        durationMs: Date.now() - started,
+        mrUrl,
       };
     }
 
