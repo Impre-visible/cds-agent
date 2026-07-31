@@ -21,16 +21,16 @@ function loadDotEnv(path = ".env"): void {
 
 loadDotEnv();
 
-function required(name: string): string {
-  const value = process.env[name];
+function required(env: NodeJS.ProcessEnv, name: string): string {
+  const value = env[name];
   if (!value) {
     throw new Error(`Variable d'environnement manquante : ${name} — voir .env`);
   }
   return value;
 }
 
-function list(name: string): string[] {
-  return (process.env[name] ?? "")
+function list(env: NodeJS.ProcessEnv, name: string): string[] {
+  return (env[name] ?? "")
     .split(",")
     .map((entry) => entry.trim().toLowerCase())
     .filter(Boolean);
@@ -46,44 +46,143 @@ function parseImageMap(raw: string): Map<string, string> {
   return map;
 }
 
-export const config = {
-  gitlabUrl: (process.env.GITLAB_URL ?? "https://gitlab.com").replace(
-    /\/+$/,
-    "",
-  ),
-  token: required("GITLAB_TOKEN"),
-  botUsername: required("BOT_USERNAME"),
-  pollIntervalMs: Number(process.env.POLL_INTERVAL_MS ?? 30_000),
-  dumpDir: process.env.DUMP_DIR ?? "./todo-dumps",
-  stateFile: process.env.STATE_FILE ?? "./state/processed.jsonl",
-  skipMarkDone: process.env.SKIP_MARK_DONE === "1",
-  allowedProjects: list("ALLOWED_PROJECTS"),
-  allowedUsers: list("ALLOWED_USERS"),
-  taskStubMs: Number(process.env.TASK_STUB_MS ?? 20_000),
-  lookbackMs: Number(process.env.LOOKBACK_MINUTES ?? 10) * 60_000,
-  agentModel:
-    process.env.AGENT_MODEL ?? "lmstudio/qwen2.5-coder-7b-instruct-mlx",
-  agentTimeoutMs: Number(process.env.AGENT_TIMEOUT_MINUTES ?? 10) * 60_000,
-  maxRemarks: Number(process.env.MAX_REMARKS ?? 5),
-  gitAuthorName: process.env.GIT_AUTHOR_NAME ?? "cds-agent",
-  gitAuthorEmail: process.env.GIT_AUTHOR_EMAIL ?? "cds-agent@local.invalid",
-  testCommand: process.env.TEST_COMMAND ?? "npm test",
-  installCommand: process.env.INSTALL_COMMAND ?? "npm install",
-  commandTimeoutMs: Number(process.env.COMMAND_TIMEOUT_MINUTES ?? 5) * 60_000,
-  fakeAgentScript: process.env.FAKE_AGENT_SCRIPT ?? "",
-  useDocker: process.env.USE_DOCKER === "1",
-  dockerImages: parseImageMap(process.env.DOCKER_IMAGES ?? ""),
-  dockerDefaultImage:
-    process.env.DOCKER_DEFAULT_IMAGE ?? "node:22-bookworm-slim",
-  dockerMemory: process.env.DOCKER_MEMORY ?? "4g",
-  dockerCpus: process.env.DOCKER_CPUS ?? "4",
-  agentImage: process.env.AGENT_IMAGE ?? "cds-agent/agent-node22",
-  /** Vue depuis le conteneur : l'hôte n'est pas localhost. */
-  inferenceUrl:
-    process.env.CONTAINER_INFERENCE_URL ??
-    "http://host.docker.internal:1234/v1",
-  maxAttempts: Number(process.env.MAX_ATTEMPTS ?? 3),
-} as const;
+interface NumberBounds {
+  min?: number;
+  max?: number;
+}
+
+/**
+ * Lit une variable d'environnement numérique en s'assurant qu'elle est un
+ * nombre fini et qu'elle respecte les bornes attendues, plutôt que de laisser
+ * passer une valeur absurde. `Number("30s")` vaut `NaN`, et
+ * `setTimeout(fn, NaN)` se comporte comme `setTimeout(fn, 0)` : sans ce
+ * garde-fou, une simple faute de frappe sur POLL_INTERVAL_MS transforme
+ * l'intervalle de polling en boucle serrée qui martèle l'API GitLab avec le
+ * PAT — bannissement quasi garanti. Une valeur négative ou nulle est tout
+ * aussi dangereuse (ex. MAX_ATTEMPTS=0 désactiverait silencieusement les
+ * réessais), d'où les bornes. On échoue donc bruyamment au démarrage, en
+ * nommant la variable fautive et la valeur lue — même ton que required().
+ * Une variable absente ou vide retombe sur le défaut, comme required().
+ */
+function finiteNumber(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  fallback: number,
+  bounds: NumberBounds = {},
+): number {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    throw new Error(
+      `Variable d'environnement invalide : ${name}="${raw}" n'est pas un nombre — voir .env`,
+    );
+  }
+  if (bounds.min !== undefined && value < bounds.min) {
+    throw new Error(
+      `Variable d'environnement invalide : ${name}=${raw} est inférieur au minimum autorisé (${bounds.min}) — voir .env`,
+    );
+  }
+  if (bounds.max !== undefined && value > bounds.max) {
+    throw new Error(
+      `Variable d'environnement invalide : ${name}=${raw} dépasse le maximum autorisé (${bounds.max}) — voir .env`,
+    );
+  }
+  return value;
+}
+
+/**
+ * Validation de forme légère pour les valeurs passées telles quelles à
+ * `docker run` (mémoire, CPU) : pas de plage numérique pertinente ici, mais
+ * une faute de frappe produirait sinon une commande Docker qui échoue de
+ * façon opaque bien plus tard, loin du réglage fautif.
+ */
+function matchingFormat(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  fallback: string,
+  pattern: RegExp,
+): string {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+  if (!pattern.test(raw)) {
+    throw new Error(
+      `Variable d'environnement invalide : ${name}="${raw}" ne respecte pas le format attendu (${pattern}) — voir .env`,
+    );
+  }
+  return raw;
+}
+
+/**
+ * Construit la configuration à partir d'un environnement donné. Fonction
+ * pure exportée séparément de `config` afin d'être testable en isolation
+ * (sans dépendre de process.env ni du cache des modules ESM) : voir
+ * config.test.ts.
+ */
+export function buildConfig(env: NodeJS.ProcessEnv) {
+  return {
+    gitlabUrl: (env.GITLAB_URL ?? "https://gitlab.com").replace(/\/+$/, ""),
+    token: required(env, "GITLAB_TOKEN"),
+    botUsername: required(env, "BOT_USERNAME"),
+    // Plancher à 1 s : en dessous, on martèle l'API GitLab. Plafond à 1 h :
+    // au-delà, autant dire que le polling ne sert plus à rien.
+    pollIntervalMs: finiteNumber(env, "POLL_INTERVAL_MS", 30_000, {
+      min: 1_000,
+      max: 3_600_000,
+    }),
+    dumpDir: env.DUMP_DIR ?? "./todo-dumps",
+    stateFile: env.STATE_FILE ?? "./state/processed.jsonl",
+    skipMarkDone: env.SKIP_MARK_DONE === "1",
+    allowedProjects: list(env, "ALLOWED_PROJECTS"),
+    allowedUsers: list(env, "ALLOWED_USERS"),
+    // Non utilisé actuellement (code mort), mais validé comme le reste pour
+    // ne pas laisser un NaN se propager si l'usage revient un jour.
+    taskStubMs: finiteNumber(env, "TASK_STUB_MS", 20_000, {
+      min: 0,
+      max: 600_000,
+    }),
+    // Exprimé en minutes côté env : borné à [1, 1440] (une journée) avant
+    // conversion en ms.
+    lookbackMs:
+      finiteNumber(env, "LOOKBACK_MINUTES", 10, { min: 1, max: 1_440 }) *
+      60_000,
+    agentModel: env.AGENT_MODEL ?? "lmstudio/qwen2.5-coder-7b-instruct-mlx",
+    // Exprimé en minutes côté env : un timeout de 0 laisserait l'agent
+    // tourner indéfiniment (voir agent/runner.ts) ; 4 h de plafond couvre
+    // largement une tâche locale raisonnable.
+    agentTimeoutMs:
+      finiteNumber(env, "AGENT_TIMEOUT_MINUTES", 10, { min: 1, max: 240 }) *
+      60_000,
+    // maxRemarks=0 viderait silencieusement toute review (slice(0, 0)).
+    maxRemarks: finiteNumber(env, "MAX_REMARKS", 5, { min: 1, max: 50 }),
+    gitAuthorName: env.GIT_AUTHOR_NAME ?? "cds-agent",
+    gitAuthorEmail: env.GIT_AUTHOR_EMAIL ?? "cds-agent@local.invalid",
+    testCommand: env.TEST_COMMAND ?? "npm test",
+    installCommand: env.INSTALL_COMMAND ?? "npm install",
+    // Exprimé en minutes côté env, même logique que agentTimeoutMs.
+    commandTimeoutMs:
+      finiteNumber(env, "COMMAND_TIMEOUT_MINUTES", 5, { min: 1, max: 60 }) *
+      60_000,
+    fakeAgentScript: env.FAKE_AGENT_SCRIPT ?? "",
+    useDocker: env.USE_DOCKER === "1",
+    dockerImages: parseImageMap(env.DOCKER_IMAGES ?? ""),
+    dockerDefaultImage: env.DOCKER_DEFAULT_IMAGE ?? "node:22-bookworm-slim",
+    // Format docker --memory : un nombre suivi d'une unité optionnelle
+    // (b/k/m/g).
+    dockerMemory: matchingFormat(env, "DOCKER_MEMORY", "4g", /^\d+(\.\d+)?[bkmg]?$/i),
+    // Format docker --cpus : un nombre entier ou décimal.
+    dockerCpus: matchingFormat(env, "DOCKER_CPUS", "4", /^\d+(\.\d+)?$/),
+    agentImage: env.AGENT_IMAGE ?? "cds-agent/agent-node22",
+    /** Vue depuis le conteneur : l'hôte n'est pas localhost. */
+    inferenceUrl:
+      env.CONTAINER_INFERENCE_URL ?? "http://host.docker.internal:1234/v1",
+    // maxAttempts=0 désactiverait silencieusement les réessais.
+    maxAttempts: finiteNumber(env, "MAX_ATTEMPTS", 3, { min: 1, max: 20 }),
+  } as const;
+}
+
+export const config = buildConfig(process.env);
 
 /** Credential git passé par variables d'environnement : rien n'est écrit sur disque. */
 export function gitCredentialEnv(): NodeJS.ProcessEnv {
