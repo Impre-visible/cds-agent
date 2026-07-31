@@ -1,3 +1,5 @@
+import { log } from "../log.ts";
+
 export class TaskQueue<T> {
   private readonly waiting: T[] = [];
   /** Clés des tâches en attente, pour rendre push() idempotent (voir plus bas). */
@@ -108,9 +110,12 @@ export class TaskQueue<T> {
         try {
           await this.worker(item);
         } catch (error) {
-          console.error(
-            `  [worker] tâche en échec : ${(error as Error).message}`,
-          );
+          // Filet générique, sans contexte de corrélation (cette file ne
+          // connaît de chaque tâche que sa clé opaque, via keyOf) : le
+          // worker réel (trackedWorker, voir daemon/index.ts) journalise
+          // déjà l'échec avec key/projectPath/iid avant de relancer
+          // l'exception qui atterrit ici.
+          log.error(`[worker] tâche en échec : ${(error as Error).message}`);
         }
       }
     } finally {

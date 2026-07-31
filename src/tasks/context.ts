@@ -1,5 +1,12 @@
 import { config } from "../config.ts";
 import { gitlab } from "../gitlab/client.ts";
+import { log } from "../log.ts";
+import {
+  DIFF_REFS_RETRIES,
+  DIFF_REFS_DELAY_MS,
+  RECENT_HUMAN_COMMENTS,
+  MAX_LIST_PAGES,
+} from "../limits.ts";
 import type {
   AgentRequest,
   DiffFile,
@@ -10,16 +17,12 @@ import type {
   TaskContext,
 } from "../types.ts";
 
-const DIFF_REFS_RETRIES = 5;
-const DIFF_REFS_DELAY_MS = 2_000;
-
-// Nombre de commentaires humains récents conservés par ticket lié, et borne
-// dure sur le nombre de pages explorées pour les rassembler (voir
-// gitlab.notesPage) : un fil noyé sous des centaines de notes système
-// (labels, réassignations...) ne doit pas non plus déclencher un
+// DIFF_REFS_RETRIES, DIFF_REFS_DELAY_MS, RECENT_HUMAN_COMMENTS et
+// MAX_LIST_PAGES viennent de src/limits.ts (§5.8). MAX_LIST_PAGES borne le
+// nombre de pages explorées pour rassembler les commentaires récents (voir
+// gitlab.notesPage ci-dessous) : un fil noyé sous des centaines de notes
+// système (labels, réassignations...) ne doit pas non plus déclencher un
 // rapatriement sans fin si aucun commentaire humain récent ne s'y trouve.
-const RECENT_HUMAN_COMMENTS = 15;
-const MAX_NOTE_PAGES = 20;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -38,7 +41,7 @@ function sleep(ms: number): Promise<void> {
  * ticket de plus de 100 commentaires — il gardait les commentaires 86 à
  * 100 de la première page, les plus récents étant restés sur des pages
  * jamais lues (voir §3.5 : le commentaire "les échanges récents" décrivait
- * un comportement que le code n'avait pas). MAX_NOTE_PAGES borne malgré
+ * un comportement que le code n'avait pas). MAX_LIST_PAGES borne malgré
  * tout le nombre de pages explorées, pour la même raison que le nombre de
  * pages est borné côté pagination générique dans gitlab/client.ts.
  */
@@ -49,7 +52,7 @@ async function recentHumanNotes(
 ): Promise<Note[]> {
   const human: Note[] = [];
 
-  for (let page = 1; page <= MAX_NOTE_PAGES; page++) {
+  for (let page = 1; page <= MAX_LIST_PAGES; page++) {
     const { items, nextPage } = await gitlab.notesPage(
       projectId,
       "issues",
@@ -128,8 +131,8 @@ export async function buildContext(
         break;
       }
 
-      console.log(
-        `    contexte incomplet (diff_refs=${Boolean(mr.diff_refs?.head_sha)}, fichiers=${files.length}), tentative ${attempt}/${DIFF_REFS_RETRIES}`,
+      log.info(
+        `contexte incomplet (diff_refs=${Boolean(mr.diff_refs?.head_sha)}, fichiers=${files.length}), tentative ${attempt}/${DIFF_REFS_RETRIES}`,
       );
       await sleep(DIFF_REFS_DELAY_MS);
     }
@@ -143,8 +146,8 @@ export async function buildContext(
       // comparer pour détecter un changement de la MR pendant la review. On
       // se contente ici de ne plus laisser `diffRefs: null` être la seule
       // trace de cet échec.
-      console.warn(
-        `    diff_refs indisponible après ${DIFF_REFS_RETRIES} tentatives (${(DIFF_REFS_RETRIES * DIFF_REFS_DELAY_MS) / 1000}s d'attente) — le contexte part sans SHA figés`,
+      log.warn(
+        `diff_refs indisponible après ${DIFF_REFS_RETRIES} tentatives (${(DIFF_REFS_RETRIES * DIFF_REFS_DELAY_MS) / 1000}s d'attente) — le contexte part sans SHA figés`,
       );
     }
 
@@ -161,7 +164,7 @@ export async function buildContext(
           config.botUsername,
         );
     } catch (error) {
-      console.warn(`    ticket lié illisible : ${(error as Error).message}`);
+      log.warn(`ticket lié illisible : ${(error as Error).message}`);
     }
 
     return {

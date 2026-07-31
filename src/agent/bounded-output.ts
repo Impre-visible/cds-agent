@@ -1,3 +1,5 @@
+import { DEFAULT_MAX_CAPTURED_OUTPUT_BYTES } from "../limits.ts";
+
 /**
  * Accumulateur de sortie borné en mémoire (§4.8). `sandbox.ts` et
  * `runner.ts` capturaient jusqu'ici la sortie d'un process avec un simple
@@ -9,8 +11,9 @@
  *
  * On tronque le DÉBUT et on garde la FIN, pour deux raisons qui tiennent
  * toutes les deux en aval :
- * - l'affichage (`output.slice(-1200)` dans implement.ts) ne montre de
- *   toute façon que les derniers caractères ;
+ * - l'affichage (`output.slice(-COMMAND_OUTPUT_TAIL_CHARS)` dans
+ *   implement.ts, voir src/limits.ts) ne montre de toute façon que les
+ *   derniers caractères ;
  * - `extractJson` (review.ts) cherche `{"remarks"` dans stdout : c'est la
  *   réponse finale du modèle, qui arrive après tout le bruit des appels
  *   d'outils qui la précèdent dans le flux — donc en fin de sortie, pas au
@@ -23,12 +26,10 @@
  * JSON tronqué si la sortie totale dépasse la limite. La limite ci-dessous
  * (plusieurs Mo) est délibérément généreuse pour que ce cas reste
  * hypothétique en pratique.
+ *
+ * DEFAULT_MAX_CAPTURED_OUTPUT_BYTES vient de src/limits.ts (§5.8), avec le
+ * reste des tailles de tampon du daemon.
  */
-
-/** Conservé après troncature ; 4 Mo couvre largement une sortie normale
- * (logs de tests, sortie de l'agent) tout en bornant strictement la
- * mémoire face à un cas dégénéré. */
-export const DEFAULT_MAX_CAPTURED_OUTPUT_BYTES = 4 * 1024 * 1024;
 
 export interface BoundedOutput {
   append(chunk: string | Buffer): void;

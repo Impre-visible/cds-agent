@@ -6,6 +6,8 @@ import { runReview } from "./review.ts";
 import { runImplement } from "./implement.ts";
 import { defuseMentions } from "../daemon/request.ts";
 import type { AckHandle, AgentRequest } from "../types.ts";
+import { TESTS_RED_REPORT_TAIL_CHARS } from "../limits.ts";
+import { log } from "../log.ts";
 
 export type Intent = "review" | "implement" | "unknown";
 
@@ -109,8 +111,8 @@ async function evolveReaction(
       await gitlab.awardOnNote(projectId, kind, iid, noteId, emoji);
     }
   } catch (error) {
-    console.warn(
-      `    évolution de la réaction emoji impossible : ${(error as Error).message}`,
+    log.warn(
+      `évolution de la réaction emoji impossible : ${(error as Error).message}`,
     );
   }
 }
@@ -147,8 +149,8 @@ export async function report(
       await evolveReaction(request, request.ack, ok);
       return;
     } catch (error) {
-      console.warn(
-        `    édition de l'accusé de réception impossible (${(error as Error).message}) — ` +
+      log.warn(
+        `édition de l'accusé de réception impossible (${(error as Error).message}) — ` +
           `note peut-être supprimée entre-temps : republication d'une nouvelle note`,
       );
     }
@@ -159,7 +161,7 @@ export async function report(
 }
 
 export async function runTask(request: AgentRequest): Promise<void> {
-  console.log(`  [worker] démarrage ${request.key}`);
+  log.info(`[worker] démarrage ${request.key}`);
 
   try {
     if (request.kind !== "merge_requests") {
@@ -186,7 +188,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
     }
 
     const intent = detectIntent(request.text, config.botUsername);
-    console.log(`  [worker] intention détectée : ${intent}`);
+    log.info(`[worker] intention détectée : ${intent}`);
 
     if (intent === "unknown") {
       await report(
@@ -216,12 +218,12 @@ export async function runTask(request: AgentRequest): Promise<void> {
       const messages: Record<typeof result.status, string> = {
         pushed: `✅ Tests poussés sur \`${context.sourceBranch}\` en ${seconds} s — ${defuseMentions(result.detail)}`,
         rejected: `⛔ Modifications refusées après ${seconds} s — ${defuseMentions(result.detail)}`,
-        "tests-red": `❌ Les tests ne passent pas après ${seconds} s, rien n'a été poussé.\n\n<details><summary>Sortie</summary>\n\n\`\`\`\n${defuseMentions(result.detail.slice(-1500))}\n\`\`\`\n\n</details>`,
+        "tests-red": `❌ Les tests ne passent pas après ${seconds} s, rien n'a été poussé.\n\n<details><summary>Sortie</summary>\n\n\`\`\`\n${defuseMentions(result.detail.slice(-TESTS_RED_REPORT_TAIL_CHARS))}\n\`\`\`\n\n</details>`,
         "no-change": `🤷 L'agent n'a produit aucune modification en ${seconds} s.`,
       };
 
       await report(request, messages[result.status], result.status === "pushed");
-      console.log(`  [worker] terminé ${request.key} — ${result.status}`);
+      log.info(`[worker] terminé ${request.key} — ${result.status}`);
       return;
     }
 
@@ -279,12 +281,12 @@ export async function runTask(request: AgentRequest): Promise<void> {
       true,
     );
 
-    console.log(
-      `  [worker] terminé ${request.key} — ${outcomes.length} remarque(s) en ${seconds} s`,
+    log.info(
+      `[worker] terminé ${request.key} — ${outcomes.length} remarque(s) en ${seconds} s`,
     );
   } catch (error) {
     const message = (error as Error).message;
-    console.error(`  [worker] échec ${request.key} : ${message}`);
+    log.error(`[worker] échec ${request.key} : ${message}`);
     // Le demandeur ne doit jamais rester sans réponse après un accusé de
     // réception. Le message d'erreur peut recopier du texte non maîtrisé
     // (une réponse d'API, une sortie de commande) : on le défuse avant de le

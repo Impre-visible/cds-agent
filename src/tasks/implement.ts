@@ -12,6 +12,8 @@ import type { TaskContextBase } from "../types.ts";
 import { basename, resolve, join } from "node:path";
 import { writeFileSync } from "node:fs";
 import { runAgentInSandbox } from "../agent/sandbox.ts";
+import { MAX_ISSUE_DESCRIPTION_CHARS, COMMAND_OUTPUT_TAIL_CHARS } from "../limits.ts";
+import { log } from "../log.ts";
 
 export interface ImplementResult {
   status: "pushed" | "rejected" | "no-change" | "tests-red";
@@ -200,9 +202,12 @@ export async function rollbackAgentChanges(repo: string): Promise<void> {
 
 /**
  * §1.1 : même défaut que côté review.ts (voir le commentaire équivalent
- * là-bas, dupliqué ici plutôt que partagé — même logique que les petites
- * constantes déjà dupliquées entre fichiers de ce dossier, ex.
- * MAX_NOTE_PAGES/MAX_NOTES_PAGES dans context.ts/publish.ts). La demande de
+ * là-bas), texte dupliqué ici plutôt que partagé — contrairement aux petites
+ * constantes numériques de ce dossier, effectivement partagées depuis §5.8
+ * (voir src/limits.ts), ce texte diffère légèrement d'un fichier à l'autre
+ * (review.ts mentionne aussi le diff, absent ici) : le dupliquer garde
+ * chaque prompt lisible indépendamment, plutôt que de factoriser un texte
+ * qui devrait rester légèrement différent selon l'appelant. La demande de
  * @requester et la description du ticket lié entrent brutes dans le prompt,
  * concaténées aux instructions ; ALLOWED_USERS ne filtre que qui déclenche
  * la commande, pas qui a rédigé ce texte.
@@ -258,9 +263,8 @@ function visibleTruncate(text: string, maxChars: number): string {
   return `${text.slice(0, maxChars)}\n[... tronqué, ${omitted} caractère(s) non montré(s) ...]`;
 }
 
-// Plafond inchangé par rapport au comportement précédent (slice(0, 1500)) :
-// ce qui change n'est pas la limite mais sa visibilité pour l'agent.
-const MAX_ISSUE_DESCRIPTION_CHARS = 1500;
+// MAX_ISSUE_DESCRIPTION_CHARS vient de src/limits.ts (§5.8) — partagée avec
+// tasks/review.ts, même troncature pour la même raison (voir là-bas).
 
 /**
  * Exportée pour être testée unitairement (voir implement.test.ts) : mêmes
@@ -307,7 +311,7 @@ export async function runImplement(
     await git(repo, ["config", "user.name", config.gitAuthorName]);
     await git(repo, ["config", "user.email", config.gitAuthorEmail]);
 
-    console.log(`    installation des dépendances`);
+    log.info(`installation des dépendances`);
     const installCommand = buildInstallCommand(
       config.installCommand,
       config.installIgnoreScripts,
@@ -319,7 +323,7 @@ export async function runImplement(
     if (!install.ok) {
       return {
         status: "tests-red",
-        detail: `installation échouée :\n${install.output.slice(-1200)}`,
+        detail: `installation échouée :\n${install.output.slice(-COMMAND_OUTPUT_TAIL_CHARS)}`,
         files: [],
         durationMs: Date.now() - started,
       };
@@ -333,7 +337,7 @@ export async function runImplement(
     if (!baseline.ok) {
       return {
         status: "tests-red",
-        detail: `la suite était déjà rouge avant intervention :\n${baseline.output.slice(-1200)}`,
+        detail: `la suite était déjà rouge avant intervention :\n${baseline.output.slice(-COMMAND_OUTPUT_TAIL_CHARS)}`,
         files: [],
         durationMs: Date.now() - started,
       };
@@ -346,7 +350,7 @@ export async function runImplement(
     const gitMetaBaseline = fingerprintGitMeta(repo);
 
     if (config.fakeAgentScript) {
-      console.log(`    agent simulé : ${config.fakeAgentScript}`);
+      log.info(`agent simulé : ${config.fakeAgentScript}`);
 
       // Le script vit sur l'hôte : en mode conteneur il faut le monter et réécrire son chemin.
       let command = config.fakeAgentScript;
@@ -365,6 +369,10 @@ export async function runImplement(
         projectPath: context.projectPath,
         mounts,
       });
+      // Flux brut (sortie du script simulé), pas un événement applicatif —
+      // même traitement que le passthrough de runAgent()/runInSandbox() (voir
+      // §6.4 dans le rapport de ce chantier) : on l'affiche tel quel, on ne
+      // l'encapsule pas dans une ligne de log structuré.
       console.log(fake.output);
     } else if (config.useDocker) {
       writeFileSync(
@@ -448,7 +456,7 @@ export async function runImplement(
     if (!verdict.ok) {
       return {
         status: "tests-red",
-        detail: `les tests écrits ne passent pas :\n${verdict.output.slice(-1200)}`,
+        detail: `les tests écrits ne passent pas :\n${verdict.output.slice(-COMMAND_OUTPUT_TAIL_CHARS)}`,
         files: paths,
         durationMs: Date.now() - started,
       };

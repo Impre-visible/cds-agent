@@ -26,6 +26,8 @@ sur un dépôt qui compte.
 - [Scripts npm](#scripts-npm)
 - [Images Docker](#images-docker)
 - [Modèle local](#modèle-local)
+- [Journalisation](#journalisation)
+- [Observabilité](#observabilité)
 - [Garde-fous de sécurité](#garde-fous-de-sécurité)
 - [Limites connues](#limites-connues)
 - [Tests](#tests)
@@ -186,11 +188,31 @@ Quelques variables méritent une lecture attentive avant de démarrer :
   `GITLAB_RETRY_MAX_DELAY_MS`) sur 429/5xx/erreur réseau ; jamais les
   écritures (POST), pour ne jamais risquer de publier deux fois le même
   commentaire à cause d'un simple timeout réseau.
+- **`DOCKER_PIDS_LIMIT`** / **`DOCKER_ULIMIT_NOFILE`** / **`DOCKER_TMPFS_SIZE`**
+  (§5.8) — mêmes réglages de ressources sandbox que `DOCKER_MEMORY`/
+  `DOCKER_CPUS`, jusqu'ici en dur dans `agent/sandbox.ts` : un dépôt cible
+  dont l'installation ou la suite de tests lance beaucoup de processus en
+  parallèle, ou produit beaucoup de fichiers temporaires, peut légitimement
+  avoir besoin de plus que les défauts (512 processus, 4096:8192
+  descripteurs, 1 Go de `/tmp`).
+
+- **`HEALTH_ENABLED`** / **`HEALTH_PORT`** / **`HEALTH_HOST`** (§6.5) —
+  serveur HTTP minimal d'observabilité (`/healthz`, `/metrics`, voir
+  `src/daemon/health.ts`). Activé par défaut sur `127.0.0.1:8090` ;
+  `HEALTH_ENABLED=0` le désactive complètement (aucun port n'est alors
+  ouvert). Voir la section [Observabilité](#observabilité) ci-dessous.
+- **`LOG_LEVEL`** / **`LOG_PRETTY`** (§6.4) — ne passent pas par
+  `buildConfig()` (lus directement par `src/log.ts`, à chaque appel, pour
+  qu'un test puisse les faire varier sans réimporter le module) : niveau
+  minimal des lignes émises (`debug`/`info`/`warn`/`error`, défaut `info`) et
+  bascule vers une sortie condensée lisible en développement
+  (`LOG_PRETTY=1`) au lieu du JSON par ligne par défaut.
 
 Le fichier réel `.env` de ce dépôt (non versionné, voir `.gitignore`) ne
 renseigne aujourd'hui qu'une poignée de ces variables — tout le reste
 tourne sur les valeurs par défaut de `src/config.ts`. `.env.example` liste
-les trente-sept variables lues par `buildConfig()`.
+les quarante-trois variables lues par `buildConfig()`, plus `LOG_LEVEL`/
+`LOG_PRETTY` lues indépendamment par `src/log.ts`.
 
 ## Lancement
 
@@ -284,6 +306,72 @@ Ce qu'il faut avoir en place :
 Aucun modèle n'est fourni ni téléchargé par ce projet : c'est à
 l'opérateur de charger un modèle dans LM Studio (ou tout serveur compatible
 OpenAI) avant de lancer le daemon.
+
+## Journalisation
+
+§6.4 : `src/log.ts` remplace les `console.log`/`warn`/`error` des modules
+principaux (`src/daemon/`, `src/tasks/`, `src/agent/`) par un logger
+structuré — une ligne JSON par événement (`ts`, `level`, `msg`), par défaut.
+`LOG_LEVEL` filtre les niveaux émis (`debug`/`info`/`warn`/`error`, défaut
+`info`) ; `LOG_PRETTY=1` bascule vers une ligne condensée pensée pour un
+terminal humain (`12:03:45.123 INFO [note:42 grp/repo!7] message`) — ce
+projet se debugue aussi en regardant défiler le terminal en développement,
+mais le JSON reste le format par défaut, celui qu'un outil de collecte doit
+pouvoir lire sans effort.
+
+**Corrélation** : `node:async_hooks` (`AsyncLocalStorage`) propage
+`key`/`projectPath`/`iid` à travers toute la chaîne d'appels asynchrones
+d'une demande, sans qu'aucune fonction intermédiaire n'ait à les recevoir en
+paramètre. Deux fenêtres de corrélation distinctes couvrent le cycle de vie
+complet d'une demande (voir `src/daemon/index.ts`) :
+
+- `handle()` — de la réception du to-do jusqu'à la mise en file (accusé de
+  réception compris) ;
+- `trackedWorker()` — l'exécution réelle du worker (`runTask()` et tout ce
+  qu'elle appelle : `buildContext`, `runReview`/`runImplement`,
+  `publishReview`...), potentiellement démarrée plusieurs minutes plus tard,
+  une fois la demande dépilée de la file.
+
+Une ligne journalisée en dehors de ces deux fenêtres (démarrage,
+fin de cycle de polling, erreurs génériques de la file) ne porte aucun de ces
+trois champs — jamais de valeur inventée.
+
+**Flux bruts, pas des logs** : `runAgent()` (`src/agent/runner.ts`) et
+`runInSandbox()` (`src/agent/sandbox.ts`) recopient en direct, sur
+`process.stdout`, la sortie de l'agent ou du conteneur — une sortie de
+build, un JSON de review, la trace d'un test qui échoue. Ce flux n'est
+délibérément **pas** transformé en JSON ligne à ligne : il n'a pas de
+structure d'événement (une seule commande peut produire des dizaines de
+lignes hétérogènes), et le réencapsuler ligne par ligne n'ajouterait aucune
+information exploitable, seulement du bruit et un risque de couper une sortie
+binaire ou multi-lignes de façon incohérente. Il reste donc affiché tel quel,
+sans préfixe ni JSON — à distinguer visuellement, en pratique, des lignes de
+log structuré qui l'entourent.
+
+## Observabilité
+
+§6.5 : un serveur HTTP minimal (`node:http`, zéro dépendance), démarré par
+`main()` et arrêté avec le reste du daemon (branché sur la séquence de drain
+de `src/daemon/shutdown.ts`), expose deux routes :
+
+- **`GET /healthz`** — `200` en fonctionnement nominal, `503` si dégradé
+  (deux motifs possibles, combinables : le dernier cycle de polling réussi
+  remonte à plus de 3×`POLL_INTERVAL_MS`, ou la tâche en cours dépasse la
+  durée légitime maximale d'une tâche — `AGENT_TIMEOUT_MINUTES` + 3×
+  `COMMAND_TIMEOUT_MINUTES`, ce qui répond à « bloqué sur un agent depuis
+  40 minutes ? » avec les valeurs par défaut du projet). La réponse inclut la
+  profondeur de la file, la tâche en cours et depuis combien de temps
+  (`key`/`projectPath`/`iid`, jamais le texte de la demande), et les
+  compteurs ci-dessous.
+- **`GET /metrics`** — exposition texte façon Prometheus (écrite à la main,
+  `# HELP`/`# TYPE` par métrique) : profondeur de la file, durée de la tâche
+  en cours, et compteurs cumulés depuis le démarrage — demandes traitées,
+  refusées (`authorize()`), abandonnées (épuisement de `MAX_ATTEMPTS`).
+
+`HEALTH_ENABLED=0` désactive complètement le serveur (aucun port ouvert) ;
+`HEALTH_PORT`/`HEALTH_HOST` en configurent l'écoute (`127.0.0.1:8090` par
+défaut — loopback, pas d'exposition involontaire sur le réseau). Aucune des
+deux routes n'expose de token, de contenu de dépôt, ni de texte de demande.
 
 ## Garde-fous de sécurité
 

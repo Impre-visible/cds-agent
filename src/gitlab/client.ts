@@ -1,4 +1,5 @@
 import { config } from "../config.ts";
+import { GITLAB_ERROR_BODY_CHARS, MAX_LIST_PAGES } from "../limits.ts";
 import type {
   GitLabUser,
   Note,
@@ -20,7 +21,7 @@ export class GitLabError extends Error {
   readonly payload: string;
 
   constructor(status: number, url: string, payload: string) {
-    super(`GitLab ${status} sur ${url} — ${payload.slice(0, 400)}`);
+    super(`GitLab ${status} sur ${url} — ${payload.slice(0, GITLAB_ERROR_BODY_CHARS)}`);
     this.name = "GitLabError";
     this.status = status;
     this.url = url;
@@ -242,10 +243,10 @@ async function paginate<T>(path: string, maxPages: number): Promise<T[]> {
   return items;
 }
 
-// Jusqu'à 2000 éléments (100 par page × 20 pages) : largement au-delà de ce
-// qu'un usage normal produit, tout en bornant le pire cas.
-const MAX_TODO_PAGES = 20;
-const MAX_DIFF_PAGES = 20;
+// MAX_LIST_PAGES vient de src/limits.ts (§5.8) : jusqu'à 2000 éléments (100
+// par page × 20 pages), largement au-delà de ce qu'un usage normal produit,
+// tout en bornant le pire cas — partagée avec tasks/context.ts et
+// tasks/publish.ts (voir là-bas).
 
 export function resourceKind(targetType: string): ResourceKind | null {
   if (targetType === "Issue") return "issues";
@@ -257,10 +258,10 @@ export const gitlab = {
   currentUser: () => api<GitLabUser>("/user"),
 
   pendingTodos: () =>
-    paginate<Todo>("/todos?state=pending&per_page=100", MAX_TODO_PAGES),
+    paginate<Todo>("/todos?state=pending&per_page=100", MAX_LIST_PAGES),
 
   doneTodos: () =>
-    paginate<Todo>("/todos?state=done&per_page=100", MAX_TODO_PAGES),
+    paginate<Todo>("/todos?state=done&per_page=100", MAX_LIST_PAGES),
 
   /** GitLab répond 304 si le to-do est déjà done — ce n'est pas une erreur. */
   async markTodoDone(todoId: number): Promise<"done" | "already-done"> {
@@ -374,7 +375,7 @@ export const gitlab = {
   mergeRequestDiffs: (projectId: number, iid: number) =>
     paginate<DiffFile>(
       `/projects/${projectId}/merge_requests/${iid}/diffs?per_page=100`,
-      MAX_DIFF_PAGES,
+      MAX_LIST_PAGES,
     ),
 
   closesIssues: (projectId: number, iid: number) =>

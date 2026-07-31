@@ -281,6 +281,35 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     dockerMemory: matchingFormat(env, "DOCKER_MEMORY", "4g", /^\d+(\.\d+)?[bkmg]?$/i),
     // Format docker --cpus : un nombre entier ou décimal.
     dockerCpus: matchingFormat(env, "DOCKER_CPUS", "4", /^\d+(\.\d+)?$/),
+    /**
+     * §5.8 : passé tel quel à `docker run --pids-limit` (agent/sandbox.ts).
+     * Même famille de réglage que DOCKER_MEMORY/DOCKER_CPUS ci-dessus (une
+     * ressource dont la bonne valeur dépend de l'hôte et du dépôt cible, pas
+     * un choix de conception figé) : un install ou une suite de tests qui
+     * lance beaucoup de processus en parallèle (workers de test, watchers...)
+     * peut légitimement avoir besoin de plus que le défaut. Bornes larges
+     * (au minimum de quoi laisser tourner un test runner ordinaire, au
+     * maximum de quoi rester une vraie limite et pas un no-op).
+     */
+    dockerPidsLimit: finiteNumber(env, "DOCKER_PIDS_LIMIT", 512, {
+      min: 16,
+      max: 16_384,
+    }),
+    // Format docker --ulimit nofile=soft:hard.
+    dockerUlimitNofile: matchingFormat(
+      env,
+      "DOCKER_ULIMIT_NOFILE",
+      "4096:8192",
+      /^\d+:\d+$/,
+    ),
+    // Même format que DOCKER_MEMORY (taille du tmpfs monté sur /tmp, voir
+    // agent/sandbox.ts) : nombre suivi d'une unité optionnelle (b/k/m/g).
+    dockerTmpfsSize: matchingFormat(
+      env,
+      "DOCKER_TMPFS_SIZE",
+      "1g",
+      /^\d+(\.\d+)?[bkmg]?$/i,
+    ),
     agentImage: env.AGENT_IMAGE ?? "cds-agent/agent-node22",
     /**
      * Serveur d'inférence réel, vu depuis l'HÔTE (§1.7) — pas depuis un
@@ -351,6 +380,24 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
       .split(",")
       .map((entry) => entry.trim())
       .filter(Boolean),
+    /**
+     * §6.5 : serveur HTTP minimal d'observabilité (/healthz, /metrics, voir
+     * daemon/health.ts). "0" le désactive complètement — aucun port n'est
+     * alors jamais ouvert. Activé par défaut : sans lui, rien ne permet de
+     * répondre de l'extérieur à "le daemon est-il vivant ?".
+     */
+    healthEnabled: env.HEALTH_ENABLED !== "0",
+    // 0 = l'OS choisit un port libre (même convention qu'INFERENCE_PROXY_PORT
+    // ci-dessus), pratique pour les tests qui démarrent plusieurs instances
+    // du serveur sans se soucier d'une collision de port.
+    healthPort: finiteNumber(env, "HEALTH_PORT", 8090, {
+      min: 0,
+      max: 65_535,
+    }),
+    // Loopback par défaut : pas d'exposition involontaire sur toutes les
+    // interfaces réseau d'une machine partagée juste pour un endpoint de
+    // supervision.
+    healthHost: env.HEALTH_HOST ?? "127.0.0.1",
   } as const;
 }
 

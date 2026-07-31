@@ -4,6 +4,7 @@ import { config } from "../config.ts";
 import type { AgentResult } from "./runner.ts";
 import { createBoundedOutput } from "./bounded-output.ts";
 import { startInferenceProxy } from "../tools/proxy.ts";
+import { log } from "../log.ts";
 
 export interface SandboxResult {
   ok: boolean;
@@ -114,7 +115,7 @@ export function buildDockerRunArgs(
     "--cpus",
     config.dockerCpus,
     "--pids-limit",
-    "512",
+    String(config.dockerPidsLimit),
     "--cap-drop",
     "ALL",
     "--security-opt",
@@ -145,12 +146,12 @@ export function buildDockerRunArgs(
     // la taille n'est elle-même pas plafonnable par un flag docker run —
     // limite connue, voir le rapport de la tâche.
     "--tmpfs",
-    "/tmp:rw,exec,size=1g,mode=1777",
+    `/tmp:rw,exec,size=${config.dockerTmpfsSize},mode=1777`,
     // Plancher confortable pour npm/git/opencode (beaucoup de descripteurs
     // ouverts en parallèle lors d'un install ou d'une suite de tests), tout
     // en bornant un process qui en ouvrirait sans limite.
     "--ulimit",
-    "nofile=4096:8192",
+    `nofile=${config.dockerUlimitNofile}`,
     "-v",
     `${repo}:/repo`,
     "-w",
@@ -197,8 +198,8 @@ export function runInSandbox(
     activeContainer = containerName;
     const args = buildDockerRunArgs(repo, image, command, containerName, options);
 
-    console.log(
-      `    [docker ${options.network ? "réseau" : "isolé"} ${containerName}] ${command.slice(0, 80)}`,
+    log.info(
+      `[docker ${options.network ? "réseau" : "isolé"} ${containerName}] ${command.slice(0, 80)}`,
     );
     const child = spawn(dockerBin, args, { stdio: ["ignore", "pipe", "pipe"] });
 

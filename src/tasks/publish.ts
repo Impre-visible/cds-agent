@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { config } from "../config.ts";
 import { gitlab, GitLabError } from "../gitlab/client.ts";
 import { defuseMentions } from "../daemon/request.ts";
+import { MAX_LIST_PAGES } from "../limits.ts";
+import { log } from "../log.ts";
 import type { ValidatedRemark } from "./diff.ts";
 import type { DiffRefs, MergeRequestContext } from "../types.ts";
 
@@ -39,9 +41,9 @@ function fingerprintTag(remark: ValidatedRemark): string {
   return `<!-- cds-agent:fp:${fingerprint(remark)} -->`;
 }
 
-// Comme MAX_TODO_PAGES/MAX_DIFF_PAGES dans gitlab/client.ts : borne le pire
-// cas (2000 notes) plutôt que de paginer indéfiniment.
-const MAX_NOTES_PAGES = 20;
+// MAX_LIST_PAGES vient de src/limits.ts (§5.8), partagée avec
+// gitlab/client.ts et tasks/context.ts : borne le pire cas (2000 notes)
+// plutôt que de paginer indéfiniment.
 
 /**
  * §5.5 : rien côté GitLab n'empêche de publier deux fois la même review (un
@@ -69,7 +71,7 @@ async function alreadyPublished(
   const fingerprints = new Set<string>();
   let page: number | null = 1;
 
-  for (let visited = 0; page !== null && visited < MAX_NOTES_PAGES; visited++) {
+  for (let visited = 0; page !== null && visited < MAX_LIST_PAGES; visited++) {
     const result = await gitlab.notesPage(
       projectId,
       "merge_requests",
@@ -192,8 +194,8 @@ export async function publishReview(
 
   for (const remark of remarks) {
     if (published.has(fingerprint(remark))) {
-      console.log(
-        `    remarque déjà publiée sur cette MR (idempotence §5.5), ignorée : ${remark.file.new_path}`,
+      log.info(
+        `remarque déjà publiée sur cette MR (idempotence §5.5), ignorée : ${remark.file.new_path}`,
       );
       continue;
     }
@@ -222,8 +224,8 @@ export async function publishReview(
       } catch (error) {
         const detail =
           error instanceof GitLabError ? `${error.status}` : String(error);
-        console.log(
-          `    ligne ${remark.position.newLine} refusée (${detail}), repli fichier`,
+        log.info(
+          `ligne ${remark.position.newLine} refusée (${detail}), repli fichier`,
         );
       }
     }
@@ -239,8 +241,8 @@ export async function publishReview(
     } catch (error) {
       const detail =
         error instanceof GitLabError ? `${error.status}` : String(error);
-      console.log(
-        `    fichier ${remark.file.new_path} refusé (${detail}), repli général`,
+      log.info(
+        `fichier ${remark.file.new_path} refusé (${detail}), repli général`,
       );
     }
 

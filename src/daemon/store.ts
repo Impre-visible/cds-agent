@@ -7,6 +7,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import { log } from "../log.ts";
+import { COMPACT_THRESHOLD_LINES } from "../limits.ts";
 
 /**
  * Cycle de vie d'une demande, du dépôt du to-do jusqu'à son sort final :
@@ -58,19 +60,10 @@ interface Entry {
   reason?: string;
 }
 
-/**
- * §6.6 : au-delà de ce nombre de lignes brutes relues au démarrage, on
- * compacte (voir compact() ci-dessous) plutôt que de laisser le fichier
- * grossir indéfiniment. Un cycle de vie complet (claimed → acked → running →
- * done|failed) écrit jusqu'à quatre lignes pour une seule demande alors
- * qu'une seule information utile subsiste au final (son dernier statut) :
- * à quelques centaines de demandes par jour, ce seuil est franchi en
- * quelques jours d'exploitation, ce qui borne à la fois le temps de
- * relecture au démarrage et l'empreinte mémoire — sans pour autant compacter
- * à chaque redémarrage un fichier encore petit (le cas courant, en
- * développement ou juste après un démarrage à blanc).
- */
-const COMPACT_THRESHOLD_LINES = 500;
+// COMPACT_THRESHOLD_LINES vient de src/limits.ts (§5.8) : au-delà de ce
+// nombre de lignes brutes relues au démarrage, on compacte (voir compact()
+// ci-dessous) plutôt que de laisser le fichier grossir indéfiniment — voir
+// là-bas pour le raisonnement complet.
 
 /**
  * Décide si une demande peut être (re)traitée, à partir de son statut connu.
@@ -125,7 +118,7 @@ export class RequestStore {
         // pour une écriture en direct.
         this.apply(entry);
       } catch {
-        console.warn(`[store] ligne illisible ignorée : ${line.slice(0, 80)}`);
+        log.warn(`[store] ligne illisible ignorée : ${line.slice(0, 80)}`);
       }
     }
 
@@ -144,7 +137,7 @@ export class RequestStore {
         // exemple disque plein, ou système de fichiers en lecture seule) ne
         // doit pas empêcher le daemon de démarrer avec le fichier tel qu'il
         // est — seulement le laisser un peu plus longtemps qu'espéré.
-        console.warn(
+        log.warn(
           `[store] compactage échoué, fichier laissé tel quel : ${(error as Error).message}`,
         );
       }

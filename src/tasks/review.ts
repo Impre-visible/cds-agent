@@ -6,6 +6,13 @@ import { createWorkspace } from "../agent/workspace.ts";
 import type { DiffFile, MergeRequestContext } from "../types.ts";
 import { validateRemarks, numberDiffLines, type ValidatedRemark } from "./diff.ts";
 import { runAgentInSandbox } from "../agent/sandbox.ts";
+import {
+  MAX_ISSUE_DESCRIPTION_CHARS,
+  MAX_ISSUE_COMMENTS_CHARS,
+  MAX_TOTAL_DIFF_CHARS,
+  MAX_FILE_DIFF_CHARS,
+} from "../limits.ts";
+import { log } from "../log.ts";
 
 export interface Remark {
   file: string;
@@ -89,9 +96,6 @@ function visibleTruncate(text: string, maxChars: number): string {
   return `${text.slice(0, maxChars)}\n[... tronqué, ${omitted} caractère(s) non montré(s) ...]`;
 }
 
-const MAX_ISSUE_DESCRIPTION_CHARS = 1500;
-const MAX_ISSUE_COMMENTS_CHARS = 3000;
-
 function buildLinkedIssueBlock(context: MergeRequestContext): string {
   const issue = context.linkedIssue;
   if (!issue) return "";
@@ -113,21 +117,10 @@ function buildLinkedIssueBlock(context: MergeRequestContext): string {
   );
 }
 
-// §5.7 : plafond explicite sur la taille du diff inclus dans le prompt. Sans
-// lui, une MR de refactoring produit un prompt de plusieurs mégaoctets pour
-// un modèle 7B dont la fenêtre de contexte tient sur quelques milliers de
-// tokens — au mieux un échec net, au pire une réponse fondée sur la seule
-// partie que le serveur d'inférence a retenue, sans que rien ne le signale.
-// ~4 caractères/token est une heuristique usuelle, pas une mesure prise
-// contre ce modèle précis (impossible à vérifier ici, voir le rapport de ce
-// chantier) : le plafond vise à rester confortablement en dessous de la
-// fenêtre plutôt qu'à la coller au plus juste.
-const MAX_TOTAL_DIFF_CHARS = 20_000;
-// Empêche un seul fichier volumineux (fichier généré, lockfile...) de
-// consommer à lui seul tout le budget ci-dessus et de faire disparaître les
-// autres fichiers du prompt sans même apparaître dans la liste des fichiers
-// tronqués.
-const MAX_FILE_DIFF_CHARS = 4_000;
+// §5.7 : plafonds explicites sur la taille du diff inclus dans le prompt,
+// centralisés dans src/limits.ts (§5.8) avec le reste du budget de contexte
+// envoyé au modèle — voir MAX_TOTAL_DIFF_CHARS et MAX_FILE_DIFF_CHARS
+// là-bas pour le raisonnement complet.
 
 interface DiffSection {
   text: string;
@@ -383,8 +376,8 @@ export async function runReview(
 
     const built = buildPrompt(context);
     if (built.truncatedFiles.length > 0 || built.omittedFiles.length > 0) {
-      console.log(
-        `    diff tronqué pour tenir sous le plafond du prompt (§5.7) — ` +
+      log.info(
+        `diff tronqué pour tenir sous le plafond du prompt (§5.7) — ` +
           `coupés : ${built.truncatedFiles.join(", ") || "aucun"} ; ` +
           `non montrés : ${built.omittedFiles.join(", ") || "aucun"}`,
       );
@@ -425,7 +418,7 @@ export async function runReview(
         `aucun JSON exploitable, ni fichier ni stdout (code ${result.code})`,
       );
     }
-    console.log(`    JSON récupéré via ${channel}`);
+    log.info(`JSON récupéré via ${channel}`);
 
     const parsed = JSON.parse(raw) as { remarks?: unknown };
     if (!Array.isArray(parsed.remarks))
@@ -445,7 +438,7 @@ export async function runReview(
 
     const { valid, rejected } = validateRemarks(shaped, context.files);
     for (const reason of [...shapeRejected, ...rejected])
-      console.log(`    remarque rejetée : ${reason}`);
+      log.info(`remarque rejetée : ${reason}`);
 
     // §5.3 : instrumentation — sans mesure, personne ne saura si le diff
     // numéroté a réellement réduit le nombre de remarques qui retombent en
@@ -457,8 +450,8 @@ export async function runReview(
     // réel, à comparer avant/après ce correctif.
     const positionless = valid.filter((r) => r.position === null).length;
     if (positionless > 0) {
-      console.log(
-        `    ${positionless}/${valid.length} remarque(s) sans position exploitable ` +
+      log.info(
+        `${positionless}/${valid.length} remarque(s) sans position exploitable ` +
           `dans le diff numéroté → repli commentaire de fichier (§5.3)`,
       );
     }
