@@ -20,6 +20,98 @@ export interface ImplementResult {
   durationMs: number;
 }
 
+export interface HeadIntegrityViolation {
+  ok: false;
+  detail: string;
+  files: string[];
+}
+
+export interface HeadIntegrityOk {
+  ok: true;
+}
+
+/**
+ * Contrôle ce qui va réellement partir au push (HEAD), pas l'état du
+ * répertoire de travail. `git status --porcelain` (utilisé juste après)
+ * ne voit que l'écart working tree ↔ HEAD : si l'agent commite lui-même
+ * ses modifications (`git commit -am ...`), le porcelain redevient propre
+ * alors que HEAD contient déjà ses changements — le `push origin
+ * HEAD:branch` plus bas enverrait ce HEAD sans jamais passer par le filtre
+ * offending.
+ *
+ * On fetche la branche depuis le vrai serveur GitLab — authenticated, c'est
+ * une opération réseau — plutôt que de faire confiance au `origin/<branch>`
+ * déjà présent depuis le clone : l'agent a un accès complet à .git/ dans le
+ * conteneur, un simple `git update-ref refs/remotes/origin/<branch> HEAD`
+ * suffirait à maquiller cette référence locale pour qu'elle « valide »
+ * n'importe quel HEAD truqué. Un fetch qui retourne réellement au serveur
+ * authentifié ne peut pas être falsifié depuis l'intérieur du conteneur
+ * (qui ne détient pas le token GitLab : sanitizedEnv() l'exclut de
+ * l'environnement de l'agent).
+ *
+ * Règle appliquée, volontairement stricte : au moment du contrôle, HEAD
+ * doit être EXACTEMENT origin/<branch> fraîchement fetché — l'agent n'est
+ * pas censé commiter du tout, le seul commit légitime est celui que *nous*
+ * créons juste avant de pousser. Toute autre valeur — un commit ajouté par
+ * l'agent (même un commit de test légitime dans son contenu), un `reset
+ * --soft`, un `checkout`/`reset --hard` vers un autre commit, une
+ * réécriture d'historique (amend, rebase) — déplace le SHA de HEAD et est
+ * donc rejetée sans distinction de contenu. On aurait pu se contenter
+ * d'élargir le filtre isTestPath au diff origin/<branch>...HEAD (accepter
+ * les commits de l'agent tant qu'ils ne touchent que des tests) ; on ne le
+ * fait pas : le daemon reste le seul committeur, ce qui garde un historique
+ * auditable (auteur, message) et évite d'avoir à faire confiance à un
+ * commit fabriqué par l'agent, aussi anodin soit son contenu.
+ */
+export function checkHeadIntegrity(
+  repo: string,
+  branch: string,
+): HeadIntegrityOk | HeadIntegrityViolation {
+  git(repo, ["fetch", "origin", branch], true);
+  const remoteHead = git(repo, ["rev-parse", `origin/${branch}`]).trim();
+  const localHead = git(repo, ["rev-parse", "HEAD"]).trim();
+
+  if (localHead === remoteHead) return { ok: true };
+
+  // Purement informatif pour le message d'erreur : lecture seule, ne change
+  // rien à l'état du dépôt ni à la décision (déjà actée ci-dessus).
+  const shipped = git(repo, ["diff", "--name-only", `${remoteHead}...HEAD`])
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  // Deux causes très différentes derrière un même écart, et il faut les
+  // distinguer : si HEAD est un ancêtre de la référence fetchée, personne
+  // n'a rien manipulé — quelqu'un a simplement poussé sur la branche
+  // pendant que l'agent travaillait (la fenêtre dure plusieurs minutes).
+  // Le rejet reste la bonne décision, notre push serait refusé de toute
+  // façon, mais accuser l'utilisateur d'avoir réécrit l'historique
+  // l'enverrait chercher un incident de sécurité qui n'existe pas.
+  const mergeBase = git(repo, ["merge-base", "HEAD", remoteHead]).trim();
+  if (mergeBase === localHead) {
+    return {
+      ok: false,
+      detail:
+        `la branche ${branch} a été mise à jour pendant le traitement ` +
+        `(HEAD ${localHead.slice(0, 8)} → origin ${remoteHead.slice(0, 8)}) : ` +
+        `rien n'est poussé, relancez la demande pour repartir de l'état à jour`,
+      files: [],
+    };
+  }
+
+  return {
+    ok: false,
+    detail:
+      `HEAD (${localHead.slice(0, 8)}) ne correspond plus à origin/${branch} ` +
+      `(${remoteHead.slice(0, 8)}) : l'historique a été modifié pendant ` +
+      `l'exécution de l'agent (commit, reset ou déplacement de HEAD), rien n'est poussé` +
+      (shipped.length
+        ? ` — fichiers concernés par le(s) commit(s) en cause : ${shipped.join(", ")}`
+        : ""),
+    files: shipped,
+  };
+}
+
 function buildPrompt(context: TaskContext): string {
   const linked = context.linkedIssue
     ? `## Ticket #${context.linkedIssue.iid} : ${context.linkedIssue.title}\n${context.linkedIssue.description.slice(0, 1500)}`
@@ -127,6 +219,16 @@ export async function runImplement(
         detail:
           "altération de .git/config ou des hooks détectée après l'exécution de l'agent : par sécurité, aucune commande git supplémentaire n'a été lancée et rien n'a été poussé",
         files: [],
+        durationMs: Date.now() - started,
+      };
+    }
+
+    const headIntegrity = checkHeadIntegrity(repo, branch);
+    if (!headIntegrity.ok) {
+      return {
+        status: "rejected",
+        detail: headIntegrity.detail,
+        files: headIntegrity.files,
         durationMs: Date.now() - started,
       };
     }
