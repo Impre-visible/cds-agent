@@ -23,6 +23,17 @@ distinctes, prises ensemble ici parce qu'elles se répondent :
    `openai-compatible` d'opencode (`OPENCODE_CONFIG_CONTENT`, généré à la
    volée dans `runAgentInSandbox()`).
 
+Le modèle réellement configuré dans ce projet (`AGENT_MODEL` par défaut,
+`.env.example`) est `qwen2.5-coder-7b-instruct-mlx` — un modèle 7B. **Ce choix
+de taille est une contrainte de la machine de développement (un Mac), pas un
+choix d'architecture** : rien dans `config.ts`, `sandbox.ts` ou opencode
+lui-même ne suppose un modèle de cette taille précisément — `AGENT_MODEL`
+n'est qu'une chaîne `fournisseur/modèle` validée sur sa forme
+(`validateAgentModel`), jamais sur la taille du modèle qu'elle désigne. Un
+modèle 70B, servi par le même LM Studio (ou tout autre serveur
+`openai-compatible`) sur une machine dimensionnée pour, fonctionnerait avec
+exactement le même code.
+
 ## Décision
 
 Utiliser opencode tel quel comme runtime d'agent (pas un appel direct à une
@@ -63,6 +74,22 @@ d'inférence local plutôt qu'une API hébergée.
   7B ne les respecte que parce qu'ils sont nommés dans le prompt, pas par
   une propriété du système — le code le dit lui-même (voir les commentaires
   de `review.ts`).
+
+**Nuance sur la taille du modèle** : la tolérance de parsing décrite
+ci-dessus (double canal de sortie, extraction, validation champ par champ,
+replis en cascade côté publication) répond à un problème réel — rien ne
+garantit qu'*aucun* modèle, quelle que soit sa taille, respecte
+scrupuleusement un format de sortie demandé par un prompt — mais le système
+n'a pas été *conçu autour* d'un petit modèle : `AGENT_MODEL` est un simple
+identifiant, sans logique conditionnée à la taille du modèle qu'il désigne.
+Le 7B actuellement configuré est une contrainte de poste de développement
+(voir Contexte ci-dessus), pas une hypothèse de conception. Un modèle plus
+grand (70B, par exemple) réduirait mécaniquement la fréquence des cas que
+cette tolérance absorbe — un modèle plus capable respecte plus souvent le
+format demandé — sans la rendre inutile pour autant : la validation et les
+replis restent la seule protection réelle contre une réponse malformée,
+quelle que soit la taille du modèle en face. Rien dans ce constat ne
+justifie de retirer ces protections.
 
 ### Ce que ça achète
 

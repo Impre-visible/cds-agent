@@ -292,6 +292,13 @@ autre chose que ce qui est vérifié) est anticipée dans la forme du modèle
 (`RepoCapabilities` dans `src/tasks/guard.ts`) mais n'a pas de jeton dans
 `AGENT_CAPABILITIES` aujourd'hui — une tentative de l'utiliser échoue donc
 bruyamment ("capacité inconnue") plutôt que d'être silencieusement ignorée.
+Écartée pour l'instant : les vecteurs identifiés sont déjà couverts par les
+contrôles inconditionnels ci-dessus (hooks git, empreinte de `.git`,
+`checkHeadIntegrity`), et un second clone ajouterait une classe de cas
+tordus (patchs qui ne s'appliquent pas, binaires, renommages) pour un gain
+marginal — voir
+`docs/adr/0006-frontiere-confiance-patch-vs-clone.md`. Voir aussi
+`docs/adr/0005-capacites-agent-par-depot.md` pour le modèle lui-même.
 
 ## Lancement
 
@@ -475,7 +482,8 @@ commentaires du code cité :
   test existant est distinguée et rejetée explicitement (voir
   `docs/adr/0002-garde-fou-chemin-tests.md`). `AGENT_CAPABILITIES` permet
   d'élargir ce périmètre dépôt par dépôt (voir
-  [Capacités de l'agent](#capacités-de-lagent)) — un seul point du code
+  [Capacités de l'agent](#capacités-de-lagent) et
+  `docs/adr/0005-capacites-agent-par-depot.md`) — un seul point du code
   répond à « l'agent avait-il le droit de faire ça ? », et les contrôles
   ci-dessus (HEAD, hooks git, branche protégée) restent inconditionnels
   quelle que soit la capacité accordée.
@@ -497,7 +505,11 @@ Honnêtement, dans l'ordre où elles comptent le plus :
   vrai modèle (qualité des remarques, taux réel de réponses mal formées,
   respect effectif des délimiteurs anti-injection par un modèle 7B) n'a pas
   pu être vérifié en conditions réelles. Le code le dit lui-même à plusieurs
-  endroits (`src/tasks/review.ts`, `src/tools/proxy.ts`).
+  endroits (`src/tasks/review.ts`, `src/tools/proxy.ts`). Le 7B configuré par
+  défaut (`AGENT_MODEL`) est une contrainte du poste de développement
+  (un Mac), pas un choix d'architecture : rien n'empêche de cibler un modèle
+  plus grand (70B par exemple) sur une machine dimensionnée pour — voir
+  `docs/adr/0003-opencode-inference-locale.md`.
 - **File de tâches en mémoire, perte assumée au redémarrage** : une demande
   accusée (`acked`) mais pas encore démarrée est purement et simplement
   perdue si le daemon s'arrête ou crashe avant — le to-do GitLab correspondant
@@ -541,8 +553,17 @@ Honnêtement, dans l'ordre où elles comptent le plus :
   depuis zéro plutôt que simplement perdue — garantie plus faible que ce que
   suggère le commentaire historique du code.
 - **Un seul daemon par verrou/PAT, un seul worker à la fois** : pas de
-  répartition de charge, un dépôt qui monopolise le worker retarde tous les
-  autres.
+  répartition de charge. Conséquence assumée, pas un effet de bord marginal :
+  une implémentation de tests qui prend dix minutes (le budget par défaut)
+  bloque toutes les revues et toutes les implémentations de *tous* les
+  dépôts surveillés pendant ce temps, sans priorité possible. Voir
+  `docs/adr/0007-worker-unique-et-absence-de-quotas.md`.
+- **Aucun quota, aucun comptage de coût** : rien ne limite le nombre de
+  demandes qu'un utilisateur autorisé peut enfiler dans la file (un même
+  utilisateur peut, seul, en poser cinquante et monopoliser le worker
+  unique aussi longtemps qu'il faut pour les traiter), et rien ne mesure le
+  temps de calcul ou les tokens d'inférence consommés. Décision assumée, pas
+  un oubli — voir `docs/adr/0007-worker-unique-et-absence-de-quotas.md`.
 - **`ALLOW_UNSANDBOXED=1`** exécute du code potentiellement écrit par le
   LLM directement sur l'hôte, avec le profil de connexion complet de
   l'utilisateur — à ne jamais utiliser hors développement local.
@@ -569,6 +590,7 @@ deux sont câblés dans `.gitlab-ci.yml`.
   ne tourne pas) ailleurs qu'un terminal ouvert.
 - [`docs/adr/`](./docs/adr/) — décisions d'architecture : polling vs
   webhook, garde-fou par chemin, opencode + inférence locale, contrat de
-  fiabilité de la file en mémoire.
+  fiabilité de la file en mémoire, modèle de capacités par dépôt, frontière
+  de confiance (patch vs clone), worker unique et absence de quotas.
 - [`.env.example`](./.env.example) — les quarante-six variables lues par
   `buildConfig()`, une par une.
