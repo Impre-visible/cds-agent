@@ -83,16 +83,30 @@ Déroulé, dans l'ordre :
    (étape 11) plutôt que suivie d'un second commentaire.
 7. **Contexte** — le worker récupère la MR, son diff, et le ticket qu'elle
    ferme (derniers commentaires humains inclus).
-8. **Intention** — une commande explicite placée juste après la mention
-   (`@bot review` ou `@bot implement-tests`) l'emporte toujours. À défaut,
-   un repli par mots-clés reconnaît « review/revue/relis » ou
-   « tests… implémente/écris/ajoute/crée ». Le repli teste `review` en
-   premier : en cas d'ambiguïté, mieux vaut se tromper du côté qui n'écrit
-   rien dans le dépôt. L'intention détectée est ensuite comparée à la
-   capacité correspondante pour ce type de cible (`mergeRequest.review` /
-   `mergeRequest.writeTests` ou `writeBusinessCode` dans `projects.json`) :
-   si elle n'est pas accordée, la demande est refusée avec un message qui le
-   dit, avant même de cloner le dépôt.
+8. **Intention** — trois chemins, dans cet ordre. Une commande explicite
+   placée juste après la mention (`@bot review` ou `@bot implement-tests`)
+   l'emporte toujours et ne coûte aucun appel au modèle. À défaut, un repli
+   par mots-clés reconnaît « review/revue/relis » ou
+   « tests… implémente/écris/ajoute/crée » ; il teste `review` en premier,
+   car en cas d'ambiguïté mieux vaut se tromper du côté qui n'écrit rien
+   dans le dépôt. Si l'intention reste indéterminée — « @bot fais une MR »,
+   par exemple — un **planificateur** est appelé : un premier passage du
+   modèle qui reçoit une charte décrivant ce que ce dépôt autorise, lit la
+   demande et le contexte, et rend un plan structuré (intention, prompt
+   destiné à l'agent exécutant, capacités réclamées). S'il échoue, dépasse
+   son budget (`PLANNER_TIMEOUT_MINUTES`) ou rend un plan hors schéma, la
+   demande est refusée avec le message d'aide — jamais un retour au repli
+   par mots-clés, qui rejouerait la fragilité que le planificateur corrige.
+
+   La charte est **générée** à partir de `projects.json`, jamais écrite en
+   parallèle : ce qu'on annonce au modèle ne peut donc pas diverger de ce
+   que le daemon applique. Et le plan **n'accorde rien** — l'intention et
+   chaque capacité réclamée sont vérifiées contre `projects.json`
+   (`mergeRequest.review`, `mergeRequest.writeTests`, `writeBusinessCode`),
+   jamais contre le texte du plan. Un ticket qui prétendrait élargir les
+   droits du bot peut influencer ce que le modèle écrit ; il ne peut pas
+   changer ce contre quoi la vérification est faite. Une capacité non
+   accordée est refusée avec un message qui la nomme, avant tout clone.
 9. **Exécution en sandbox** — clone superficiel du dépôt, prompt construit
    avec délimiteurs explicites autour de tout texte non fiable (demande,
    ticket, diff), agent lancé dans un conteneur Docker durci (réseau limité à

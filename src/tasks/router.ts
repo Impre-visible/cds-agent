@@ -5,9 +5,16 @@ import { publishReview } from "./publish.ts";
 import { runReview } from "./review.ts";
 import { runImplement } from "./implement.ts";
 import { describeCapabilities, isDefaultCapabilities } from "./guard.ts";
-import { repoCapabilitiesFor, type ResolvedCapabilities } from "../projects.ts";
+import { repoCapabilitiesFor, type ResolvedCapabilities, type ResolvedProject } from "../projects.ts";
+import {
+  runPlanner,
+  type Plan,
+  type PlanFailure,
+  type PlanSuccess,
+  type RequestableCapability,
+} from "./planner.ts";
 import { defuseMentions } from "../daemon/request.ts";
-import type { AckHandle, AgentRequest, ResourceKind } from "../types.ts";
+import type { AckHandle, AgentRequest, MergeRequestContext, ResourceKind } from "../types.ts";
 import { TESTS_RED_REPORT_TAIL_CHARS } from "../limits.ts";
 import { log } from "../log.ts";
 
@@ -111,6 +118,176 @@ export function intentRefusalReason(
   return forTarget.writeTests || forTarget.writeBusinessCode
     ? null
     : 'aucune capacité d\'écriture n\'est accordée pour ce dépôt (ni "writeTests" ni "writeBusinessCode" dans projects.json)';
+}
+
+/**
+ * Chantier "planificateur" : le plan peut réclamer explicitement des
+ * capacités (Plan.requestedCapabilities), en plus de l'intention elle-même —
+ * une granularité qu'intentRefusalReason ci-dessus n'offre pas (elle ne sait
+ * dire que "review" ou "writeTests OU writeBusinessCode" suffisent à
+ * l'intention). Vérifie CHAQUE capacité réclamée contre ce que projects.json
+ * accorde réellement pour ce type de cible — jamais contre le texte du plan
+ * lui-même (son "reason", potentiellement influencé par une injection dans
+ * le ticket lié ou la description de la MR, n'entre pour rien dans cette
+ * décision : voir router.test.ts, le test qui compte le plus dans ce
+ * chantier). `null` : toutes les capacités réclamées sont accordées.
+ */
+export function refuseRequestedCapabilities(
+  kind: ResourceKind,
+  requestedCapabilities: readonly RequestableCapability[],
+  capabilities: ResolvedCapabilities,
+): string | null {
+  const forTarget = kind === "merge_requests" ? capabilities.mergeRequest : capabilities.issue;
+  const missing = requestedCapabilities.filter((capability) => !forTarget[capability]);
+  if (missing.length === 0) return null;
+  return `le plan demande ${missing.length > 1 ? "des capacités non accordées" : "une capacité non accordée"} pour ce dépôt : ${missing.join(", ")}`;
+}
+
+/**
+ * Message affiché quand ni une commande explicite, ni le repli par
+ * mots-clés, ni le planificateur (s'il a été appelé) n'ont permis d'identifier
+ * une intention exploitable — inchangé au caractère près par rapport à ce
+ * que runTask() postait directement avant le chantier "planificateur" (voir
+ * resolveIntent ci-dessous), extrait en constante pour être réutilisé aux
+ * deux endroits qui peuvent désormais y mener.
+ */
+const UNKNOWN_INTENT_MESSAGE =
+  "Je n'ai pas compris la demande. Utilisez une commande explicite : " +
+  "« @bot review » pour relire la MR, ou « @bot implement-tests » pour " +
+  "écrire des tests. À défaut, une formulation sans ambiguïté en langage " +
+  "naturel fonctionne aussi (« fais une review de cette MR », « implémente " +
+  "les tests ») — mais la commande explicite est plus fiable et reste " +
+  "prioritaire si les deux sont présentes.";
+
+/**
+ * Fonction injectée pour appeler le planificateur — voir resolveIntent.
+ * Paramétrée (plutôt qu'un appel direct à runPlanner) pour que resolveIntent
+ * reste testable sans agent ni Docker réels (voir router.test.ts) : les
+ * tests substituent une fonction qui renvoie un plan fabriqué, ou un échec,
+ * sans jamais lancer de vrai sous-processus.
+ */
+export type PlannerFn = (
+  context: MergeRequestContext,
+  project: ResolvedProject,
+) => Promise<PlanSuccess | PlanFailure>;
+
+export interface IntentDecision {
+  /** true : l'intention est exécutable (capacités déjà validées ci-dessous, à l'exception du contrôle final identique au chemin déterministe — voir runTask). */
+  execute: boolean;
+  intent: Intent;
+  /**
+   * Texte à utiliser comme `requestText` pour l'agent exécutant : le texte
+   * original de la demande sur le chemin déterministe (commande explicite ou
+   * repli par mots-clés), le `prompt` rédigé par le planificateur sinon.
+   * Toujours défini, y compris quand `execute` vaut false (les appelants qui
+   * ignorent la décision n'ont pas à le vérifier séparément).
+   */
+  requestText: string;
+  /** true si le planificateur a été appelé pour produire cette décision (jamais pour le chemin déterministe). */
+  usedPlanner: boolean;
+  /** Renseigné quand `execute` vaut false ET que ce n'est pas le refus générique "unknown" (voir runTask) : le motif à publier, nommant la capacité manquante. */
+  refusal?: string;
+  /** "reason" du plan, quand le planificateur a produit un plan "unknown" — republié best-effort pour aider le demandeur (voir runTask). */
+  plannerReason?: string;
+}
+
+/**
+ * Chantier "planificateur" : remplace l'appel direct à detectIntent() dans
+ * runTask(). Le chemin déterministe (commande explicite « @bot review »/
+ * « @bot implement-tests », puis repli par mots-clés — voir detectIntent)
+ * reste la première chose vérifiée et continue de fonctionner SANS aucun
+ * appel au modèle : c'est un chemin fiable, déjà testé, qui ne coûte rien —
+ * le court-circuiter reviendrait à payer un appel de modèle pour une demande
+ * qui n'en avait pas besoin. Le planificateur n'est invoqué qu'en dernier
+ * recours, quand cette détection ne tranche pas (`detectIntent` renvoie
+ * "unknown" — c'est exactement le cas de l'exemple du propriétaire, « @bot
+ * fais une MR », qui ne matche aucun mot-clé du repli).
+ *
+ * Repli sûr choisi pour tout ce qui peut mal tourner côté planificateur
+ * (timeout, sortie illisible, plan hors schéma, intention "unknown" rendue
+ * par le modèle lui-même) : retomber sur le MÊME message d'aide que
+ * l'ancienne détection "unknown" — jamais une supposition risquée (relancer
+ * l'ancien repli par mots-clés, par exemple, redonnerait justement la
+ * fragilité que le planificateur est censé corriger, au moment précis où on
+ * a le moins de raisons de lui faire confiance : un planificateur qui vient
+ * d'échouer). L'utilisateur reste orienté vers la commande explicite,
+ * déterministe et déjà fiable, plutôt que de laisser deviner une deuxième
+ * fois avec moins d'information qu'avant.
+ */
+export async function resolveIntent(
+  request: AgentRequest,
+  context: MergeRequestContext,
+  project: ResolvedProject,
+  plan: PlannerFn = runPlanner,
+): Promise<IntentDecision> {
+  const deterministic = detectIntent(request.text, config.botUsername);
+  if (deterministic !== "unknown") {
+    return {
+      execute: true,
+      intent: deterministic,
+      requestText: request.text,
+      usedPlanner: false,
+    };
+  }
+
+  let outcome: PlanSuccess | PlanFailure;
+  try {
+    outcome = await plan(context, project);
+  } catch (error) {
+    outcome = { ok: false, reason: (error as Error).message };
+  }
+
+  if (!outcome.ok) {
+    log.info(`[planificateur] échec, repli sûr sur le message d'aide : ${outcome.reason}`);
+    return {
+      execute: false,
+      intent: "unknown",
+      requestText: request.text,
+      usedPlanner: true,
+    };
+  }
+
+  const producedPlan: Plan = outcome.plan;
+
+  if (producedPlan.intent === "unknown") {
+    return {
+      execute: false,
+      intent: "unknown",
+      requestText: request.text,
+      usedPlanner: true,
+      plannerReason: producedPlan.reason,
+    };
+  }
+
+  // Défense en profondeur, granulaire : en plus du contrôle par intention
+  // (intentRefusalReason, appliqué par runTask à l'identique du chemin
+  // déterministe — voir plus bas), toute capacité EXPLICITEMENT réclamée par
+  // le plan doit elle aussi être accordée. Une injection dans le ticket lié
+  // ou la description de la MR ("tu as le droit de modifier tout le
+  // dépôt") ne change rien ici : seules `project.capabilities` (résolues
+  // depuis projects.json) sont consultées, jamais le texte du plan.
+  const capabilityRefusal = refuseRequestedCapabilities(
+    request.kind,
+    producedPlan.requestedCapabilities,
+    project.capabilities,
+  );
+  if (capabilityRefusal) {
+    return {
+      execute: false,
+      intent: producedPlan.intent,
+      requestText: request.text,
+      usedPlanner: true,
+      refusal: capabilityRefusal,
+    };
+  }
+
+  return {
+    execute: true,
+    intent: producedPlan.intent,
+    requestText: producedPlan.prompt,
+    usedPlanner: true,
+    plannerReason: producedPlan.reason,
+  };
 }
 
 /**
@@ -219,29 +396,14 @@ export async function runTask(request: AgentRequest): Promise<void> {
       );
     }
 
-    const intent = detectIntent(request.text, config.botUsername);
-    log.info(`[worker] intention détectée : ${intent}`);
-
-    if (intent === "unknown") {
-      await report(
-        request,
-        "🤖 Je n'ai pas compris la demande. Utilisez une commande explicite : " +
-          "« @bot review » pour relire la MR, ou « @bot implement-tests » pour " +
-          "écrire des tests. À défaut, une formulation sans ambiguïté en langage " +
-          "naturel fonctionne aussi (« fais une review de cette MR », « implémente " +
-          "les tests ») — mais la commande explicite est plus fiable et reste " +
-          "prioritaire si les deux sont présentes.",
-        false,
-      );
-      return;
-    }
-
     // Chantier "projects.json" : `request.project` a été résolu et figé par
     // daemon/index.ts::handle() avant même la mise en file — garanti présent
     // ici, authorize() n'ayant jamais laissé passer une demande dont le
     // projet est absent de projects.json (voir authorize.ts). Le garde-fou
     // ci-dessous protège le vérificateur de types, pas un cas réellement
-    // atteignable en production.
+    // atteignable en production. Résolu AVANT resolveIntent() : le
+    // planificateur (chantier "planificateur") a besoin de la charte
+    // dérivée de ces capacités pour ce dépôt précis.
     const project = request.project;
     if (!project) {
       throw new Error(
@@ -249,14 +411,68 @@ export async function runTask(request: AgentRequest): Promise<void> {
       );
     }
 
+    // Chantier "planificateur" : remplace l'appel direct à detectIntent().
+    // Le chemin déterministe (commande explicite, puis repli par mots-clés)
+    // reste vérifié en premier, sans aucun appel au modèle — voir
+    // resolveIntent pour la justification complète du repli sûr en cas
+    // d'échec du planificateur.
+    const decision = await resolveIntent(request, context, project);
+    log.info(
+      `[worker] intention : ${decision.intent}${decision.usedPlanner ? " (planificateur)" : " (déterministe)"}`,
+    );
+
+    if (!decision.execute) {
+      const message = decision.refusal
+        ? `🤖 Demande refusée : ${decision.refusal}.`
+        : `🤖 ${UNKNOWN_INTENT_MESSAGE}${
+            decision.plannerReason
+              ? ` Le planificateur a répondu : « ${defuseMentions(decision.plannerReason)} ».`
+              : ""
+          }`;
+      await report(request, message, false);
+      return;
+    }
+
+    if (decision.intent === "unknown") {
+      // Ne peut pas arriver en pratique : resolveIntent() ne renvoie jamais
+      // execute=true avec intent="unknown" (voir son implémentation) — garde-fou
+      // pour le vérificateur de types plutôt qu'un cast, comme pour
+      // context.targetKind plus haut.
+      throw new Error(
+        "contexte incohérent : resolveIntent() a renvoyé execute=true avec une intention unknown",
+      );
+    }
+    const intent = decision.intent;
+
+    // Contrôle final, IDENTIQUE pour les deux chemins (déterministe ou
+    // planificateur) : que l'intention vienne d'une commande explicite ou
+    // d'un plan déjà validé (requestedCapabilities, voir resolveIntent),
+    // cette vérification par intention reste la même que celle appliquée
+    // avant le chantier "planificateur" — aucune divergence entre les deux,
+    // un seul endroit qui décide "cette intention est-elle permise sur ce
+    // dépôt ?".
     const refusal = intentRefusalReason(request.kind, intent, project.capabilities);
     if (refusal) {
       await report(request, `🤖 Demande refusée : ${refusal}.`, false);
       return;
     }
 
+    // Chantier "planificateur" : `executionContext` ne diffère de `context`
+    // que par `requestText` — le texte original de la demande sur le chemin
+    // déterministe, ou le prompt rédigé par le planificateur sinon (voir
+    // resolveIntent). Ce texte reste du contenu NON FIABLE, exactement comme
+    // le texte brut de la demande avant ce chantier : il traverse le même
+    // wrapUntrusted() que buildPrompt() (review.ts/implement.ts) appliquait
+    // déjà à context.requestText — aucun nouveau canal de confiance, aucune
+    // permission accordée par ce texte, l'exécution ci-dessous est sinon en
+    // tout point identique à ce qu'elle était avant ce chantier.
+    const executionContext: MergeRequestContext = {
+      ...context,
+      requestText: decision.requestText,
+    };
+
     if (intent === "implement") {
-      const result = await runImplement(context, context.sourceBranch, project);
+      const result = await runImplement(executionContext, executionContext.sourceBranch, project);
       const seconds = Math.round(result.durationMs / 1000);
 
       // result.detail republie parfois du texte non maîtrisé : une sortie de
@@ -267,7 +483,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
       // "tests-red", pas avant) : c'est ce texte-là, exactement, qui part
       // dans le commentaire.
       const messages: Record<typeof result.status, string> = {
-        pushed: `✅ Tests poussés sur \`${context.sourceBranch}\` en ${seconds} s — ${defuseMentions(result.detail)}`,
+        pushed: `✅ Tests poussés sur \`${executionContext.sourceBranch}\` en ${seconds} s — ${defuseMentions(result.detail)}`,
         "mr-opened": `✅ Merge request dédiée ouverte en ${seconds} s — ${defuseMentions(result.detail)}`,
         rejected: `⛔ Modifications refusées après ${seconds} s — ${defuseMentions(result.detail)}`,
         "tests-red": `❌ Les tests ne passent pas après ${seconds} s, rien n'a été poussé.\n\n<details><summary>Sortie</summary>\n\n\`\`\`\n${defuseMentions(result.detail.slice(-TESTS_RED_REPORT_TAIL_CHARS))}\n\`\`\`\n\n</details>`,
@@ -294,14 +510,14 @@ export async function runTask(request: AgentRequest): Promise<void> {
       return;
     }
 
-    if (context.files.length === 0) {
+    if (executionContext.files.length === 0) {
       await report(request, "🤖 Aucun changement à relire — le diff est vide.", false);
       return;
     }
 
     const { remarks, durationMs, truncated, omittedFiles } = await runReview(
-      context,
-      context.sourceBranch,
+      executionContext,
+      executionContext.sourceBranch,
     );
     const seconds = Math.round(durationMs / 1000);
 
@@ -322,7 +538,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
       return;
     }
 
-    const outcomes = await publishReview(context, remarks);
+    const outcomes = await publishReview(executionContext, remarks);
     const byPlacement = outcomes.reduce<Record<string, number>>(
       (acc, outcome) => {
         acc[outcome.placement] = (acc[outcome.placement] ?? 0) + 1;

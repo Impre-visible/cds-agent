@@ -285,8 +285,18 @@ export async function runAgentInSandbox(
   repo: string,
   meta: string,
   _projectPath: string,
-  /** `dockerBin` : uniquement pour l'injection d'un faux docker en test (voir sandbox.test.ts). */
-  options: { dockerBin?: string } = {},
+  options: {
+    /** Uniquement pour l'injection d'un faux docker en test (voir sandbox.test.ts). */
+    dockerBin?: string;
+    /**
+     * Dérogation à config.agentTimeoutMs (repli si absent, comportement
+     * historique inchangé). Chantier "planificateur" : tasks/planner.ts passe
+     * config.plannerTimeoutMs, un budget distinct et plus court que celui de
+     * l'agent exécutant — voir le commentaire équivalent sur runAgent()
+     * (agent/runner.ts).
+     */
+    timeoutMs?: number;
+  } = {},
 ): Promise<AgentResult> {
   const started = Date.now();
 
@@ -343,7 +353,9 @@ export async function runAgentInSandbox(
         // (COMMAND_TIMEOUT_MINUTES, 5 min, pensé pour install/tests). Sans ce
         // paramètre explicite, c'est ce dernier qui s'appliquait ici et
         // AGENT_TIMEOUT_MINUTES n'avait aucun effet en mode Docker.
-        timeoutMs: config.agentTimeoutMs,
+        // options.timeoutMs : dérogation explicite (voir plus haut) — c'est
+        // ce que passe tasks/planner.ts pour son propre budget, plus court.
+        timeoutMs: options.timeoutMs ?? config.agentTimeoutMs,
         dockerBin: options.dockerBin,
       },
     );

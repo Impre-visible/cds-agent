@@ -97,6 +97,31 @@ describe("buildConfig — finiteNumber : le scénario qui motive tout ça", () =
   });
 });
 
+describe("buildConfig — PLANNER_TIMEOUT_MINUTES (chantier « planificateur »)", () => {
+  test("absent retombe sur le défaut documenté (3 min → 180000 ms)", () => {
+    const config = buildConfig(baseEnv());
+    assert.equal(config.plannerTimeoutMs, 3 * 60_000);
+  });
+
+  test("valeur valide est convertie en millisecondes", () => {
+    const config = buildConfig(baseEnv({ PLANNER_TIMEOUT_MINUTES: "5" }));
+    assert.equal(config.plannerTimeoutMs, 5 * 60_000);
+  });
+
+  test("non numérique est rejeté", () => {
+    assert.throws(
+      () => buildConfig(baseEnv({ PLANNER_TIMEOUT_MINUTES: "vite" })),
+      /PLANNER_TIMEOUT_MINUTES/,
+    );
+  });
+
+  test("distinct d'AGENT_TIMEOUT_MINUTES : changer l'un ne change pas l'autre", () => {
+    const config = buildConfig(baseEnv({ AGENT_TIMEOUT_MINUTES: "20" }));
+    assert.equal(config.agentTimeoutMs, 20 * 60_000);
+    assert.equal(config.plannerTimeoutMs, 3 * 60_000);
+  });
+});
+
 describe("buildConfig — autres valeurs numériques", () => {
   test("MAX_ATTEMPTS=0 est rejeté (désactiverait silencieusement les réessais)", () => {
     assert.throws(

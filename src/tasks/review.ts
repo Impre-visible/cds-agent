@@ -141,7 +141,12 @@ interface DiffSection {
  *   encore restent inclus (aucune raison de gâcher du budget qu'un gros
  *   fichier n'a pas su remplir).
  */
-function buildDiffSection(files: DiffFile[]): DiffSection {
+// Exportée pour être réutilisée par tasks/planner.ts (chantier
+// "planificateur") : le planificateur a besoin de montrer le diff au modèle
+// pour comprendre la demande (voir buildPlannerPrompt), avec exactement les
+// mêmes plafonds et la même troncature visible — jamais une seconde
+// implémentation qui pourrait diverger de celle-ci.
+export function buildDiffSection(files: DiffFile[]): DiffSection {
   const truncatedFiles: string[] = [];
   const omittedFiles: string[] = [];
   const blocks: string[] = [];
@@ -251,9 +256,19 @@ function findMatchingBrace(text: string, start: number): number | null {
   return null;
 }
 
-/** Le modèle écrit parfois le JSON dans le fichier, parfois sur stdout. */
+/**
+ * Le modèle écrit parfois le JSON dans le fichier, parfois sur stdout.
+ *
+ * `key` : nom du premier champ attendu de l'objet JSON recherché en dehors
+ * d'un bloc fenced (`{"remarks"...` par défaut, pour la revue). Généralisée
+ * pour tasks/planner.ts (chantier "planificateur"), qui réutilise cette même
+ * fonction pour extraire un plan (`{"intent"...`) plutôt que de réimplémenter
+ * la même recherche de bloc fenced / comptage d'accolades pour un schéma
+ * différent — la recherche en bloc fenced, elle, ne dépend d'aucun schéma
+ * précis et reste inchangée quel que soit `key`.
+ */
 // Exportée pour être testée unitairement (voir review.test.ts).
-export function extractJson(text: string): string | null {
+export function extractJson(text: string, key: string = "remarks"): string | null {
   // Le bloc fenced souffrait du même comptage naïf : le contenu capturé est
   // désormais délimité par findMatchingBrace plutôt que par une regex qui
   // s'arrête à la première accolade rencontrée.
@@ -266,8 +281,8 @@ export function extractJson(text: string): string | null {
     }
   }
 
-  const start = text.indexOf('{"remarks"');
-  const loose = start === -1 ? text.indexOf('{ "remarks"') : start;
+  const start = text.indexOf(`{"${key}"`);
+  const loose = start === -1 ? text.indexOf(`{ "${key}"`) : start;
   if (loose === -1) return null;
 
   const end = findMatchingBrace(text, loose);

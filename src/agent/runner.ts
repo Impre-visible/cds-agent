@@ -10,7 +10,21 @@ export interface AgentResult {
   durationMs: number;
 }
 
-export function runAgent(cwd: string, prompt: string): Promise<AgentResult> {
+/**
+ * `timeoutMs` : par défaut config.agentTimeoutMs (comportement historique,
+ * inchangé pour tous les appels existants). Chantier "planificateur" :
+ * tasks/planner.ts passe explicitement config.plannerTimeoutMs — un budget de
+ * temps DISTINCT de celui de l'agent exécutant, plus petit (le planificateur
+ * ne fait que rédiger un plan JSON, pas écrire ni faire tourner une suite de
+ * tests). Paramètre optionnel plutôt qu'une nouvelle fonction : même
+ * mécanisme d'exécution (opencode, sortie bornée, SIGKILL au dépassement),
+ * seul le budget change.
+ */
+export function runAgent(
+  cwd: string,
+  prompt: string,
+  timeoutMs: number = config.agentTimeoutMs,
+): Promise<AgentResult> {
   return new Promise((resolve) => {
     const started = Date.now();
     const child = spawn(
@@ -34,7 +48,7 @@ export function runAgent(cwd: string, prompt: string): Promise<AgentResult> {
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGKILL");
-    }, config.agentTimeoutMs);
+    }, timeoutMs);
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdout.append(chunk);

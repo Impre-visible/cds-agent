@@ -246,6 +246,25 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     agentTimeoutMs:
       finiteNumber(env, "AGENT_TIMEOUT_MINUTES", 10, { min: 1, max: 240 }) *
       60_000,
+    /**
+     * Chantier "planificateur" : budget de temps du premier appel au modèle
+     * (tasks/planner.ts::runPlanner), distinct d'agentTimeoutMs ci-dessus —
+     * ce n'est pas le même travail. L'agent exécutant clone un dépôt,
+     * installe des dépendances, écrit du code et fait tourner une suite de
+     * tests (10 min de défaut) ; le planificateur travaille certes dans un
+     * clone du même dépôt (voir tasks/planner.ts::runPlanner), mais ne fait
+     * que lire la charte et le contexte de la demande pour rédiger un petit
+     * plan JSON — il ne modifie jamais ce clone. Un plafond aussi
+     * généreux qu'agentTimeoutMs pour cette tâche bien plus légère
+     * retarderait inutilement chaque demande dont l'intention n'est pas déjà
+     * tranchée par une commande explicite ou le repli par mots-clés (voir
+     * tasks/router.ts::resolveIntent — le planificateur n'est appelé que pour
+     * ces demandes-là, jamais pour les autres). 3 min de défaut : large pour
+     * un aller-retour de quelques centaines de tokens sur un modèle local.
+     */
+    plannerTimeoutMs:
+      finiteNumber(env, "PLANNER_TIMEOUT_MINUTES", 3, { min: 1, max: 60 }) *
+      60_000,
     // maxRemarks=0 viderait silencieusement toute review (slice(0, 0)).
     maxRemarks: finiteNumber(env, "MAX_REMARKS", 5, { min: 1, max: 50 }),
     gitAuthorName: env.GIT_AUTHOR_NAME ?? "cds-agent",
