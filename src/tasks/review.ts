@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { config } from "../config.ts";
 import { runAgent, type AgentResult } from "../agent/runner.ts";
 import { createWorkspace } from "../agent/workspace.ts";
-import type { DiffFile, TaskContext } from "../types.ts";
+import type { DiffFile, MergeRequestContext } from "../types.ts";
 import { validateRemarks, numberDiffLines, type ValidatedRemark } from "./diff.ts";
 import { runAgentInSandbox } from "../agent/sandbox.ts";
 
@@ -92,7 +92,7 @@ function visibleTruncate(text: string, maxChars: number): string {
 const MAX_ISSUE_DESCRIPTION_CHARS = 1500;
 const MAX_ISSUE_COMMENTS_CHARS = 3000;
 
-function buildLinkedIssueBlock(context: TaskContext): string {
+function buildLinkedIssueBlock(context: MergeRequestContext): string {
   const issue = context.linkedIssue;
   if (!issue) return "";
 
@@ -186,7 +186,7 @@ export interface BuiltPrompt {
  * tout ce qu'un test automatisé peut vérifier sans modèle disponible (voir
  * le rapport de ce chantier pour ce qui reste non validé faute de modèle).
  */
-export function buildPrompt(context: TaskContext): BuiltPrompt {
+export function buildPrompt(context: MergeRequestContext): BuiltPrompt {
   const paths = context.files.map((file) => file.new_path);
   const diffSection = buildDiffSection(context.files);
 
@@ -357,7 +357,7 @@ export interface ReviewResult {
 }
 
 export async function runReview(
-  context: TaskContext,
+  context: MergeRequestContext,
   sourceBranch: string,
 ): Promise<ReviewResult> {
   const workspace = await createWorkspace(context.projectPath, sourceBranch, {

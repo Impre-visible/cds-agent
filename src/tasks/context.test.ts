@@ -204,3 +204,38 @@ describe("buildContext — chemin issue (§3.5 : recency des commentaires)", () 
     ]);
   });
 });
+
+describe("buildContext — union discriminée sur targetKind (§6.8)", () => {
+  test("un IssueContext n'expose pas sourceBranch : erreur de COMPILATION, pas une valeur null à vérifier à l'exécution", async () => {
+    routes.set("/api/v4/projects/1/issues/7", (_req, res) => {
+      respondJson(res, 200, {
+        iid: 7,
+        title: "Ticket",
+        description: null,
+        author: { id: 2, username: "carol", name: "Carol" },
+        web_url: "https://example.invalid/issues/7",
+      });
+    });
+    registerNotes("/api/v4/projects/1/issues/7/notes", []);
+
+    const context = await buildContext(issueRequest());
+    assert.equal(context.targetKind, "issues");
+
+    if (context.targetKind === "issues") {
+      // Preuve de l'union discriminée (§6.8) : dans ce bloc, TypeScript a
+      // narrowé `context` en IssueContext, un type qui n'a tout simplement
+      // pas de champ sourceBranch (voir types.ts) — contrairement à l'ancien
+      // TaskContext à champs nullables, où `context.sourceBranch` valait
+      // silencieusement `null` ici et fallait le vérifier à chaque site
+      // d'appel. Retirer la directive juste en dessous ferait échouer
+      // `npm run check` (l'accès deviendrait une vraie erreur de type) ; à
+      // l'inverse, si cette garantie disparaissait (retour à un TaskContext
+      // à champs nullables), la directive deviendrait superflue, ce que tsc
+      // signale aussi comme une erreur (directive inutilisée) — la garantie
+      // est donc vérifiée par la compilation, pas par une assertion ici.
+      // @ts-expect-error : IssueContext n'a pas de champ sourceBranch (§6.8)
+      const sourceBranch = context.sourceBranch;
+      assert.equal(sourceBranch, undefined);
+    }
+  });
+});

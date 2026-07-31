@@ -28,6 +28,8 @@ const request: AgentRequest = {
 };
 
 const context = await buildContext(request);
+if (context.targetKind !== "merge_requests")
+  throw new Error("contexte MR attendu");
 const file = context.files[0];
 if (!file) throw new Error("aucun fichier dans le diff");
 

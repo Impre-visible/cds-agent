@@ -28,7 +28,8 @@ const request: AgentRequest = {
 };
 
 const context = await buildContext(request);
-if (!context.sourceBranch) throw new Error("branche source introuvable");
+if (context.targetKind !== "merge_requests")
+  throw new Error("contexte MR attendu");
 
 const { remarks, durationMs, truncated, omittedFiles } = await runReview(
   context,

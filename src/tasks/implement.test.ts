@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TaskContext } from "../types.ts";
+import type { TaskContextBase } from "../types.ts";
 
 // implement.ts importe (transitivement) config.ts, qui jette au chargement
 // si GITLAB_TOKEN/BOT_USERNAME sont absents. Même parade que
@@ -15,7 +15,7 @@ let checkHeadIntegrity: (
   repo: string,
   branch: string,
 ) => Promise<{ ok: true } | { ok: false; detail: string; files: string[] }>;
-let buildPrompt: (context: TaskContext) => string;
+let buildPrompt: (context: TaskContextBase) => string;
 let buildInstallCommand: (installCommand: string, ignoreScripts: boolean) => string;
 let rollbackAgentChanges: (repo: string) => Promise<void>;
 
@@ -27,21 +27,21 @@ before(async () => {
     await import("./implement.ts"));
 });
 
-function context(overrides: Partial<TaskContext> = {}): TaskContext {
+// §6.8 : buildPrompt() (implement.ts) ne lit que les champs communs
+// (TaskContextBase) — ni sourceBranch, ni diffRefs, ni files, qui n'existent
+// désormais que sur MergeRequestContext (voir types.ts) et n'ont donc plus
+// leur place ici.
+function context(overrides: Partial<TaskContextBase> = {}): TaskContextBase {
   return {
     instanceUrl: "https://gitlab.example",
     projectId: 42,
     projectPath: "group/project",
-    targetKind: "merge_requests",
     targetIid: 7,
     targetTitle: "Titre de la MR",
     targetDescription: "",
     requester: "alice",
     requestText: "implémente des tests pour ce module",
     linkedIssue: null,
-    diffRefs: null,
-    files: [],
-    sourceBranch: "feature",
     ...overrides,
   };
 }

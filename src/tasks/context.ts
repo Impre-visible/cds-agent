@@ -91,11 +91,14 @@ async function loadLinkedIssue(
 export async function buildContext(
   request: AgentRequest,
 ): Promise<TaskContext> {
+  // §6.8 : targetKind n'est plus dans ce socle commun — il varie de forme
+  // (littéral "merge_requests" vs "issues", pas juste sa valeur) entre les
+  // deux branches de l'union discriminée ci-dessous, chacune l'assigne donc
+  // elle-même dans son propre `return`.
   const base = {
     instanceUrl: config.gitlabUrl,
     projectId: request.projectId,
     projectPath: request.projectPath,
-    targetKind: request.kind,
     targetIid: request.iid,
     requester: request.requester,
     requestText: request.text,
@@ -163,6 +166,7 @@ export async function buildContext(
 
     return {
       ...base,
+      targetKind: "merge_requests",
       targetTitle: mr.title,
       targetDescription: mr.description ?? "",
       linkedIssue,
@@ -186,6 +190,7 @@ export async function buildContext(
   const issue = await gitlab.issue(request.projectId, request.iid);
   return {
     ...base,
+    targetKind: "issues",
     targetTitle: issue.title,
     targetDescription: issue.description ?? "",
     linkedIssue: await loadLinkedIssue(
@@ -193,8 +198,5 @@ export async function buildContext(
       issue,
       config.botUsername,
     ),
-    sourceBranch: null,
-    diffRefs: null,
-    files: [],
   };
 }

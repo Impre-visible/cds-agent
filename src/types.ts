@@ -34,6 +34,28 @@ export interface Note {
 
 export type ResourceKind = "issues" | "merge_requests";
 
+/**
+ * §6.10 : ce que l'accusé de réception (posté par daemon/index.ts::acknowledge())
+ * laisse circuler jusqu'à runTask()/report() (tasks/router.ts) pour éditer
+ * cette même note une fois le résultat connu, plutôt que d'en poster une
+ * nouvelle — les deux fonctions ne se connaissaient pas avant ce chantier,
+ * AgentRequest est le véhicule qui les relie (voir AgentRequest.ack).
+ */
+export interface AckHandle {
+  /** Identifiant de la note d'accusé de réception, à éditer avec le résultat final. */
+  ackNoteId: number;
+  /**
+   * Identifiant de la réaction 👀 posée sur la note/ressource déclenchante
+   * (voir AgentRequest.noteId) au moment de l'accusé de réception, pour
+   * pouvoir la supprimer avant de poser ✅/❌ — l'API award emoji ne propose
+   * pas de mise à jour en place, seulement créer/supprimer (voir report()
+   * dans router.ts). `null` si la réaction n'a pas pu être posée (best-effort,
+   * voir acknowledge()) : rien à supprimer dans ce cas, on se contente de
+   * poser la nouvelle.
+   */
+  awardId: number | null;
+}
+
 export interface AgentRequest {
   /** Clé d'idempotence stable, dérivée de la note (ou de la description). */
   key: string;
@@ -48,6 +70,15 @@ export interface AgentRequest {
   /** Texte exact de la demande, relu depuis l'API. */
   text: string;
   targetUrl: string;
+  /**
+   * Renseigné par daemon/index.ts::handle() une fois l'accusé de réception
+   * posté, avant que la demande n'entre dans la file (voir queue.ts) : le
+   * worker (tasks/router.ts::report()) l'utilise pour éditer cette note au
+   * lieu d'en poster une nouvelle (§6.10). Absent pour les usages hors
+   * production (outils dry-run, tests) : report() se rabat alors sur son
+   * ancien comportement (poster une note neuve).
+   */
+  ack?: AckHandle;
 }
 
 export interface DiffRefs {
@@ -91,18 +122,57 @@ export interface LinkedIssue {
   comments: string[];
 }
 
-export interface TaskContext {
+/**
+ * §6.8 : champs communs aux deux formes de contexte que buildContext()
+ * (tasks/context.ts) peut construire, avant de se spécialiser par
+ * targetKind — voir TaskContext ci-dessous.
+ */
+export interface TaskContextBase {
   instanceUrl: string;
   projectId: number;
   projectPath: string;
-  targetKind: ResourceKind;
   targetIid: number;
   targetTitle: string;
   targetDescription: string;
   requester: string;
   requestText: string;
   linkedIssue: LinkedIssue | null;
+}
+
+/**
+ * §6.8 : contexte d'une merge request — le seul chemin de production
+ * aujourd'hui (voir router.ts, qui refuse tout to-do dont la cible n'est pas
+ * une MR avant même d'appeler buildContext()). sourceBranch, diffRefs et
+ * files n'existent que sur cette branche du contexte : plus de nullité à
+ * vérifier côté appelant (review.ts, implement.ts, publish.ts, router.ts...),
+ * le compilateur garantit leur présence dès que targetKind vaut
+ * "merge_requests" (union discriminée sur ce champ, voir TaskContext).
+ */
+export interface MergeRequestContext extends TaskContextBase {
+  targetKind: "merge_requests";
+  sourceBranch: string;
   diffRefs: DiffRefs | null;
   files: DiffFile[];
-  sourceBranch: string | null;
 }
+
+/**
+ * §6.8 : contexte d'une issue — délibérément sans chemin de production
+ * aujourd'hui (voir le commentaire de buildContext() dans tasks/context.ts).
+ * Conservé pour tools/dump-context.ts, seul appelant réel de cette branche.
+ */
+export interface IssueContext extends TaskContextBase {
+  targetKind: "issues";
+}
+
+/**
+ * §6.8 : union discriminée sur targetKind. Remplace l'ancien type à champs
+ * nullables (sourceBranch: string | null, diffRefs: DiffRefs | null, files
+ * vide pour une issue), qui obligeait chaque appelant MR à des vérifications
+ * de nullité que le compilateur peut désormais garantir à la place : un
+ * `context.targetKind !== "merge_requests"` (ou un contexte typé directement
+ * MergeRequestContext) suffit à donner accès à sourceBranch/diffRefs/files
+ * sans nouvelle vérification — et à l'inverse, y accéder sur un IssueContext
+ * est une erreur de compilation, pas une valeur `null` à découvrir à
+ * l'exécution.
+ */
+export type TaskContext = MergeRequestContext | IssueContext;

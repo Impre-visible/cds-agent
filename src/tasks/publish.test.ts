@@ -2,7 +2,7 @@ import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { DiffFile, TaskContext } from "../types.ts";
+import type { DiffFile, DiffRefs, MergeRequestContext } from "../types.ts";
 import type { ValidatedRemark } from "./diff.ts";
 
 // §5.5/§5.6 : publishReview() ne parle qu'HTTP (via gitlab/client.ts), donc
@@ -136,7 +136,7 @@ beforeEach(() => {
   ];
 });
 
-function context(diffRefs: TaskContext["diffRefs"] = null): TaskContext {
+function context(diffRefs: DiffRefs | null = null): MergeRequestContext {
   return {
     instanceUrl: baseUrl,
     projectId: 42,

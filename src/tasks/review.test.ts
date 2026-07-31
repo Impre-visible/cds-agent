@@ -1,6 +1,6 @@
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
-import type { DiffFile, TaskContext } from "../types.ts";
+import type { DiffFile, MergeRequestContext } from "../types.ts";
 
 // review.ts importe (transitivement) src/config.ts, qui lit .env et jette au
 // chargement du module si GITLAB_TOKEN ou BOT_USERNAME sont absents. On
@@ -13,7 +13,7 @@ let parseRemark: (
   raw: unknown,
   index: number,
 ) => { remark: unknown } | { rejected: string };
-let buildPrompt: (context: TaskContext) => {
+let buildPrompt: (context: MergeRequestContext) => {
   prompt: string;
   truncatedFiles: string[];
   omittedFiles: string[];
@@ -53,7 +53,7 @@ function file(path: string, diff = ""): DiffFile {
   };
 }
 
-function context(overrides: Partial<TaskContext> = {}): TaskContext {
+function context(overrides: Partial<MergeRequestContext> = {}): MergeRequestContext {
   return {
     instanceUrl: "https://gitlab.example",
     projectId: 42,

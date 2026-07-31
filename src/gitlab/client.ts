@@ -296,6 +296,28 @@ export const gitlab = {
       body: JSON.stringify({ body }),
     }),
 
+  /**
+   * §6.10 : édite une note existante plutôt que d'en poster une nouvelle —
+   * utilisé par tasks/router.ts::report() pour faire évoluer l'accusé de
+   * réception vers le résultat final (une seule note, un statut vivant),
+   * plutôt que d'empiler accusé de réception, remarques et synthèse.
+   */
+  updateNote: (
+    projectId: number,
+    kind: ResourceKind,
+    iid: number,
+    noteId: number,
+    body: string,
+  ) =>
+    api<Note>(`/projects/${projectId}/${kind}/${iid}/notes/${noteId}`, {
+      method: "PUT",
+      body: JSON.stringify({ body }),
+    }),
+
+  // Réponse typée (id de la réaction posée) : §6.10 en a besoin pour pouvoir
+  // ensuite la supprimer (deleteAwardOnNote/deleteAwardOnResource ci-dessous)
+  // au moment de la faire évoluer 👀 → ✅/❌, l'API award emoji ne proposant
+  // aucune mise à jour en place.
   awardOnNote: (
     projectId: number,
     kind: ResourceKind,
@@ -303,7 +325,7 @@ export const gitlab = {
     noteId: number,
     name: string,
   ) =>
-    api(
+    api<{ id: number }>(
       `/projects/${projectId}/${kind}/${iid}/notes/${noteId}/award_emoji?name=${encodeURIComponent(name)}`,
       { method: "POST" },
     ),
@@ -314,11 +336,36 @@ export const gitlab = {
     iid: number,
     name: string,
   ) =>
-    api(
+    api<{ id: number }>(
       `/projects/${projectId}/${kind}/${iid}/award_emoji?name=${encodeURIComponent(name)}`,
       {
         method: "POST",
       },
+    ),
+
+  /** §6.10 : supprime une réaction posée sur une note, avant d'en poser une nouvelle (voir awardOnNote ci-dessus). */
+  deleteAwardOnNote: (
+    projectId: number,
+    kind: ResourceKind,
+    iid: number,
+    noteId: number,
+    awardId: number,
+  ) =>
+    api<void>(
+      `/projects/${projectId}/${kind}/${iid}/notes/${noteId}/award_emoji/${awardId}`,
+      { method: "DELETE" },
+    ),
+
+  /** §6.10 : équivalent de deleteAwardOnNote, pour une réaction posée directement sur la ressource (mention dans une description). */
+  deleteAwardOnResource: (
+    projectId: number,
+    kind: ResourceKind,
+    iid: number,
+    awardId: number,
+  ) =>
+    api<void>(
+      `/projects/${projectId}/${kind}/${iid}/award_emoji/${awardId}`,
+      { method: "DELETE" },
     ),
 
   mergeRequest: (projectId: number, iid: number) =>

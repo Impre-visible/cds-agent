@@ -3,7 +3,7 @@ import { config } from "../config.ts";
 import { gitlab, GitLabError } from "../gitlab/client.ts";
 import { defuseMentions } from "../daemon/request.ts";
 import type { ValidatedRemark } from "./diff.ts";
-import type { DiffRefs, TaskContext } from "../types.ts";
+import type { DiffRefs, MergeRequestContext } from "../types.ts";
 
 export type Placement = "line" | "file" | "general";
 
@@ -153,7 +153,7 @@ function sameShas(a: DiffRefs, b: DiffRefs): boolean {
  *   mieux ; aucune fraîcheur à vérifier puisqu'il n'y a pas de référence à
  *   comparer.
  */
-async function resolveShas(context: TaskContext): Promise<DiffRefs> {
+async function resolveShas(context: MergeRequestContext): Promise<DiffRefs> {
   if (context.diffRefs) {
     const current = await currentDiffRefs(context.projectId, context.targetIid);
     if (current && !sameShas(current, context.diffRefs)) {
@@ -182,7 +182,7 @@ function body(remark: ValidatedRemark): string {
 }
 
 export async function publishReview(
-  context: TaskContext,
+  context: MergeRequestContext,
   remarks: ValidatedRemark[],
 ): Promise<PublishOutcome[]> {
   const shas = await resolveShas(context);

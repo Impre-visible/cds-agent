@@ -8,7 +8,7 @@ import {
   git,
   runCommand,
 } from "../agent/workspace.ts";
-import type { TaskContext } from "../types.ts";
+import type { TaskContextBase } from "../types.ts";
 import { basename, resolve, join } from "node:path";
 import { writeFileSync } from "node:fs";
 import { runAgentInSandbox } from "../agent/sandbox.ts";
@@ -267,7 +267,7 @@ const MAX_ISSUE_DESCRIPTION_CHARS = 1500;
  * garanties recherchées que côté review.ts — délimiteurs présents,
  * troncature visible, contenu hostile neutralisé.
  */
-export function buildPrompt(context: TaskContext): string {
+export function buildPrompt(context: TaskContextBase): string {
   const issue = context.linkedIssue;
   const linked = issue
     ? `## Ticket lié #${issue.iid} (contexte uniquement)\n${wrapUntrusted(
@@ -291,7 +291,7 @@ export function buildPrompt(context: TaskContext): string {
 }
 
 export async function runImplement(
-  context: TaskContext,
+  context: TaskContextBase,
   branch: string,
 ): Promise<ImplementResult> {
   const started = Date.now();

@@ -2,7 +2,7 @@ import { dirname, join } from "node:path";
 import { config } from "../config.ts";
 import { gitlab, GitLabError, resourceKind } from "../gitlab/client.ts";
 import { RequestStore, canProcess } from "./store.ts";
-import type { AgentRequest, GitLabUser, Todo } from "../types.ts";
+import type { AckHandle, AgentRequest, GitLabUser, Todo } from "../types.ts";
 import { buildRequest, defuseMentions } from "./request.ts";
 import { authorize } from "./authorize.ts";
 import { TaskQueue } from "./queue.ts";
@@ -155,23 +155,38 @@ async function finishTodo(todoId: number): Promise<void> {
   );
 }
 
+/**
+ * §6.10 : pose l'accusé de réception et sa réaction 👀, et renvoie de quoi
+ * les retrouver ensuite — l'identifiant de la note (pour l'éditer avec le
+ * résultat final) et celui de la réaction (pour la remplacer par ✅/❌,
+ * l'API award emoji n'ayant pas de mise à jour en place). Voir
+ * tasks/router.ts::report(), seul autre endroit qui connaît ces
+ * identifiants, via AgentRequest.ack (types.ts).
+ */
 async function acknowledge(
   request: AgentRequest,
   position: number,
-): Promise<void> {
+): Promise<AckHandle> {
   const { projectId, kind, iid, noteId } = request;
 
+  let awardId: number | null = null;
   try {
-    if (noteId === null) {
-      await gitlab.awardOnResource(projectId, kind, iid, "eyes");
-    } else {
-      await gitlab.awardOnNote(projectId, kind, iid, noteId, "eyes");
-    }
+    const award =
+      noteId === null
+        ? await gitlab.awardOnResource(projectId, kind, iid, "eyes")
+        : await gitlab.awardOnNote(projectId, kind, iid, noteId, "eyes");
+    awardId = award.id;
   } catch (error) {
     console.warn(`    réaction emoji impossible : ${(error as Error).message}`);
   }
 
-  await gitlab.createNote(projectId, kind, iid, ackBody(request, position));
+  const ackNote = await gitlab.createNote(
+    projectId,
+    kind,
+    iid,
+    ackBody(request, position),
+  );
+  return { ackNoteId: ackNote.id, awardId };
 }
 
 async function handle(todo: Todo): Promise<void> {
@@ -222,12 +237,28 @@ async function handle(todo: Todo): Promise<void> {
     console.log(`    ${request.projectPath} ${marker}${request.iid}`);
     console.log(`    « ${request.text.replace(/\n/g, " ").slice(0, 100)} »`);
 
-    const position = queue.push(request);
-    console.log(`    position dans la file : ${position}`);
+    // §6.10 : l'accusé de réception doit être posté — et son identifiant
+    // connu — AVANT d'empiler la tâche dans la file, pas après (contrairement
+    // à l'ordre précédent, qui poussait d'abord et acquittait ensuite) : sans
+    // ça, le worker pourrait démarrer et vouloir publier son résultat
+    // (tasks/router.ts::report()) avant que l'identifiant de la note
+    // d'accusé de réception ne soit connu, une course que rien ne
+    // garantissait de gagner (report() aurait alors dû se rabattre sur une
+    // nouvelle note, perdant l'objectif "une seule note"). queue.depth, lu
+    // juste avant l'accusé de réception, donne la position prévisionnelle de
+    // cette tâche — rien d'autre ne peut modifier la file entre cette
+    // lecture et le push() qui suit, aucun `await` ne s'intercale entre les
+    // deux. Purement informatif (comme avant ce changement) : par
+    // construction, cette tâche est la seule sous cette clé (canProcess()
+    // l'a autorisée plus haut) donc jamais dédupliquée au push.
+    const position = queue.depth + 1;
+    const ack = await acknowledge(request, position);
+    const enqueued: AgentRequest = { ...request, ack };
 
-    await acknowledge(request, position);
+    const actualPosition = queue.push(enqueued);
+    console.log(`    position dans la file : ${actualPosition}`);
     store.record(request.key, todo.id, "acked");
-    console.log(`    accusé de réception posté`);
+    console.log(`    accusé de réception posté (note ${ack.ackNoteId})`);
 
     await finishTodo(todo.id);
   } catch (error) {
