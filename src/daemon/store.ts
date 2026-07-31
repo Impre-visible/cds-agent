@@ -115,6 +115,23 @@ export class RequestStore {
   }
 
   /**
+   * Vrai si aucune demande n'a jamais été enregistrée dans ce fichier
+   * d'état — sert de proxy à "tout premier démarrage" (voir bootstrap.ts,
+   * §3.7) : une machine neuve ou un fichier d'état effacé produit un store
+   * vide, alors qu'un redémarrage normal en cours d'exploitation en contient
+   * déjà au moins une (ne serait-ce que la toute première demande jamais
+   * traitée). Ne distingue pas ces deux cas avec une certitude absolue (un
+   * daemon qui n'a jamais reçu la moindre mention aurait aussi un store
+   * vide), mais traiter ce cas limite comme un premier démarrage — c'est-à-
+   * dire amorcer sans notification plutôt que traiter normalement — n'a
+   * aucune conséquence négative : par définition il n'y a alors rien à
+   * traiter en retard.
+   */
+  isEmpty(): boolean {
+    return this.states.size === 0;
+  }
+
+  /**
    * Enregistre une transition. Les écritures qui régresseraient le statut
    * connu (voir RANK) sont silencieusement ignorées : le fichier reste un
    * journal fidèle des tentatives d'écriture, mais l'état "actuel" exposé

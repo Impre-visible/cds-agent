@@ -147,6 +147,30 @@ describe("RequestStore — garde-fou de régression (record monotone)", () => {
   });
 });
 
+describe("RequestStore — isEmpty() (proxy de 'premier démarrage', voir bootstrap.ts)", () => {
+  test("un store neuf (fichier absent) est vide", () => {
+    const store = new RequestStore(freshPath());
+    assert.equal(store.isEmpty(), true);
+  });
+
+  test("dès la première écriture, le store n'est plus vide", () => {
+    const store = new RequestStore(freshPath());
+    store.record("note:900", 900, "claimed");
+    assert.equal(store.isEmpty(), false);
+  });
+
+  test("un store relu depuis un fichier déjà peuplé n'est pas vide", () => {
+    const path = freshPath();
+    writeFileSync(
+      path,
+      `${JSON.stringify({ key: "note:901", todoId: 901, status: "acked", at: "2026-01-01T00:00:00.000Z" })}\n`,
+      "utf8",
+    );
+    const store = new RequestStore(path);
+    assert.equal(store.isEmpty(), false);
+  });
+});
+
 describe("RequestStore — interrupted()", () => {
   test("distingue les orphelins rejouables (claimed/acked) de ceux bloqués (running)", () => {
     const store = new RequestStore(freshPath());

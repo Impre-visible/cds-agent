@@ -1,3 +1,4 @@
+import { dirname, join } from "node:path";
 import { config } from "../config.ts";
 import { gitlab, GitLabError, resourceKind } from "../gitlab/client.ts";
 import { RequestStore, canProcess } from "./store.ts";
@@ -9,9 +10,26 @@ import { ShutdownController, drain } from "./shutdown.ts";
 import { runTask } from "../tasks/router.ts";
 import { currentContainer, killContainer } from "../agent/sandbox.ts";
 import { currentWorkspace } from "../agent/workspace.ts";
+import { SeenTracker } from "./seen.ts";
+import { bootstrapIfFresh } from "./bootstrap.ts";
+import { InstanceLock } from "./lock.ts";
 
 const store = new RequestStore(config.stateFile);
 let bot: GitLabUser;
+
+/**
+ * Fichier de verrou d'instance (§3.9), rangé à côté du fichier d'état
+ * plutôt que défini via une nouvelle variable d'environnement : ce chemin
+ * n'a jamais eu besoin d'être ajusté indépendamment de STATE_FILE en
+ * pratique, voir InstanceLock dans lock.ts pour le mécanisme complet.
+ */
+const LOCK_FILE = join(dirname(config.stateFile), "daemon.lock");
+const lock = new InstanceLock(LOCK_FILE);
+// Libère le verrou sur TOUTE sortie du process (process.exit() explicite,
+// fin naturelle de l'event loop, exception non rattrapée...) plutôt que de
+// disperser des appels à lock.release() à chaque site de sortie : l'événement
+// "exit" est synchrone et se déclenche dans tous les cas, voir doc Node.
+process.on("exit", () => lock.release());
 
 /**
  * Délai maximal laissé à la tâche en cours pour se terminer d'elle-même
@@ -77,8 +95,11 @@ async function trackedWorker(request: AgentRequest): Promise<void> {
 }
 
 const queue = new TaskQueue(trackedWorker, (request) => request.key);
-const examined = new Set<number>();
-const attempts = new Map<number, number>();
+// §3.8 : SeenTracker unifie l'ancien `examined: Set<number>` et l'ancien
+// `attempts: Map<number, number>`, tous deux non bornés, en une seule
+// structure purgée par âge — voir seen.ts pour ce que chacun garantissait
+// réellement et pourquoi lookbackMs est l'horizon de purge correct.
+const seen = new SeenTracker(config.lookbackMs);
 
 /**
  * Porte la clé de la demande jusqu'au catch de poll(), pour que l'abandon
@@ -154,10 +175,6 @@ async function acknowledge(
 }
 
 async function handle(todo: Todo): Promise<void> {
-  if (process.env.FORCE_HANDLE_ERROR === "1") {
-    throw new Error("échec simulé pour tester le compteur");
-  }
-
   const result = await buildRequest(todo, bot);
 
   if (!result.ok) {
@@ -171,6 +188,14 @@ async function handle(todo: Todo): Promise<void> {
   const auth = authorize(request);
   if (!auth.allowed) {
     console.log(`  to-do #${todo.id} REFUSÉ : ${auth.reason}`);
+    // Voir authorize.ts pour le raisonnement complet (§3.11) : un dépôt hors
+    // périmètre reste silencieux (ne pas révéler l'existence du bot, ni
+    // permettre d'énumérer les dépôts surveillés) ; un auteur refusé sur un
+    // dépôt AUTORISÉ reçoit une réponse explicite (c'est peut-être un
+    // collègue légitime qu'il suffit d'ajouter à ALLOWED_USERS).
+    if (!auth.silent) {
+      await notifyUnauthorized(request, auth.reason);
+    }
     await finishTodo(todo.id);
     return;
   }
@@ -232,6 +257,35 @@ async function collectTodos(): Promise<Todo[]> {
   );
 }
 
+/**
+ * Réponse explicite au refus d'autorisation quand elle est utile au
+ * demandeur (voir authorize.ts pour la distinction avec le cas silencieux,
+ * §3.11) : sans elle, un collègue légitime sur un dépôt autorisé croirait le
+ * bot en panne au lieu de comprendre qu'il lui suffit de se faire ajouter à
+ * ALLOWED_USERS. Best-effort comme notifyGiveUp ci-dessous : un échec de
+ * cette notification ne doit pas empêcher de classer le to-do comme traité.
+ */
+async function notifyUnauthorized(
+  request: AgentRequest,
+  reason: string,
+): Promise<void> {
+  const body = [
+    `🤖 Demande de @${request.requester} refusée : ${reason}.`,
+    "",
+    "Si vous pensez que c'est une erreur, demandez à un mainteneur de vous ajouter à la liste des auteurs autorisés.",
+    "",
+    "<sub>cds-agent</sub>",
+  ].join("\n");
+
+  try {
+    await gitlab.createNote(request.projectId, request.kind, request.iid, body);
+  } catch (error) {
+    console.warn(
+      `    notification de refus impossible : ${(error as Error).message}`,
+    );
+  }
+}
+
 /** Le demandeur ne doit jamais rester sans réponse, même quand tout casse. */
 async function notifyGiveUp(todo: Todo, reason: string): Promise<void> {
   const kind = resourceKind(todo.target_type);
@@ -252,7 +306,7 @@ async function notifyGiveUp(todo: Todo, reason: string): Promise<void> {
 }
 
 async function poll(): Promise<void> {
-  const todos = (await collectTodos()).filter((todo) => !examined.has(todo.id));
+  const todos = (await collectTodos()).filter((todo) => !seen.hasExamined(todo.id));
   const stamp = new Date().toLocaleTimeString("fr-FR");
 
   if (todos.length === 0) {
@@ -274,11 +328,9 @@ async function poll(): Promise<void> {
     }
     try {
       await handle(todo);
-      examined.add(todo.id);
-      attempts.delete(todo.id);
+      seen.markExamined(todo.id);
     } catch (error) {
-      const count = (attempts.get(todo.id) ?? 0) + 1;
-      attempts.set(todo.id, count);
+      const count = seen.recordFailure(todo.id);
       const message = (error as Error).message;
 
       if (count < config.maxAttempts) {
@@ -292,8 +344,7 @@ async function poll(): Promise<void> {
       console.error(
         `  to-do #${todo.id} ABANDONNÉ après ${count} tentatives : ${message}`,
       );
-      examined.add(todo.id);
-      attempts.delete(todo.id);
+      seen.markExamined(todo.id);
       // Statut terminal explicite : sans lui, la demande resterait à
       // "claimed"/"acked" et un redémarrage tombant dans la fenêtre de
       // rattrapage des to-dos "done" récents la rejouerait, malgré
@@ -309,6 +360,17 @@ async function poll(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  // Posé avant tout appel réseau : si une autre instance tourne déjà, autant
+  // le savoir sans même attendre une réponse de GitLab (voir lock.ts, §3.9).
+  const lockResult = lock.acquire();
+  if (!lockResult.acquired) {
+    console.error(
+      `ARRÊT : une autre instance tourne déjà (PID ${lockResult.heldByPid}, verrou ${LOCK_FILE}). ` +
+        `Si ce PID n'existe plus, le verrou sera repris automatiquement au prochain démarrage.`,
+    );
+    process.exit(1);
+  }
+
   bot = await gitlab.currentUser();
   console.log(`Compte du PAT : @${bot.username} (id ${bot.id})`);
 
@@ -316,6 +378,11 @@ async function main(): Promise<void> {
     console.error(`ARRÊT : le PAT n'appartient pas à @${config.botUsername}.`);
     process.exit(1);
   }
+
+  // Capturé AVANT le moindre traitement : c'est la seule fenêtre où
+  // store.isEmpty() reflète fidèlement "tout premier démarrage" (voir
+  // bootstrap.ts, §3.7) plutôt qu'un état déjà modifié par ce run.
+  const isFreshStore = store.isEmpty();
 
   const interrupted = store.interrupted();
   if (interrupted.length > 0) {
@@ -340,6 +407,13 @@ async function main(): Promise<void> {
       );
     }
   }
+
+  await bootstrapIfFresh(isFreshStore, {
+    collectTodos,
+    finishTodo,
+    markExamined: (todoId) => seen.markExamined(todoId),
+    log: (message) => console.warn(message),
+  });
 
   console.log(`Journal : ${config.stateFile}`);
   console.log(`Polling toutes les ${config.pollIntervalMs / 1000} s.\n`);

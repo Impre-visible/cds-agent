@@ -19,7 +19,7 @@ const authorizeUrl = new URL("./authorize.ts", import.meta.url).href;
 function runAuthorize(
   env: Record<string, string>,
   request: AgentRequest,
-): { allowed: boolean; reason?: string } {
+): { allowed: boolean; reason?: string; silent?: boolean } {
   const script = [
     `import { authorize } from ${JSON.stringify(authorizeUrl)};`,
     `process.stdout.write(JSON.stringify(authorize(${JSON.stringify(request)})));`,
@@ -42,7 +42,11 @@ function runAuthorize(
       `sous-processus authorize.ts en échec (code ${result.status}) :\n${result.stderr}`,
     );
   }
-  return JSON.parse(result.stdout) as { allowed: boolean; reason?: string };
+  return JSON.parse(result.stdout) as {
+    allowed: boolean;
+    reason?: string;
+    silent?: boolean;
+  };
 }
 
 function makeRequest(overrides: Partial<AgentRequest> = {}): AgentRequest {
@@ -112,5 +116,45 @@ describe("authorize", () => {
       makeRequest({ projectPath: "Grp/Repo", requester: "Alice" }),
     );
     assert.equal(result.allowed, true);
+  });
+});
+
+// §3.11 : le refus ne doit plus être uniformément silencieux — voir la doc
+// du type Authorization dans authorize.ts pour le raisonnement complet.
+describe("authorize — silence vs réponse explicite (§3.11)", () => {
+  test("dépôt hors liste blanche : silencieux — répondre énumérerait les dépôts surveillés", () => {
+    const result = runAuthorize(
+      { ALLOWED_PROJECTS: "grp/autre-repo", ALLOWED_USERS: "alice" },
+      makeRequest(),
+    );
+    assert.equal(result.allowed, false);
+    assert.equal(result.silent, true);
+  });
+
+  test("ALLOWED_PROJECTS vide : silencieux, même chose qu'un dépôt hors périmètre", () => {
+    const result = runAuthorize(
+      { ALLOWED_PROJECTS: "", ALLOWED_USERS: "alice" },
+      makeRequest(),
+    );
+    assert.equal(result.allowed, false);
+    assert.equal(result.silent, true);
+  });
+
+  test("auteur hors liste blanche sur un dépôt AUTORISÉ : réponse explicite — c'est peut-être un collègue légitime", () => {
+    const result = runAuthorize(
+      { ALLOWED_PROJECTS: "grp/repo", ALLOWED_USERS: "bob" },
+      makeRequest({ requester: "alice" }),
+    );
+    assert.equal(result.allowed, false);
+    assert.equal(result.silent, false);
+  });
+
+  test("ALLOWED_USERS vide alors que le dépôt est autorisé : réponse explicite, pas silencieuse", () => {
+    const result = runAuthorize(
+      { ALLOWED_PROJECTS: "grp/repo", ALLOWED_USERS: "" },
+      makeRequest(),
+    );
+    assert.equal(result.allowed, false);
+    assert.equal(result.silent, false);
   });
 });
