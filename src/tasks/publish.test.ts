@@ -32,6 +32,17 @@ interface FakeNote {
 let notes: FakeNote[] = [];
 let nextNoteId = 1;
 
+// §5.4 : configurable par test, pour simuler soit une MR qui n'a pas bougé
+// (SHA inchangés), soit une MR mise à jour pendant la review (SHA
+// différents), soit une régénération transitoire de GitLab (tableau vide,
+// voir currentDiffRefs dans publish.ts). Par défaut : une seule version,
+// identique aux SHA "figés" que context() utilise ci-dessous.
+let versions: {
+  base_commit_sha: string;
+  start_commit_sha: string;
+  head_commit_sha: string;
+}[] = [{ base_commit_sha: "base", start_commit_sha: "start", head_commit_sha: "head" }];
+
 function addNote(body: string): FakeNote {
   const note: FakeNote = {
     id: nextNoteId++,
@@ -64,13 +75,7 @@ before(async () => {
       const path = url.pathname;
 
       if (req.method === "GET" && /\/merge_requests\/\d+\/versions$/.test(path)) {
-        sendJson(res, 200, [
-          {
-            base_commit_sha: "base",
-            start_commit_sha: "start",
-            head_commit_sha: "head",
-          },
-        ]);
+        sendJson(res, 200, versions);
         return;
       }
 
@@ -126,9 +131,12 @@ after(async () => {
 beforeEach(() => {
   notes = [];
   nextNoteId = 1;
+  versions = [
+    { base_commit_sha: "base", start_commit_sha: "start", head_commit_sha: "head" },
+  ];
 });
 
-function context(): TaskContext {
+function context(diffRefs: TaskContext["diffRefs"] = null): TaskContext {
   return {
     instanceUrl: baseUrl,
     projectId: 42,
@@ -140,11 +148,16 @@ function context(): TaskContext {
     requester: "alice",
     requestText: "fais une review",
     linkedIssue: null,
-    diffRefs: null,
+    diffRefs,
     files: [],
     sourceBranch: "feature",
   };
 }
+
+// Les SHA "figés" par buildContext() au moment (fictif) de la construction du
+// contexte — antérieur à la publication, voir §5.4. Identiques par défaut à
+// `versions` ci-dessus : la MR n'a pas bougé entre les deux.
+const FROZEN_SHAS = { base_sha: "base", start_sha: "start", head_sha: "head" };
 
 function file(path: string): DiffFile {
   return {
@@ -247,5 +260,84 @@ describe("publishReview — texte non fiable neutralisé avant publication (§5.
     ]);
     const body = notes[0]?.body ?? "";
     assert.ok(body.includes("Le point d'entrée /api/users renvoie 404 sans body."));
+  });
+});
+
+describe("publishReview — figeage des SHA contexte/publication (§5.4)", () => {
+  test("cas nominal : la MR n'a pas bougé, la review est publiée comme avant (SHA figés réutilisés)", async () => {
+    const outcomes = await publishReview(context(FROZEN_SHAS), [
+      remark("src/a.ts", "Une remarque."),
+    ]);
+
+    assert.equal(outcomes.length, 1);
+    assert.equal(notes.length, 1);
+  });
+
+  test("la MR a été mise à jour pendant la review : rien n'est publié, message explicite", async () => {
+    // buildContext() a figé ces SHA il y a plusieurs minutes ; entre-temps,
+    // quelqu'un a poussé un nouveau commit — /versions renvoie désormais un
+    // head_sha différent.
+    versions = [
+      { base_commit_sha: "base", start_commit_sha: "start", head_commit_sha: "head-nouveau" },
+    ];
+
+    await assert.rejects(
+      () =>
+        publishReview(context(FROZEN_SHAS), [
+          remark("src/a.ts", "Une remarque calculée sur l'ancien diff."),
+        ]),
+      /mise à jour pendant la review/,
+    );
+
+    // Rien ne doit avoir été publié sur la base de positions douteuses.
+    assert.equal(notes.length, 0);
+  });
+
+  test("un changement de base_sha (rebase de la branche cible) est aussi détecté", async () => {
+    versions = [
+      { base_commit_sha: "base-nouveau", start_commit_sha: "start", head_commit_sha: "head" },
+    ];
+
+    await assert.rejects(
+      () => publishReview(context(FROZEN_SHAS), [remark("src/a.ts", "Remarque")]),
+      /mise à jour pendant la review/,
+    );
+    assert.equal(notes.length, 0);
+  });
+
+  test("régénération transitoire de diff_refs côté GitLab (pas de version exploitable) : on republie quand même sur les SHA figés", async () => {
+    // Ne pas confondre avec une vraie mise à jour de la MR : /versions ne
+    // renvoie ici temporairement rien d'exploitable (recontrôle de
+    // mergeabilité en cours côté GitLab, voir context.ts), ce qui ne prouve
+    // pas que la MR a bougé.
+    versions = [];
+
+    const outcomes = await publishReview(context(FROZEN_SHAS), [
+      remark("src/a.ts", "Une remarque."),
+    ]);
+
+    assert.equal(outcomes.length, 1);
+    assert.equal(notes.length, 1);
+  });
+
+  test("l'idempotence (§5.5) survit au figeage des SHA : republier la même review ne crée pas de doublon", async () => {
+    const remarks = [remark("src/a.ts", "Manque un test pour le cas limite.")];
+
+    const first = await publishReview(context(FROZEN_SHAS), remarks);
+    assert.equal(first.length, 1);
+    assert.equal(notes.length, 1);
+
+    const second = await publishReview(context(FROZEN_SHAS), remarks);
+    assert.equal(second.length, 0);
+    assert.equal(notes.length, 1, "aucun commentaire supplémentaire créé");
+  });
+
+  test("context.diffRefs absent : résolution via mergeRequestVersions(), comme avant ce correctif", async () => {
+    const outcomes = await publishReview(context(null), [
+      remark("src/a.ts", "Une remarque."),
+    ]);
+
+    assert.equal(outcomes.length, 1);
+    assert.equal(notes.length, 1);
   });
 });

@@ -213,6 +213,9 @@ async function handle(todo: Todo): Promise<void> {
     // Réservation AVANT toute écriture : en cas de crash, on préfère perdre
     // une demande plutôt que de la traiter deux fois. Sans effet si le
     // statut est déjà "claimed" ou "acked" (rejeu) : record() est monotone.
+    // Nuance documentée sur record() (store.ts) : cette garantie suppose que
+    // la ligne "claimed" a effectivement atteint le disque, ce
+    // qu'`appendFileSync` seul ne garantit pas (pas de fsync).
     store.record(request.key, todo.id, "claimed");
     console.log(`  to-do #${todo.id} → ${request.key} de @${request.requester}`);
     const marker = request.kind === "merge_requests" ? "!" : "#";

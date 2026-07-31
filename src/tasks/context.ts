@@ -132,12 +132,14 @@ export async function buildContext(
     }
 
     if (!diffRefs) {
-      // Échec signalé (log), non traité comme fatal ici : publishReview()
-      // retente sa propre résolution de SHA via mergeRequestVersions()
-      // avant de retomber sur context.diffRefs (voir tasks/publish.ts). Le
-      // figeage SHA contexte/publication proprement dit est traité
-      // ailleurs (T34) — on se contente ici de ne plus laisser
-      // `diffRefs: null` être la seule trace de cet échec.
+      // Échec signalé (log), non traité comme fatal ici : diffRefs reste
+      // `null` dans le contexte, et publishReview() (§5.4, tasks/publish.ts)
+      // sait retenter sa propre résolution de SHA via
+      // mergeRequestVersions() dans ce cas précis — seule situation où elle
+      // le fait, puisqu'il n'y a alors aucun SHA figé ici à réutiliser ni à
+      // comparer pour détecter un changement de la MR pendant la review. On
+      // se contente ici de ne plus laisser `diffRefs: null` être la seule
+      // trace de cet échec.
       console.warn(
         `    diff_refs indisponible après ${DIFF_REFS_RETRIES} tentatives (${(DIFF_REFS_RETRIES * DIFF_REFS_DELAY_MS) / 1000}s d'attente) — le contexte part sans SHA figés`,
       );

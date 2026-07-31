@@ -1,4 +1,11 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 
 /**
@@ -52,6 +59,20 @@ interface Entry {
 }
 
 /**
+ * §6.6 : au-delà de ce nombre de lignes brutes relues au démarrage, on
+ * compacte (voir compact() ci-dessous) plutôt que de laisser le fichier
+ * grossir indéfiniment. Un cycle de vie complet (claimed → acked → running →
+ * done|failed) écrit jusqu'à quatre lignes pour une seule demande alors
+ * qu'une seule information utile subsiste au final (son dernier statut) :
+ * à quelques centaines de demandes par jour, ce seuil est franchi en
+ * quelques jours d'exploitation, ce qui borne à la fois le temps de
+ * relecture au démarrage et l'empreinte mémoire — sans pour autant compacter
+ * à chaque redémarrage un fichier encore petit (le cas courant, en
+ * développement ou juste après un démarrage à blanc).
+ */
+const COMPACT_THRESHOLD_LINES = 500;
+
+/**
  * Décide si une demande peut être (re)traitée, à partir de son statut connu.
  * Fonction pure, exportée séparément de la classe pour être testable sans
  * fichier ni horloge (voir store.test.ts) — c'est elle qui remplace l'ancien
@@ -74,7 +95,11 @@ export function canProcess(status: RequestStatus | undefined): boolean {
 }
 
 export class RequestStore {
-  private readonly states = new Map<string, RequestStatus>();
+  // Une seule entrée par clé : le dernier statut connu, avec assez
+  // d'information (todoId, at, reason) pour pouvoir réécrire une ligne
+  // équivalente lors d'un compactage (voir compact()) sans rien perdre de ce
+  // qu'un lecteur du fichier pourrait vouloir inspecter après coup.
+  private readonly latest = new Map<string, Entry>();
 
   // Champ déclaré explicitement (plutôt qu'en propriété de paramètre du
   // constructeur) : le mode "type stripping" natif de Node n'accepte pas la
@@ -87,8 +112,10 @@ export class RequestStore {
     mkdirSync(dirname(path), { recursive: true });
     if (!existsSync(path)) return;
 
+    let rawLines = 0;
     for (const line of readFileSync(path, "utf8").split("\n")) {
       if (!line.trim()) continue;
+      rawLines++;
       try {
         const entry = JSON.parse(line) as Entry;
         // Relecture rétrocompatible : un fichier écrit par une version
@@ -96,22 +123,67 @@ export class RequestStore {
         // restent des valeurs valides de RequestStatus — aucune migration
         // n'est nécessaire, on applique juste le même garde-fou de rang que
         // pour une écriture en direct.
-        this.apply(entry.key, entry.status);
+        this.apply(entry);
       } catch {
         console.warn(`[store] ligne illisible ignorée : ${line.slice(0, 80)}`);
       }
     }
+
+    // §6.6 : compactage au démarrage, seulement si le fichier a dépassé le
+    // seuil — un fichier tout juste écrit n'a rien à gagner à être réécrit
+    // à chaque redémarrage. rawLines compte aussi les lignes corrompues :
+    // elles coûtent le même I/O et la même relecture qu'une ligne valide, et
+    // le compactage les purge définitivement (this.latest ne les contient
+    // de toute façon jamais).
+    if (rawLines > COMPACT_THRESHOLD_LINES) {
+      try {
+        this.compact();
+      } catch (error) {
+        // this.latest est déjà complet et correct en mémoire, peu importe
+        // que la réécriture physique ait réussi : un compactage manqué (par
+        // exemple disque plein, ou système de fichiers en lecture seule) ne
+        // doit pas empêcher le daemon de démarrer avec le fichier tel qu'il
+        // est — seulement le laisser un peu plus longtemps qu'espéré.
+        console.warn(
+          `[store] compactage échoué, fichier laissé tel quel : ${(error as Error).message}`,
+        );
+      }
+    }
   }
 
-  private apply(key: string, status: RequestStatus): boolean {
-    const current = this.states.get(key);
-    if (current !== undefined && RANK[status] <= RANK[current]) return false;
-    this.states.set(key, status);
+  private apply(entry: Entry): boolean {
+    const current = this.latest.get(entry.key);
+    if (current !== undefined && RANK[entry.status] <= RANK[current.status])
+      return false;
+    this.latest.set(entry.key, entry);
     return true;
   }
 
+  /**
+   * Réécrit le fichier avec une seule ligne par clé (son dernier statut
+   * connu) : ce que this.latest contient déjà en mémoire. Écrit dans un
+   * fichier temporaire puis renomme atomiquement par-dessus l'original —
+   * jamais de réécriture en place — pour qu'un crash pendant le compactage
+   * ne puisse jamais laisser le fichier dans un état à moitié écrit :
+   * `renameSync` remplace l'ancien fichier par le nouveau en une seule
+   * opération côté OS (même système de fichiers), ce qui n'est pas le cas
+   * d'une écriture directe sur `this.path` (qui laisserait un fichier
+   * tronqué, donc potentiellement illisible, si le process meurt au milieu).
+   * Si le process meurt entre l'écriture du temporaire et le renommage, le
+   * pire cas est un fichier `.tmp` orphelin à côté d'un `this.path` intact
+   * et jamais touché — jamais une corruption.
+   */
+  private compact(): void {
+    const tmpPath = `${this.path}.compact.tmp`;
+    const lines = [...this.latest.values()]
+      .map((entry) => JSON.stringify(entry))
+      .join("\n");
+    writeFileSync(tmpPath, lines.length > 0 ? `${lines}\n` : "", "utf8");
+    renameSync(tmpPath, this.path);
+  }
+
   statusOf(key: string): RequestStatus | undefined {
-    return this.states.get(key);
+    return this.latest.get(key)?.status;
   }
 
   /**
@@ -128,7 +200,7 @@ export class RequestStore {
    * traiter en retard.
    */
   isEmpty(): boolean {
-    return this.states.size === 0;
+    return this.latest.size === 0;
   }
 
   /**
@@ -136,6 +208,23 @@ export class RequestStore {
    * connu (voir RANK) sont silencieusement ignorées : le fichier reste un
    * journal fidèle des tentatives d'écriture, mais l'état "actuel" exposé
    * par statusOf() ne recule jamais.
+   *
+   * Durabilité : `appendFileSync` écrit dans le cache du système de
+   * fichiers, pas sur le disque — sans `fsync`, rien ne garantit qu'une
+   * ligne survit à un crash brutal de la machine (perte d'alimentation,
+   * kill -9 du process avant que le noyau n'ait vidé son cache), même si
+   * l'appel a déjà retourné. Le commentaire de handle() dans index.ts
+   * ("réservation AVANT toute écriture : en cas de crash, on préfère perdre
+   * une demande plutôt que de la traiter deux fois") est donc un peu
+   * optimiste dans le pire cas : une ligne "claimed" peut elle-même ne
+   * jamais atteindre le disque, auquel cas la demande n'est pas seulement
+   * perdue mais rejouée depuis zéro au redémarrage (canProcess() la
+   * retraite alors comme jamais vue) — la garantie réellement tenue est
+   * "jamais de double traitement silencieux tant que le fichier a
+   * effectivement été écrit", pas une garantie absolue de non-répétition.
+   * Non corrigé ici (un fsync à chaque écriture aurait un coût réel sur le
+   * chemin chaud de handle()) : ce commentaire documente l'écart entre ce
+   * que le code garantit et ce qu'il énonce, sans le corriger.
    */
   record(
     key: string,
@@ -143,8 +232,8 @@ export class RequestStore {
     status: RequestStatus,
     reason?: string,
   ): void {
-    if (!this.apply(key, status)) return;
     const entry: Entry = { key, todoId, status, at: new Date().toISOString(), reason };
+    if (!this.apply(entry)) return;
     appendFileSync(this.path, `${JSON.stringify(entry)}\n`, "utf8");
   }
 
@@ -158,8 +247,8 @@ export class RequestStore {
    * (running, voir canProcess()).
    */
   interrupted(): { key: string; status: RequestStatus }[] {
-    return [...this.states.entries()]
-      .filter(([, status]) => status !== "done" && status !== "failed")
-      .map(([key, status]) => ({ key, status }));
+    return [...this.latest.values()]
+      .filter((entry) => entry.status !== "done" && entry.status !== "failed")
+      .map((entry) => ({ key: entry.key, status: entry.status }));
   }
 }

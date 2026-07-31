@@ -6,6 +6,7 @@ import {
   writeFileSync,
   readFileSync,
   copyFileSync,
+  chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -271,5 +272,149 @@ describe("RequestStore — rétrocompatibilité du fichier d'état", () => {
     const store = new RequestStore(path);
     assert.equal(store.statusOf("note:200"), "claimed");
     assert.equal(store.statusOf("note:201"), "done");
+  });
+});
+
+describe("RequestStore — compactage (§6.6)", () => {
+  /** Écrit le cycle de vie complet (jusqu'à 4 lignes) d'une demande. */
+  function lifecycle(
+    key: string,
+    todoId: number,
+    finalStatus: "done" | "failed",
+  ): string[] {
+    return [
+      JSON.stringify({ key, todoId, status: "claimed", at: "2026-01-01T00:00:00.000Z" }),
+      JSON.stringify({ key, todoId, status: "acked", at: "2026-01-01T00:00:01.000Z" }),
+      JSON.stringify({ key, todoId, status: "running", at: "2026-01-01T00:00:02.000Z" }),
+      JSON.stringify({ key, todoId, status: finalStatus, at: "2026-01-01T00:00:03.000Z" }),
+    ];
+  }
+
+  test("un fichier de plusieurs milliers de lignes est compacté au démarrage, sans perte d'information", () => {
+    const path = freshPath();
+    const lines: string[] = [];
+    const expected = new Map<string, "done" | "failed">();
+
+    for (let i = 0; i < 400; i++) {
+      const key = `req:${i}`;
+      const finalStatus = i % 2 === 0 ? "done" : "failed";
+      lines.push(...lifecycle(key, i, finalStatus));
+      expected.set(key, finalStatus);
+    }
+    // 400 demandes × 4 lignes = 1600 lignes, bien au-delà du seuil.
+    writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
+
+    const store = new RequestStore(path);
+
+    // Rien n'est perdu : chaque demande garde son statut final exact.
+    for (const [key, status] of expected) {
+      assert.equal(store.statusOf(key), status);
+    }
+
+    // Le fichier sur disque a bien été réécrit : une ligne par demande
+    // (400), pas 1600.
+    const compacted = readFileSync(path, "utf8").split("\n").filter(Boolean);
+    assert.equal(compacted.length, 400);
+
+    // Un rechargement à partir du fichier compacté ne perd rien non plus.
+    const reloaded = new RequestStore(path);
+    for (const [key, status] of expected) {
+      assert.equal(reloaded.statusOf(key), status);
+    }
+  });
+
+  test("un fichier sous le seuil n'est pas réécrit", () => {
+    const path = freshPath();
+    const store = new RequestStore(path);
+    store.record("small:1", 1, "claimed");
+    store.record("small:1", 1, "acked");
+    const before = readFileSync(path, "utf8");
+
+    new RequestStore(path); // relecture : sous le seuil, pas de compactage
+    const after = readFileSync(path, "utf8");
+    assert.equal(after, before, "un petit fichier ne doit pas être touché");
+  });
+
+  test("une demande interrompue (statut non terminal) reste correctement rejouable après compactage", () => {
+    const path = freshPath();
+    const lines: string[] = [];
+    for (let i = 0; i < 300; i++) {
+      lines.push(...lifecycle(`req:${i}`, i, i % 2 === 0 ? "done" : "failed"));
+    }
+    // Une demande en plein cycle, jamais terminée.
+    lines.push(
+      JSON.stringify({ key: "orphan", todoId: 999, status: "claimed", at: "2026-01-01T00:00:00.000Z" }),
+    );
+    writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
+
+    const store = new RequestStore(path);
+    assert.equal(store.statusOf("orphan"), "claimed");
+    assert.equal(canProcess(store.statusOf("orphan")), true);
+
+    // Le fichier compacté conserve cette information au rechargement.
+    const reloaded = new RequestStore(path);
+    assert.equal(reloaded.statusOf("orphan"), "claimed");
+  });
+
+  test("un fichier .tmp orphelin laissé par une précédente tentative de compactage avortée n'empêche ni la relecture ni un nouveau compactage", () => {
+    const path = freshPath();
+    const lines: string[] = [];
+    for (let i = 0; i < 600; i++) {
+      lines.push(
+        JSON.stringify({ key: `k:${i}`, todoId: i, status: "claimed", at: "2026-01-01T00:00:00.000Z" }),
+      );
+    }
+    writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
+
+    // Simule une tentative de compactage passée, interrompue juste après
+    // l'écriture du fichier temporaire mais avant le renommage : un .tmp
+    // orphelin (contenu quelconque, potentiellement à moitié écrit), à côté
+    // du fichier réel resté, lui, parfaitement intact.
+    writeFileSync(`${path}.compact.tmp`, "{ceci n'est pas une ligne JSON valide", "utf8");
+
+    const store = new RequestStore(path);
+    for (let i = 0; i < 600; i++) {
+      assert.equal(store.statusOf(`k:${i}`), "claimed");
+    }
+
+    // Ce démarrage-ci dépasse aussi le seuil : le compactage a dû réussir
+    // malgré le .tmp orphelin (simplement écrasé, jamais lu).
+    const compacted = readFileSync(path, "utf8").split("\n").filter(Boolean);
+    assert.equal(compacted.length, 600);
+  });
+
+  test("un renommage qui échoue réellement (répertoire en lecture seule) laisse le fichier original intact, sans faire planter le démarrage", () => {
+    // Mocker node:fs échoue ici : les imports nommés ESM d'un module natif
+    // (import { renameSync } from "node:fs", utilisé par store.ts) sont des
+    // liaisons figées à la valeur d'origine, pas des accesseurs relisant une
+    // propriété mutable — remplacer fs.renameSync (ou fs.default.renameSync)
+    // après coup n'a aucun effet sur ce que store.ts appelle réellement.
+    // On simule donc un *vrai* échec de renameSync plutôt qu'un mock : un
+    // répertoire en lecture seule, sur lequel renameSync échoue réellement
+    // avec EACCES/EPERM (rename modifie l'entrée du répertoire, pas
+    // seulement le fichier).
+    const dir = mkdtempSync(join(root, "readonly-"));
+    const path = join(dir, "processed.jsonl");
+
+    const lines: string[] = [];
+    for (let i = 0; i < 600; i++) {
+      lines.push(
+        JSON.stringify({ key: `k:${i}`, todoId: i, status: "claimed", at: "2026-01-01T00:00:00.000Z" }),
+      );
+    }
+    const original = `${lines.join("\n")}\n`;
+    writeFileSync(path, original, "utf8");
+
+    chmodSync(dir, 0o555);
+    try {
+      // Le compactage échoue (renameSync refusé par le système de
+      // fichiers), mais ce n'est qu'une optimisation ratée : le démarrage ne
+      // doit pas planter pour autant, et le fichier original — jamais
+      // réécrit en place — reste tel quel.
+      assert.doesNotThrow(() => new RequestStore(path));
+      assert.equal(readFileSync(path, "utf8"), original);
+    } finally {
+      chmodSync(dir, 0o755); // pour que `after()` puisse nettoyer `root`
+    }
   });
 });

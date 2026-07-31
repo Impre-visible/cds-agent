@@ -92,20 +92,80 @@ async function alreadyPublished(
   return fingerprints;
 }
 
-async function resolveShas(context: TaskContext): Promise<DiffRefs> {
-  // La doc recommande les versions : le premier élément est la plus récente.
-  const [latest] = await gitlab.mergeRequestVersions(
-    context.projectId,
-    context.targetIid,
+/**
+ * Les SHA "actuellement" en tête côté GitLab, ou `null` si l'information
+ * n'est momentanément pas disponible. La doc recommande les versions : le
+ * premier élément est la plus récente.
+ *
+ * Peut renvoyer `null` sans que la MR ait bougé : GitLab vide temporairement
+ * ce genre d'information pendant un recontrôle de mergeabilité (voir la
+ * boucle d'attente de context.ts, DIFF_REFS_RETRIES) — ce n'est pas la même
+ * chose qu'un push réel, et il ne faut pas confondre les deux (voir
+ * resolveShas ci-dessous).
+ */
+async function currentDiffRefs(
+  projectId: number,
+  iid: number,
+): Promise<DiffRefs | null> {
+  const [latest] = await gitlab.mergeRequestVersions(projectId, iid);
+  if (!latest?.head_commit_sha) return null;
+  return {
+    base_sha: latest.base_commit_sha,
+    start_sha: latest.start_commit_sha,
+    head_sha: latest.head_commit_sha,
+  };
+}
+
+/** Un triplet de SHA identique terme à terme : même état de la MR. */
+function sameShas(a: DiffRefs, b: DiffRefs): boolean {
+  return (
+    a.base_sha === b.base_sha &&
+    a.start_sha === b.start_sha &&
+    a.head_sha === b.head_sha
   );
-  if (latest?.head_commit_sha) {
-    return {
-      base_sha: latest.base_commit_sha,
-      start_sha: latest.start_commit_sha,
-      head_sha: latest.head_commit_sha,
-    };
+}
+
+/**
+ * §5.4 : les positions des remarques ont été calculées par validateRemarks
+ * (diff.ts) sur context.files, obtenu au moment de buildContext() — soit
+ * potentiellement plusieurs minutes avant d'arriver ici, le temps que
+ * l'agent LLM tourne (jusqu'à config.agentTimeoutMs). Résoudre les SHA à
+ * *cet instant-ci* plutôt qu'à celui du calcul des positions reviendrait à
+ * publier, avec les SHA du nouveau diff si quelqu'un a poussé entre-temps,
+ * des positions calculées sur l'ancien : commentaires sur les mauvaises
+ * lignes, ou rafale de 400 (position invalide) qui bascule tout en repli
+ * fichier/général sans que rien ne le distingue d'un simple refus GitLab
+ * ponctuel.
+ *
+ * On fige donc les SHA dès buildContext() (context.diffRefs) et on ne fait
+ * plus, ici, que vérifier qu'ils sont toujours d'actualité :
+ * - context.diffRefs présent et toujours à jour (ou fraîcheur non vérifiable,
+ *   voir currentDiffRefs) → on le réutilise tel quel, comme avant ce
+ *   correctif ;
+ * - context.diffRefs présent mais périmé (la MR a réellement bougé pendant
+ *   la review) → on ABANDONNE plutôt que de publier des positions douteuses.
+ *   Un recalcul silencieux republierait des remarques que l'agent n'a pas
+ *   relues sur le nouveau code ; dire clairement à l'utilisateur de relancer
+ *   la demande est plus utile qu'une review qui a l'air correcte mais ne
+ *   l'est pas forcément ;
+ * - context.diffRefs absent (buildContext() n'a pas réussi à en figer un,
+ *   voir context.ts) → seul cas où on tente une résolution ici, faute de
+ *   mieux ; aucune fraîcheur à vérifier puisqu'il n'y a pas de référence à
+ *   comparer.
+ */
+async function resolveShas(context: TaskContext): Promise<DiffRefs> {
+  if (context.diffRefs) {
+    const current = await currentDiffRefs(context.projectId, context.targetIid);
+    if (current && !sameShas(current, context.diffRefs)) {
+      throw new Error(
+        "la MR a été mise à jour pendant la review, relancez la demande",
+      );
+    }
+    return context.diffRefs;
   }
-  if (context.diffRefs) return context.diffRefs;
+
+  const current = await currentDiffRefs(context.projectId, context.targetIid);
+  if (current) return current;
   throw new Error("aucun SHA exploitable : ni versions ni diff_refs");
 }
 
