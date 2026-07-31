@@ -259,12 +259,18 @@ les quarante-trois variables lues par `buildConfig()`, plus `LOG_LEVEL`/
 Chantier "projects.json" : la configuration par projet — dépôts et auteurs
 autorisés, capacités de l'agent, commandes d'installation/de test, image
 Docker, répertoires de test maison — a quitté les variables d'environnement
-pour un fichier JSON **versionné**, relu par des humains (une revue de code
-normale en repère un changement, ce qu'un `.env` ne permet pas) :
-`projects.json` (chemin configurable via `PROJECTS_FILE`, voir
-[Configuration](#configuration)). `projects.example.json` en donne un modèle
-complet ; **le fichier ne contient jamais de secret** — le token GitLab reste
-exclusivement dans l'environnement (`GITLAB_TOKEN`).
+pour un fichier JSON : `projects.json` (chemin configurable via
+`PROJECTS_FILE`, voir [Configuration](#configuration)).
+`projects.example.json` en donne un modèle complet ; **le fichier ne contient
+jamais de secret** — le token GitLab reste exclusivement dans
+l'environnement (`GITLAB_TOKEN`).
+
+`projects.json` est **gitignoré**, comme `.env` : il ne porte pas de secret,
+mais il nomme des dépôts internes et des utilisateurs, qu'on ne souhaite pas
+voir entrer dans l'historique git. Conséquence assumée : un changement de
+permissions ne laisse aucune trace révisable, et deux machines peuvent
+diverger sans que rien ne le signale — c'est à l'exploitant de tenir ce
+fichier à jour là où le daemon tourne.
 
 ```json
 {

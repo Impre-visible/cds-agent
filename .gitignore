@@ -4,9 +4,11 @@ state/
 todo-dumps/
 context-dump.json
 
-# projects.json (configuration par projet — dépôts/auteurs autorisés,
-# capacités, commandes, image Docker) N'EST PAS gitignoré, contrairement à
-# .env : il ne contient aucun secret (le token GitLab reste dans
-# l'environnement) et doit au contraire être versionné, pour être relu par
-# des humains comme tout autre fichier de configuration du dépôt — voir la
-# section "Capacités de l'agent" du README.
+# Configuration par projet : dépôts et auteurs autorisés, capacités,
+# commandes, image Docker. Aucun secret dedans — le token GitLab reste dans
+# l'environnement — mais le fichier nomme des dépôts internes et des
+# utilisateurs, qu'on ne veut pas voir entrer dans l'historique git.
+# Seul projects.example.json est versionné, comme .env / .env.example.
+# Conséquence à connaître : les changements de permissions ne laissent
+# aucune trace révisable, et deux machines peuvent diverger en silence.
+projects.json
