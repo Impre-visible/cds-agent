@@ -41,14 +41,14 @@ flowchart TD
     B -->|mention @bot valide| C[authorize: ALLOWED_PROJECTS / ALLOWED_USERS]
     C -->|autorisé, pas déjà traité| D[claimed: réservation dans le store]
     D --> E[file en mémoire, FIFO, 1 worker]
-    E --> F[accusé de réception + réaction emoji, to-do marqué done]
+    E --> F[note d'accusé de réception + réaction 👀, to-do marqué done]
     F --> G[worker: construction du contexte MR]
     G --> H{intention}
     H -->|review| I[clone superficiel, prompt + diff numéroté, agent en sandbox]
     I --> J[extraction JSON, validation, publication ligne / fichier / général]
     H -->|implémente les tests| K[clone superficiel, install, tests de référence, agent en sandbox]
     K --> L[contrôle HEAD + .git, garde-fou de chemin, tests rejoués, push si vert]
-    J --> M[commentaire de résultat posté sur la MR]
+    J --> M[la note d'accusé de réception est éditée : résultat + 👀 → ✅/❌]
     L --> M
 ```
 
@@ -72,13 +72,19 @@ Déroulé, dans l'ordre :
    ce stade ne rejoue jamais une demande déjà accusée.
 5. **File** — poussée dans une file en mémoire strictement séquentielle (un
    seul worker à la fois, quel que soit le dépôt).
-6. **Accusé de réception** — réaction `:eyes:` puis commentaire citant la
+6. **Accusé de réception** — réaction `:eyes:` puis une note citant la
    demande et sa position dans la file ; le to-do est marqué `done` côté
-   GitLab à ce stade, avant même que le worker ait commencé.
+   GitLab à ce stade, avant même que le worker ait commencé. Cette note est
+   la seule que le bot postera : elle sera **éditée** en fin de traitement
+   (étape 11) plutôt que suivie d'un second commentaire.
 7. **Contexte** — le worker récupère la MR, son diff, et le ticket qu'elle
    ferme (derniers commentaires humains inclus).
-8. **Intention** — détectée par mots-clés dans le texte de la demande :
-   « review/revue/relis » ou « tests… implémente/écris/ajoute/crée ».
+8. **Intention** — une commande explicite placée juste après la mention
+   (`@bot review` ou `@bot implement-tests`) l'emporte toujours. À défaut,
+   un repli par mots-clés reconnaît « review/revue/relis » ou
+   « tests… implémente/écris/ajoute/crée ». Le repli teste `review` en
+   premier : en cas d'ambiguïté, mieux vaut se tromper du côté qui n'écrit
+   rien dans le dépôt.
 9. **Exécution en sandbox** — clone superficiel du dépôt, prompt construit
    avec délimiteurs explicites autour de tout texte non fiable (demande,
    ticket, diff), agent lancé dans un conteneur Docker durci (réseau limité à
@@ -91,8 +97,11 @@ Déroulé, dans l'ordre :
     daemon reste seul committeur (`checkHeadIntegrity`), que seuls des
     fichiers de test ont été touchés (`tasks/guard.ts`), que la suite est
     verte, et que la branche n'est pas protégée — alors seulement, push.
-11. **Rapport** — un commentaire de résultat part toujours vers le
-    demandeur, y compris en cas d'échec.
+11. **Rapport** — la note d'accusé de réception (étape 6) est éditée pour
+    porter le résultat, et sa réaction passe de 👀 à ✅ ou ❌. Le demandeur
+    est toujours informé, y compris en cas d'échec. Si l'édition échoue —
+    note supprimée entre-temps — le résultat est publié dans une note
+    neuve plutôt que perdu.
 
 Le seul flux réellement câblé aujourd'hui est celui des **merge requests** :
 `src/tasks/router.ts` répond poliment sur toute autre cible (« Seules les
