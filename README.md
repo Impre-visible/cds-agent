@@ -22,6 +22,7 @@ sur un dépôt qui compte.
 - [Prérequis](#prérequis)
 - [Installation](#installation)
 - [Configuration](#configuration)
+- [Ce que le bot publie](#ce-que-le-bot-publie)
 - [Répondre dans un fil](#répondre-dans-un-fil)
 - [Capacités de l'agent](#capacités-de-lagent)
 - [Lancement](#lancement)
@@ -416,6 +417,33 @@ un run par mode est un tirage unique, et le non-déterminisme mesuré ici est
 précisément ce que ces passes cherchent à corriger. Trois runs par mode
 donnent une comparaison ; un seul donne une anecdote.
 
+## Ce que le bot publie
+
+Une seule règle : **une note n'est publiée que lorsqu'elle porte une
+information qu'on ne peut pas obtenir autrement.** Tout le reste passe par la
+réaction posée sur votre propre message, qui n'ajoute rien à la conversation.
+
+| Moment | Ce que vous voyez |
+|---|---|
+| Demande prise en compte | 👀 sur votre message — *aucune note* |
+| Revue terminée, remarques publiées | ✅ — les remarques sont déjà là, chacune sur sa ligne |
+| Revue terminée, rien à signaler | ✅ — *aucune note* |
+| Revue **partielle** (diff tronqué) | ✅ + une note qui le dit |
+| Tests poussés sur la branche | ✅ — *aucune note*, les commits sont visibles |
+| MR dédiée ouverte | ✅ + une note avec son adresse |
+| Mise en garde (capacités restreintes, relecture croisée) | ✅ + une note qui la porte |
+| À trancher (`tests-failing`, `review-flagged`) | 🔍 + le compte rendu complet |
+| Échec | ❌ + la cause |
+
+Ce qui disparaît des notes ne disparaît pas des **journaux** du daemon : durée,
+répartition des remarques par emplacement, position dans la file, revue
+partielle — tout y reste, c'est là que ça sert au diagnostic.
+
+La seule exception à la règle est délibérée : une revue **partielle** publie
+une note même si tout s'est bien passé. Une revue tronquée qui ne dit rien se
+lit exactement comme une revue complète sans remarque, et c'est le contresens
+qu'il faut éviter.
+
 ## Répondre dans un fil
 
 Chaque remarque de revue est publiée en tant que **fil** sur la ligne
@@ -445,10 +473,7 @@ ouvrant le fichier cité. Une explication qui justifie une remarque fausse est
 pire qu'une absence de réponse.
 
 La réponse arrive **dans le fil**, et rien n'est ajouté au niveau de la merge
-request : l'accusé de réception est supprimé une fois la réponse publiée. Ce
-qui reste comme signal de fin de traitement, c'est la **réaction** (✅ / ❌)
-posée sur votre propre message — elle ne crée aucune note. Sur une MR relue
-plusieurs fois, c'est ce qui évite de noyer la conversation sous des accusés.
+request (voir [Ce que le bot publie](#ce-que-le-bot-publie)).
 
 Trois points à connaître :
 

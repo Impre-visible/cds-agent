@@ -863,3 +863,80 @@ describe("reportInThread — répondre dans le fil sans polluer la MR", () => {
     assert.match(posted.body, /explication/);
   });
 });
+
+/**
+ * « Je m'en fous, la réaction suffit. S'il y a une erreur je veux bien, mais
+ * sinon pas nécessaire de dire réussi ou en cours. » — décision du
+ * propriétaire du projet, prise après avoir vu le résultat en usage réel.
+ *
+ * La règle qui en découle : une note n'est publiée que lorsqu'elle porte une
+ * information qu'on ne peut pas obtenir autrement.
+ */
+describe("report — un succès ne se raconte pas", () => {
+  test("body null : la réaction évolue, AUCUNE note n'est créée ni éditée", async () => {
+    routes.set(
+      "DELETE /api/v4/projects/42/merge_requests/7/notes/99/award_emoji/900",
+      (_req, res) => {
+        res.writeHead(204);
+        res.end();
+      },
+    );
+    let awardedName = "";
+    routes.set(
+      "POST /api/v4/projects/42/merge_requests/7/notes/99/award_emoji",
+      (req, res) => {
+        awardedName =
+          new URL(req.url ?? "/", "http://localhost").searchParams.get("name") ?? "";
+        respondJson(res, 201, { id: 901 });
+      },
+    );
+
+    await report(request({ ack: { ackNoteId: null, awardId: 900 } }), null, "delivered");
+
+    assert.equal(awardedName, "white_check_mark", "la réaction reste le compte rendu");
+    assert.ok(
+      !calls.some((c) => c.startsWith("POST /api/v4/projects/42/merge_requests/7/notes")
+        && !c.includes("award_emoji")),
+      "aucune note ne doit être créée",
+    );
+    assert.ok(
+      !calls.some((c) => c.startsWith("PUT ")),
+      "aucune note ne doit être éditée",
+    );
+  });
+
+  test("un corps non nul est toujours publié — une erreur reste dite", async () => {
+    let posted = "";
+    routes.set("POST /api/v4/projects/42/merge_requests/7/notes", (req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        posted = Buffer.concat(chunks).toString("utf8");
+        respondJson(res, 201, fakeNote(600));
+      });
+    });
+    routes.set(
+      "POST /api/v4/projects/42/merge_requests/7/notes/99/award_emoji",
+      (_req, res) => respondJson(res, 201, { id: 902 }),
+    );
+
+    await report(
+      request({ ack: { ackNoteId: null, awardId: null } }),
+      "🤖 La tâche a échoué",
+      "failed",
+    );
+
+    assert.match(posted, /La tâche a échoué/);
+  });
+
+  test("sans ack du tout, un corps non nul part quand même", async () => {
+    let created = false;
+    routes.set("POST /api/v4/projects/42/merge_requests/7/notes", (_req, res) => {
+      created = true;
+      respondJson(res, 201, fakeNote(601));
+    });
+
+    await report(request(), "🤖 message", "failed");
+    assert.equal(created, true);
+  });
+});

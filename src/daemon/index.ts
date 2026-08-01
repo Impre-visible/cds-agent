@@ -14,7 +14,6 @@ import { currentWorkspace } from "../agent/workspace.ts";
 import { SeenTracker } from "./seen.ts";
 import { bootstrapIfFresh } from "./bootstrap.ts";
 import { collectTodos as collectTodosWith } from "./todos.ts";
-import { ackBody } from "./ack.ts";
 import { InstanceLock } from "./lock.ts";
 import { log, withRequestContext } from "../log.ts";
 import { daemonStatus } from "./status.ts";
@@ -192,10 +191,7 @@ async function finishTodo(todoId: number): Promise<void> {
  * tasks/router.ts::report(), seul autre endroit qui connaît ces
  * identifiants, via AgentRequest.ack (types.ts).
  */
-async function acknowledge(
-  request: AgentRequest,
-  position: number,
-): Promise<AckHandle> {
+async function acknowledge(request: AgentRequest): Promise<AckHandle> {
   const { projectId, kind, iid, noteId } = request;
 
   let awardId: number | null = null;
@@ -209,13 +205,15 @@ async function acknowledge(
     log.warn(`réaction emoji impossible : ${(error as Error).message}`);
   }
 
-  const ackNote = await gitlab.createNote(
-    projectId,
-    kind,
-    iid,
-    ackBody(request, position),
-  );
-  return { ackNoteId: ackNote.id, awardId };
+  // Aucune note d'accusé de réception n'est postée : la réaction 👀 ci-dessus
+  // dit déjà « c'est pris en compte », sans rien ajouter à la conversation.
+  // Une note « Demande reçue, traitement en cours » n'apprend rien de plus et
+  // s'accumule à chaque demande sur une merge request active — décision du
+  // propriétaire du projet, prise après l'avoir vue en usage réel.
+  //
+  // `position` n'est donc plus publié ; il reste journalisé côté daemon (voir
+  // handle()), là où il sert au diagnostic.
+  return { ackNoteId: null, awardId };
 }
 
 async function handle(todo: Todo): Promise<void> {
@@ -301,7 +299,7 @@ async function handle(todo: Todo): Promise<void> {
         // construction, cette tâche est la seule sous cette clé (canProcess()
         // l'a autorisée plus haut) donc jamais dédupliquée au push.
         const position = queue.depth + 1;
-        const ack = await acknowledge(request, position);
+        const ack = await acknowledge(request);
         // `project!` : garanti non-null ici — authorize() n'a autorisé la
         // demande que parce que `project` n'était pas null (voir plus haut).
         const enqueued: AgentRequest = { ...request, ack, project: project! };
@@ -309,7 +307,7 @@ async function handle(todo: Todo): Promise<void> {
         const actualPosition = queue.push(enqueued);
         log.info(`position dans la file : ${actualPosition}`);
         store.record(request.key, todo.id, "acked");
-        log.info(`accusé de réception posté (note ${ack.ackNoteId})`);
+        log.info(`demande accusée par une réaction (aucune note postée)`);
 
         await finishTodo(todo.id);
       } catch (error) {

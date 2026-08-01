@@ -80,8 +80,14 @@ export type ResourceKind = "issues" | "merge_requests";
  * AgentRequest est le véhicule qui les relie (voir AgentRequest.ack).
  */
 export interface AckHandle {
-  /** Identifiant de la note d'accusé de réception, à éditer avec le résultat final. */
-  ackNoteId: number;
+  /**
+   * Identifiant de la note d'accusé de réception, à éditer avec le résultat
+   * final — `null` depuis qu'aucune note n'est postée à la réception (voir
+   * acknowledge() dans daemon/index.ts). La réaction 👀 posée sur la demande
+   * elle-même suffit à dire « c'est pris en compte », sans ajouter de note à
+   * la merge request.
+   */
+  ackNoteId: number | null;
   /**
    * Identifiant de la réaction 👀 posée sur la note/ressource déclenchante
    * (voir AgentRequest.noteId) au moment de l'accusé de réception, pour

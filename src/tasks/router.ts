@@ -393,12 +393,27 @@ async function evolveReaction(
  */
 export async function report(
   request: AgentRequest,
-  body: string,
+  body: string | null,
   outcome: TaskOutcome,
 ): Promise<void> {
+  // La réaction d'abord, et toujours : c'est le seul compte rendu d'une tâche
+  // qui s'est bien passée, et elle n'ajoute aucune note à la conversation.
+  if (request.ack) await evolveReaction(request, request.ack, outcome);
+
+  // `null` : rien à dire. Un « traitement terminé, tout va bien » n'apprend
+  // rien que la réaction ne dise déjà, et s'accumule à chaque demande sur une
+  // merge request active. On ne publie donc une note que lorsqu'elle porte une
+  // information qu'on ne peut pas obtenir autrement : une panne, une décision
+  // à prendre, un résultat partiel, une adresse à aller voir.
+  if (body === null) return;
+
   const fullBody = `${body}\n\n<sub>cds-agent</sub>`;
 
-  if (request.ack) {
+  // ackNoteId n'est plus renseigné depuis qu'aucune note n'est postée à la
+  // réception (voir acknowledge dans daemon/index.ts) ; le chemin d'édition
+  // reste là pour une demande accusée par une version antérieure du daemon,
+  // toujours en file au moment d'une mise à jour.
+  if (request.ack?.ackNoteId != null) {
     try {
       await gitlab.updateNote(
         request.projectId,
@@ -407,7 +422,6 @@ export async function report(
         request.ack.ackNoteId,
         fullBody,
       );
-      await evolveReaction(request, request.ack, outcome);
       return;
     } catch (error) {
       log.warn(
@@ -418,7 +432,6 @@ export async function report(
   }
 
   await gitlab.createNote(request.projectId, request.kind, request.iid, fullBody);
-  if (request.ack) await evolveReaction(request, request.ack, outcome);
 }
 
 /**
@@ -583,6 +596,7 @@ export async function reportInThread(
 
   if (request.ack) {
     await evolveReaction(request, request.ack, outcome);
+    if (request.ack.ackNoteId === null) return;
     try {
       await gitlab.deleteNote(
         request.projectId,
@@ -861,11 +875,22 @@ export async function runTask(request: AgentRequest): Promise<void> {
         "tests-red": "failed",
         "no-change": "failed",
       };
-      await report(
-        request,
-        messages[result.status] + capabilityNote + chainedReviewNote(result),
-        outcomes[result.status],
-      );
+      // Un succès ne se raconte pas : la réaction ✅ le dit, et le résultat
+      // (des commits sur la branche) est visible tout seul. Deux exceptions,
+      // parce qu'elles portent une information qu'on ne trouve nulle part
+      // ailleurs : une MR dédiée, dont il faut l'adresse pour aller la voir,
+      // et les mises en garde (capacités restreintes, constats de la
+      // relecture croisée) qui n'existent que dans ce compte rendu.
+      const caveats = capabilityNote + chainedReviewNote(result);
+      const delivered = outcomes[result.status] === "delivered";
+      const body =
+        !delivered || result.status === "mr-opened"
+          ? messages[result.status] + caveats
+          : caveats.trim() === ""
+            ? null
+            : `🤖${caveats}`;
+
+      await report(request, body, outcomes[result.status]);
       log.info(`[worker] terminé ${request.key} — ${result.status}`);
       return;
     }
@@ -890,15 +915,25 @@ export async function runTask(request: AgentRequest): Promise<void> {
       : "";
 
     if (remarks.length === 0) {
+      // Rien à signaler : la réaction ✅ suffit. Seule la troncature mérite
+      // une note — une revue partielle qui ne dit rien se lit comme une revue
+      // complète sans remarque, ce qui est exactement le contresens à éviter.
       await report(
         request,
-        `🤖 Revue terminée en ${seconds} s : aucune remarque exploitable. Les remarques produites ne correspondaient à aucun fichier du diff et ont été écartées.${truncationWarning}`,
+        truncated ? `🤖${truncationWarning}` : null,
         "delivered",
       );
       return;
     }
 
     const outcomes = await publishReview(executionContext, remarks);
+
+    // La répartition par emplacement (ligne / fichier / général) et le cas
+    // « déjà publiées lors d'un précédent passage » ne sont plus republiés sur
+    // la merge request : ils ne disaient rien que les remarques elles-mêmes ne
+    // montrent. Ils restent JOURNALISÉS ci-dessous, là où ils servent — c'est
+    // le compteur qui dit si le diff numéroté fait bien atterrir les remarques
+    // sur la bonne ligne (§5.3).
     const byPlacement = outcomes.reduce<Record<string, number>>(
       (acc, outcome) => {
         acc[outcome.placement] = (acc[outcome.placement] ?? 0) + 1;
@@ -907,25 +942,23 @@ export async function runTask(request: AgentRequest): Promise<void> {
       {},
     );
 
-    // outcomes peut être vide alors que remarks ne l'était pas : toutes les
-    // remarques avaient déjà été publiées lors d'un précédent passage sur
-    // cette même MR (§5.5, voir publishReview). Le détail par emplacement
-    // n'a alors aucun sens à afficher (parenthèses vides).
-    const detail =
-      outcomes.length > 0
-        ? ` (${Object.entries(byPlacement)
-            .map(([k, v]) => `${v} ${k}`)
-            .join(", ")}).`
-        : " — déjà publiée(s) lors d'un précédent passage, rien de neuf à poster.";
-
+    // Les remarques SONT le compte rendu : elles sont déjà publiées, chacune
+    // sur sa ligne. Y ajouter « revue terminée en 31 s, 3 remarques » ne fait
+    // que répéter ce qui est sous les yeux. Seule la troncature reste dite.
     await report(
       request,
-      `🤖 Revue terminée en ${seconds} s — ${outcomes.length} remarque(s) publiée(s)${detail}${truncationWarning}`,
+      truncated ? `🤖${truncationWarning}` : null,
       "delivered",
     );
 
     log.info(
-      `[worker] terminé ${request.key} — ${outcomes.length} remarque(s) en ${seconds} s`,
+      `[worker] terminé ${request.key} — ${outcomes.length} remarque(s) en ${seconds} s` +
+        (outcomes.length > 0
+          ? ` (${Object.entries(byPlacement)
+              .map(([placement, count]) => `${count} ${placement}`)
+              .join(", ")})`
+          : " — déjà publiée(s) lors d'un précédent passage, rien de neuf à poster") +
+        (truncated ? " — REVUE PARTIELLE (diff tronqué)" : ""),
     );
   } catch (error) {
     const message = (error as Error).message;
