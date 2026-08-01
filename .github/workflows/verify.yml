@@ -1,0 +1,61 @@
+# Miroir GitHub de .gitlab-ci.yml — les deux coexistent volontairement : le
+# projet cible GitLab (le daemon parle à l'API GitLab), mais le dépôt est
+# publié sur GitHub, et une CI qui ne tourne nulle part ne vaut rien.
+#
+# Les deux fichiers doivent rester alignés : mêmes jobs, mêmes commandes,
+# même version de Node. Toute modification de l'un appelle la même dans
+# l'autre.
+#
+# Comme côté GitLab, on ne lance JAMAIS le daemon lui-même : `npm run dev`
+# exigerait un GITLAB_TOKEN valide, un compte bot réel et un modèle
+# d'inférence joignable — rien de tout cela n'existe dans un runner. `npm
+# test` couvre le code sans dépendre d'aucun des deux : les points de contact
+# avec Docker et git sont testés via un faux binaire injecté, jamais le vrai.
+#
+# UN ÉCART ASSUMÉ avec .gitlab-ci.yml, et sa raison : GitLab utilise
+# directement `image: node:26-bookworm-slim`. Ici on passe par
+# `actions/setup-node` sur un runner ubuntu plutôt que par `container:`,
+# parce que les images node `-slim` ne contiennent pas git — `actions/checkout`
+# y retomberait sur un téléchargement d'archive via l'API REST, sans
+# historique ni métadonnées git. La version de Node, elle, reste identique.
+
+name: verify
+
+# GitLab déclenche à chaque push ; on reproduit ce comportement. `pull_request`
+# est conservé en plus parce qu'une PR venant d'un fork ne déclenche jamais
+# d'événement `push` sur ce dépôt. Conséquence connue et acceptée : une PR
+# ouverte depuis une branche du dépôt lui-même déclenche les deux événements,
+# donc deux exécutions.
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    name: tsc --noEmit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Le projet exécute les .ts directement via le type-stripping natif
+          # de Node (voir README) : la version majeure n'est pas négociable,
+          # elle est déclarée dans package.json (engines.node >= 26).
+          node-version: 26
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run check
+
+  test:
+    name: node --test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm test

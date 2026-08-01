@@ -34,6 +34,7 @@ sur un dépôt qui compte.
 - [Limites connues](#limites-connues)
 - [Tests](#tests)
 - [Documentation complémentaire](#documentation-complémentaire)
+- [Licence](#licence)
 
 ## Fonctionnement
 
@@ -997,12 +998,20 @@ Honnêtement, dans l'ordre où elles comptent le plus :
 npm test
 ```
 
-448 tests, `node --test` natif, aucune dépendance de test ajoutée. Les tests
+703 tests, `node --test` natif, aucune dépendance de test ajoutée. Les tests
 qui touchent Docker ou git injectent un faux binaire (voir
 `tests/agent/sandbox.test.ts`, `tests/agent/workspace.test.ts`) : la suite ne
 nécessite ni Docker réellement lancé, ni modèle d'inférence, ni token GitLab
-valide. `npm run check` (`tsc --noEmit`) est le seul contrôle de types ; les
-deux sont câblés dans `.gitlab-ci.yml`.
+valide. `npm run check` (`tsc --noEmit`) est le seul contrôle de types.
+
+Les deux sont câblés **deux fois**, volontairement : dans
+[`.gitlab-ci.yml`](./.gitlab-ci.yml) parce que le projet cible GitLab, et dans
+[`.github/workflows/verify.yml`](./.github/workflows/verify.yml) parce que le
+dépôt est publié sur GitHub — une CI qui ne tourne nulle part ne vaut rien.
+Les deux fichiers doivent rester alignés : mêmes jobs, mêmes commandes, même
+version de Node. Le seul écart est documenté en tête du workflow GitHub (les
+images `node:*-slim` ne contiennent pas git, donc `actions/setup-node` plutôt
+qu'un `container:`).
 
 ## Documentation complémentaire
 
@@ -1017,3 +1026,21 @@ deux sont câblés dans `.gitlab-ci.yml`.
 - [`projects.example.json`](./projects.example.json) — modèle complet du
   fichier de configuration par projet (voir
   [Capacités de l'agent](#capacités-de-lagent)).
+
+## Licence
+
+[GNU Affero General Public License v3.0](./LICENSE) (AGPL-3.0-only).
+
+Une conséquence à connaître avant de déployer ce daemon quelque part :
+**l'AGPL ajoute une obligation que la GPL n'a pas** (section 13). Il ne suffit
+pas de partager les sources quand on *distribue* le logiciel — il faut aussi
+les proposer aux utilisateurs qui y accèdent **à travers un réseau**. Or c'est
+exactement ce qu'est ce projet : un service qui tourne en continu et avec
+lequel on interagit à distance, par des commentaires GitLab. Quiconque en
+exploite une version modifiée doit donc en publier le code, même sans jamais
+en distribuer une copie.
+
+C'est délibéré pour ce type de logiciel. Si l'objectif était au contraire de
+laisser n'importe qui l'intégrer sans contrepartie, MIT ou Apache-2.0 seraient
+les choix adaptés — et il faudrait changer à la fois `LICENSE` et le champ
+`license` de `package.json`.
