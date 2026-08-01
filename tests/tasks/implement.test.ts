@@ -26,7 +26,22 @@ let buildPrompt: (
 ) => string;
 let buildInstallCommand: (installCommand: string, ignoreScripts: boolean) => string;
 let rollbackAgentChanges: (repo: string) => Promise<void>;
-let assertionsRanAndFailed: (output: string, pattern?: string) => boolean;
+let classifyRedSuite: (
+  output: string,
+  pattern?: string,
+) => "tests-failing" | "tests-broken";
+let deliveryGate: (
+  findings: { file: string; message: string }[] | undefined,
+) => "publish" | "quarantine";
+let preserveFlaggedTests: (
+  repo: string,
+  projectId: number,
+  targetIid: number,
+  branch: string,
+  requester: string,
+  requestText: string,
+  findings: { file: string; message: string }[],
+) => Promise<string>;
 let preserveFailingTests: (
   repo: string,
   projectId: number,
@@ -133,7 +148,7 @@ before(async () => {
     buildPrompt,
     buildInstallCommand,
     rollbackAgentChanges,
-    assertionsRanAndFailed,
+    classifyRedSuite,
     preserveFailingTests,
     readWrittenFiles,
     buildBotBranchName,
@@ -1010,35 +1025,62 @@ describe("openDedicatedMergeRequest (§A.3 : mode publishMode=\"dedicated-mr\")"
     });
   });
 
-  // Une MR Draft « à trancher » n'a de sens que si des assertions ont tourné :
-  // un fichier que le lanceur ne peut pas exécuter est du bruit, pas une
-  // découverte.
-  describe("assertionsRanAndFailed (fichier cassé ≠ assertion en échec)", () => {
-    test("Vitest, assertion réelle : la ligne de synthèse compte des failed", () => {
-      const output = " Test Files  1 failed | 5 passed (6)\n      Tests  1 failed | 92 passed (93)\n";
-      assert.equal(assertionsRanAndFailed(output), true);
+  // Campagne MR !5 : « Tests  4 failed | 70 passed » classé broken par
+  // l'ancienne heuristique — 70 assertions avaient tourné, et l'une des
+  // quatre rouges portait sur une limite de longueur, exactement ce que la
+  // mesure cherchait. « Broken » exige désormais une preuve structurelle,
+  // et le repli s'est inversé : sortie non reconnue = préserver.
+  describe("classifyRedSuite (fichier cassé ≠ assertion en échec, version post-MR !5)", () => {
+    test("le cas mesuré : 4 failed | 70 passed est une suite d'assertions, jamais un fichier cassé", () => {
+      const output = " Test Files  2 failed | 5 passed (7)\n      Tests  4 failed | 70 passed (74)\n";
+      assert.equal(classifyRedSuite(output), "tests-failing");
     });
 
-    test("Vitest, fichier cassé : le fichier échoue mais aucun test n'a tourné", () => {
-      const output = [
+    test("des séquences ANSI au milieu des compteurs ne changent pas le diagnostic", () => {
+      // Cause la plus probable du faux « broken » mesuré : la sortie réelle
+      // n'est pas la sortie affichée.
+      const output = " Tests  \x1b[31m4 failed\x1b[39m | \x1b[32m70 passed\x1b[39m (74)\n";
+      assert.equal(classifyRedSuite(output), "tests-failing");
+    });
+
+    test("fichier cassé prouvé : des FICHIERS échouent, zéro assertion en échec", () => {
+      const vitest = [
         "FAIL tests/broken.test.js [ tests/broken.test.js ]",
         "Error: Cannot find module '../src/inexistant'",
         " Test Files  1 failed | 5 passed (6)",
         "      Tests  92 passed (92)",
       ].join("\n");
-      assert.equal(assertionsRanAndFailed(output), false);
+      assert.equal(classifyRedSuite(vitest), "tests-broken");
+
+      const jest = "Test Suites: 1 failed, 5 passed, 6 total\nTests:       70 passed, 70 total\n";
+      assert.equal(classifyRedSuite(jest), "tests-broken");
     });
 
-    test("Jest et node:test sont couverts par le motif par défaut", () => {
-      assert.equal(assertionsRanAndFailed("Tests:       1 failed, 80 passed, 81 total"), true);
-      assert.equal(assertionsRanAndFailed("ℹ tests 12\nℹ pass 11\nℹ fail 1\n"), true);
-      assert.equal(assertionsRanAndFailed("ℹ tests 12\nℹ pass 12\nℹ fail 0\n"), false);
+    test("sortie non reconnue : préserver plutôt que jeter (repli inversé, c'est le point)", () => {
+      for (const output of [
+        "Segmentation fault",
+        "",
+        "quelque chose a échoué quelque part",
+        // Même un « Test Files failed » SANS ligne Tests lisible ne suffit
+        // pas à prouver le fichier cassé.
+        " Test Files  1 failed (1)\n",
+      ]) {
+        assert.equal(
+          classifyRedSuite(output),
+          "tests-failing",
+          `${JSON.stringify(output.slice(0, 40))} devait être préservé`,
+        );
+      }
     });
 
-    test("un motif par dépôt (commands.assertionPattern) remplace le défaut", () => {
-      const output = "ECHEC-ASSERTION: 3 cas rouges";
-      assert.equal(assertionsRanAndFailed(output), false, "le défaut ne le reconnaît pas");
-      assert.equal(assertionsRanAndFailed(output, "ECHEC-ASSERTION: \\d+"), true);
+    test("Jest et node:test, assertions réelles", () => {
+      assert.equal(classifyRedSuite("Tests:       1 failed, 80 passed, 81 total"), "tests-failing");
+      assert.equal(classifyRedSuite("ℹ tests 12\nℹ pass 11\nℹ fail 1\n"), "tests-failing");
+    });
+
+    test("un motif par dépôt garde son contrat binaire : match = assertions, sinon fichier cassé", () => {
+      assert.equal(classifyRedSuite("ECHEC-ASSERTION: 3", "ECHEC-ASSERTION: \\d+"), "tests-failing");
+      assert.equal(classifyRedSuite("sortie quelconque", "ECHEC-ASSERTION: \\d+"), "tests-broken");
     });
   });
 

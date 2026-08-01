@@ -207,33 +207,72 @@ export async function openDedicatedMergeRequest(
   return { branchName, mrUrl: mr.web_url };
 }
 
-/**
- * Atteste que des ASSERTIONS ont réellement tourné et échoué, par opposition
- * à un fichier que le lanceur n'a pas pu exécuter du tout.
- *
- * Le signal est discriminant et a été observé sur les deux cas réels : une
- * vraie assertion en échec produit une ligne de synthèse comptant les tests
- * échoués — « Tests  1 failed | 92 passed (93) » (Vitest),
- * « Tests: 1 failed, 80 passed » (Jest), « fail 1 » (node:test) — tandis
- * qu'un fichier cassé fait échouer le FICHIER sans qu'aucun test n'y tourne :
- * la ligne « Tests » ne compte alors que des passed. Cas mixte (un fichier
- * cassé ET une assertion en échec ailleurs) : le motif matche, on préserve —
- * il y a bien quelque chose à trancher.
- *
- * Par lanceur, donc par dépôt : projects.json peut fournir son propre motif
- * via commands.assertionPattern (voir src/projects.ts) pour un lanceur au
- * format de sortie différent. Insensible à la casse dans les deux cas.
- */
-export const DEFAULT_ASSERTION_FAILURE_RE =
-  /Tests[:\s]\s*\d+\s*failed|✖ fail(?:ing tests)?\s*[1-9]|\bfail\s+[1-9]\d*\b/i;
+/** Séquences de couleur ANSI — voir classifyRedSuite pour pourquoi on les retire. */
+const ANSI_ESCAPES_RE = /\x1b\[[0-9;]*m/g;
 
-/** Exportée pour être testée unitairement (voir implement.test.ts). */
-export function assertionsRanAndFailed(
+/**
+ * Classe une suite ROUGE : "tests-failing" (des assertions ont réellement
+ * tourné et échoué — quelque chose à trancher) ou "tests-broken" (au moins
+ * un fichier écrit n'a pas pu être exécuté, et AUCUNE assertion n'a échoué —
+ * du bruit, rien à trancher).
+ *
+ * Réécriture complète après la campagne sur la MR !5 : la version
+ * précédente (une regex positive, repli « broken » quand elle ne matchait
+ * pas) a classé « broken » un run à « Tests  4 failed | 70 passed » — 70
+ * assertions avaient tourné, et l'une des quatre rouges portait sur une
+ * limite de longueur, exactement ce que la mesure cherchait. Deux leçons,
+ * toutes deux appliquées ici :
+ *
+ * 1. Le SENS DU REPLI était le mauvais. Quand la sortie n'est pas reconnue,
+ *    l'ancien code jetait (broken) ; on préserve désormais (failing) —
+ *    perdre du travail peut coûter un vrai bug découvert, garder du bruit ne
+ *    coûte qu'une MR Draft à fermer. « Broken » exige maintenant une PREUVE
+ *    structurelle, jamais une absence de preuve.
+ * 2. La sortie réelle d'un lanceur n'est pas la sortie affichée : des
+ *    séquences ANSI peuvent s'intercaler dans « 4 failed » et faire échouer
+ *    un `\d+` sans que rien ne le montre à l'écran — cause la plus probable
+ *    du faux diagnostic mesuré. On nettoie avant de lire.
+ *
+ * Le critère « broken » : la ligne de synthèse des FICHIERS compte des
+ * échecs (« Test Files  1 failed » Vitest, « Test Suites: 1 failed » Jest)
+ * ALORS QUE la ligne des TESTS n'en compte aucun (que des passed, ou « no
+ * tests »). C'est la signature d'un fichier à zéro test collecté. Toute
+ * autre forme — synthèse absente, lanceur inconnu, sortie tronquée — retombe
+ * sur "tests-failing".
+ *
+ * Un motif par dépôt (commands.assertionPattern, projects.json) garde son
+ * contrat BINAIRE : il matche ⇒ failing, il ne matche pas ⇒ broken. Le repli
+ * conservateur ne s'applique qu'au défaut — un dépôt qui fournit son motif
+ * définit lui-même son signal, et l'assume.
+ */
+export function classifyRedSuite(
   output: string,
   pattern?: string,
-): boolean {
-  const re = pattern ? new RegExp(pattern, "i") : DEFAULT_ASSERTION_FAILURE_RE;
-  return re.test(output);
+): "tests-failing" | "tests-broken" {
+  const clean = output.replace(ANSI_ESCAPES_RE, "");
+
+  if (pattern) {
+    return new RegExp(pattern, "i").test(clean) ? "tests-failing" : "tests-broken";
+  }
+
+  // Des assertions ont échoué : Vitest « Tests  4 failed | 70 passed »,
+  // Jest « Tests:       4 failed, 70 passed », node:test « ℹ fail 4 ».
+  if (/(?:^|\n)[^\S\n]*Tests:?[^\S\n]+\d+[^\S\n]+failed/i.test(clean)) {
+    return "tests-failing";
+  }
+  const nodeTestFail = /(?:^|\n)[^\S\n]*(?:ℹ[^\S\n]*)?fail[^\S\n]+(\d+)\b/i.exec(clean);
+  if (nodeTestFail && Number(nodeTestFail[1]) > 0) return "tests-failing";
+
+  // Preuve structurelle du fichier cassé : des FICHIERS en échec, et une
+  // ligne de tests qui ne compte que des passed (ou aucun test).
+  const filesFailed = /(?:^|\n)[^\S\n]*Test (?:Files|Suites):?[^\S\n]+\d+[^\S\n]+failed/i.test(clean);
+  const testsAccounted =
+    /(?:^|\n)[^\S\n]*Tests:?[^\S\n]+\d+[^\S\n]+passed/i.test(clean) ||
+    /(?:^|\n)[^\S\n]*Tests:?[^\S\n]+no tests/i.test(clean);
+  if (filesFailed && testsAccounted) return "tests-broken";
+
+  // Sortie non reconnue : préserver vaut mieux que jeter.
+  return "tests-failing";
 }
 
 /**
@@ -971,7 +1010,7 @@ export async function runImplement(
 
       // Sur la sortie COMPLÈTE, pas la queue tronquée : la ligne de synthèse
       // est en fin de sortie dans les lanceurs connus, mais rien ne l'impose.
-      if (!assertionsRanAndFailed(verdict.output, project.commands.assertionPattern)) {
+      if (classifyRedSuite(verdict.output, project.commands.assertionPattern) === "tests-broken") {
         return {
           status: "tests-broken",
           detail:

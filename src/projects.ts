@@ -95,8 +95,12 @@ export interface CommandsConfig {
    * pu exécuter (faute de syntaxe, import manquant). tasks/implement.ts s'en
    * sert pour ne préserver en MR Draft "à trancher" que le premier cas : le
    * second est du bruit pur, rapporté comme un échec. Optionnel — le défaut
-   * (DEFAULT_ASSERTION_FAILURE_RE, implement.ts) couvre Vitest/Jest/node:test ;
-   * cette clé n'existe que pour un lanceur au format de sortie différent.
+   * (classifyRedSuite, implement.ts) couvre Vitest/Jest/node:test avec un
+   * repli conservateur (sortie non reconnue ⇒ préserver) ; cette clé n'existe
+   * que pour un lanceur au format de sortie différent. Attention : un motif
+   * fourni a un contrat BINAIRE — il matche ⇒ assertions en échec, il ne
+   * matche pas ⇒ fichier cassé — le repli conservateur ne s'applique qu'au
+   * défaut. Un dépôt qui fournit son motif définit son signal, et l'assume.
    */
   assertionPattern?: string;
 }
