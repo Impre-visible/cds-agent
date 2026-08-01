@@ -485,6 +485,192 @@ export function normalizeSeverity(raw: unknown): {
 }
 
 /**
+ * Extracteur de secours : reconstruit des remarques à partir d'une sortie en
+ * PROSE, quand ni le fichier ni extractJson n'ont donné de JSON.
+ *
+ * Mesuré le 1er août 2026 (campagne 3 revues × 3 passes sur la MR !5,
+ * qwen3.6-35b-a3b) : 4 passes sur 9 ont fini en « aucun JSON exploitable
+ * (code 0) ». Le modèle avait pourtant produit sept remarques toutes
+ * correctes, en markdown au lieu de JSON — dont un défaut que ce modèle est
+ * le seul de toute la campagne à avoir trouvé. Tout était jeté.
+ *
+ * Pourquoi cette stratégie plutôt qu'une relance de reformatage :
+ *
+ * 1. Elle ne peut pas faire pire. Elle ne tourne QUE sur une sortie qui
+ *    partait à la poubelle ; si elle ne reconnaît rien, la passe est perdue
+ *    exactement comme avant. Une relance, elle, coûte un appel de modèle et
+ *    plusieurs dizaines de secondes à chaque échec, et peut elle-même échouer
+ *    à rendre du JSON — le mode de défaillance qu'on corrige.
+ * 2. Elle est déterministe et testable sans modèle, donc verrouillable par
+ *    des tests unitaires sur les formats réellement observés. Une relance ne
+ *    se teste qu'avec un modèle sous la main.
+ * 3. Elle n'ajoute aucune variable aux campagnes de mesure. Une relance
+ *    ferait varier le nombre d'appels et la durée d'une passe à l'autre,
+ *    exactement au moment où l'on cherche à comparer des modes entre eux.
+ *
+ * Ce qu'elle ne fait PAS : décider si une remarque est recevable. Elle rend
+ * des objets bruts, de la même forme que le tableau `remarks` d'un JSON, qui
+ * traversent ensuite parseRemark puis validateRemarks comme n'importe quelle
+ * sortie de modèle. La frontière de confiance ne bouge pas d'un pouce — c'est
+ * ce qui rend acceptable un parseur aussi permissif : une ligne mal comprise
+ * ici ne produit pas une remarque fausse publiée, elle produit un candidat
+ * que validateRemarks rejettera faute d'appartenir au diff.
+ *
+ * Exportée pour être testée unitairement (voir review.test.ts).
+ */
+export function salvageRemarks(text: string): Record<string, unknown>[] {
+  const candidates: Record<string, unknown>[] = [];
+  for (const block of splitIntoBlocks(text)) {
+    const candidate = salvageBlock(block);
+    if (candidate) candidates.push(candidate);
+    if (candidates.length >= MAX_SALVAGED_REMARKS) break;
+  }
+  return candidates;
+}
+
+/**
+ * Plafond de sécurité : une sortie pathologique (un modèle qui recrache le
+ * dépôt entier) ne doit pas produire des milliers de candidats à valider. Le
+ * vrai plafond reste REVIEW_BUDGET côté modèle et MAX_REMARKS côté
+ * publication ; celui-ci n'est là que pour borner le travail.
+ */
+const MAX_SALVAGED_REMARKS = 100;
+
+/**
+ * Ce qui peut précéder une localisation sans lui retirer son statut
+ * d'EN-TÊTE de bloc : uniquement du bruit markdown et de la ponctuation.
+ *
+ * C'est ce qui distingue « **src/a.js:29** — error : ... » (localisation en
+ * tête, le message est ce qui suit) de « le test attend X alors que
+ * src/server.js:18 construit Y » (localisation citée au fil du texte, le
+ * message est la phrase entière). Un simple seuil de distance se trompait sur
+ * la seconde forme dès qu'elle était courte, et amputait le message de tout
+ * ce qui précédait la localisation — c'est-à-dire de l'essentiel.
+ *
+ * En cas d'hésitation, cette règle penche du côté qui ne perd rien : garder
+ * le bloc entier comme message répète au pire la localisation dans le texte.
+ */
+const SALVAGE_HEADER_NOISE_RE = /^[\s*_`~#>|\-–—:[(]*$/;
+
+/**
+ * `chemin/fichier.ext:123`. Le point suivi d'une extension est ce qui
+ * distingue une localisation d'un `objet.propriété` ordinaire, et les deux
+ * points suivis de chiffres écartent une phrase ordinaire. Les marqueurs
+ * markdown autour (`**`, backticks) n'appartiennent pas à la classe de
+ * caractères, donc `**src/a.js:29**` matche sans traitement préalable.
+ */
+const SALVAGE_LOCATION_RE = /([A-Za-z0-9_][\w./@+-]*\.[A-Za-z0-9]+):(\d+)/;
+
+/** Marqueur de liste ou de titre en tête de ligne, tous formats markdown. */
+const LIST_MARKER_RE = /^(?:[-*+]\s+|\d+[.)]\s+|#{1,6}\s+)/;
+
+/**
+ * Vocabulaire de gravité reconnu dans la prose : exactement celui de
+ * normalizeSeverity (barème + synonymes), jamais une seconde liste qui
+ * pourrait diverger. Trié par longueur décroissante pour que l'alternance
+ * regex préfère le plus long en cas de préfixe commun.
+ */
+const SALVAGE_SEVERITY_TOKENS = [
+  ...KNOWN_SEVERITIES,
+  ...Object.keys(SEVERITY_ALIASES),
+].sort((a, b) => b.length - a.length);
+
+/**
+ * Découpe une sortie en blocs, un par remarque probable. Un bloc s'arrête à
+ * une ligne vide ou au début d'un nouvel item de liste / titre ; les lignes
+ * d'un même item, que le modèle a pu replier sur plusieurs lignes, sont
+ * recollées en une seule.
+ */
+function splitIntoBlocks(text: string): string[] {
+  const blocks: string[] = [];
+  let current: string[] = [];
+
+  const flush = (): void => {
+    if (current.length > 0) blocks.push(current.join(" "));
+    current = [];
+  };
+
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (line === "") {
+      flush();
+      continue;
+    }
+    if (LIST_MARKER_RE.test(line)) flush();
+    current.push(line);
+  }
+  flush();
+
+  return blocks;
+}
+
+/**
+ * Un bloc → un candidat de remarque, ou null si rien d'identifiable.
+ * Défensif de bout en bout : aucun chemin ne jette, un bloc incompris est
+ * simplement ignoré sans compromettre les autres.
+ */
+function salvageBlock(block: string): Record<string, unknown> | null {
+  const stripped = block.replace(LIST_MARKER_RE, "").trim();
+  const location = SALVAGE_LOCATION_RE.exec(stripped);
+  const file = location?.[1];
+  const rawLine = location?.[2];
+  if (!file || !rawLine) return null;
+
+  const line = Number(rawLine);
+  if (!Number.isSafeInteger(line) || line < 1) return null;
+
+  // La localisation en tête annonce le message ; au milieu d'une phrase, elle
+  // en fait partie (voir SALVAGE_HEADER_NOISE_RE).
+  const tail = SALVAGE_HEADER_NOISE_RE.test(stripped.slice(0, location.index))
+    ? stripped.slice(location.index + location[0].length)
+    : stripped;
+
+  // Gravité : le PREMIER terme du barème rencontré dans le bloc. Imprécis par
+  // construction — un message qui contient « bug » sans être étiqueté sera lu
+  // comme "error". C'est assumé : cette valeur ne décide que de l'ordre de
+  // tri, jamais de la survie d'une remarque, et sous-classer une vraie erreur
+  // en "info" lui ferait courir le plafond de publication, ce qui serait pire.
+  const severity = new RegExp(
+    `\\b(${SALVAGE_SEVERITY_TOKENS.join("|")})\\b`,
+    "i",
+  ).exec(stripped)?.[1];
+
+  const message = salvageMessage(tail, stripped);
+  if (message === "") return null;
+
+  return {
+    file,
+    line,
+    message,
+    // Absente si rien n'a été reconnu : normalizeSeverity repliera sur "info"
+    // sans signaler de sévérité inventée, ce qui est exact — le modèle n'en a
+    // simplement pas donné.
+    ...(severity === undefined ? {} : { severity }),
+  };
+}
+
+/** Emphase markdown et ponctuation d'amorce, retirées sans toucher au fond. */
+const LEADING_SEPARATORS_RE = /^[\s:—–\-*|»>]+/;
+
+function salvageMessage(tail: string, fallback: string): string {
+  let message = tail.replace(/\*\*/g, "").trim();
+  message = message.replace(LEADING_SEPARATORS_RE, "");
+  // L'étiquette de gravité en tête est une redondance avec le champ severity,
+  // pas du contenu : « — **error** confirmé : ... » doit publier « confirmé :
+  // ... », pas « error confirmé : ... ».
+  message = message.replace(
+    new RegExp(`^(?:${SALVAGE_SEVERITY_TOKENS.join("|")})\\b`, "i"),
+    "",
+  );
+  message = message.replace(LEADING_SEPARATORS_RE, "").trim();
+
+  // Un message vide serait rejeté par parseRemark, donc la remarque perdue —
+  // exactement ce que ce correctif combat. On retombe alors sur le bloc
+  // entier, quitte à republier la localisation dans le texte.
+  return message === "" ? fallback.replace(/\*\*/g, "").trim() : message;
+}
+
+/**
  * Frontière de confiance avec le modèle : `JSON.parse` ne garantit que la
  * syntaxe, pas la forme. Un `as Remark[]` en amont serait un mensonge au
  * compilateur — cette fonction vérifie chaque champ un par un et renvoie
@@ -775,6 +961,47 @@ export function formatPassSummary(
   );
 }
 
+/**
+ * Par où les remarques d'une passe ont été récupérées.
+ *
+ * - `fichier`   : l'agent a écrit OUTPUT_FILE (jamais en revue sandboxée,
+ *                 où `edit` est refusé — voir permissionsFor).
+ * - `json-stdout` : du JSON exploitable sur la sortie standard, le cas normal.
+ * - `secours`   : aucun JSON, mais des remarques reconstruites depuis la prose
+ *                 (voir salvageRemarks). Passe qui aurait été PERDUE avant ce
+ *                 correctif.
+ */
+export type ReviewChannel = "fichier" | "json-stdout" | "secours";
+
+/**
+ * Récapitulatif des canaux d'une revue. Sans ce comptage, la fréquence du
+ * problème (4 passes sur 9 lors de la campagne du 1er août 2026) se subit au
+ * lieu de se mesurer : une fois le secours en place, une passe récupérée est
+ * indiscernable d'une passe native dans le résultat final. C'est précisément
+ * ce qu'il faut pouvoir compter pour savoir si le prompt, un jour, mérite
+ * d'être retouché.
+ *
+ * Exportée pour être testée unitairement (voir review.test.ts).
+ */
+export function formatChannelSummary(channels: ReviewChannel[]): string {
+  const counts = new Map<ReviewChannel, number>();
+  for (const channel of channels)
+    counts.set(channel, (counts.get(channel) ?? 0) + 1);
+
+  const order: ReviewChannel[] = ["fichier", "json-stdout", "secours"];
+  const parts = order
+    .filter((channel) => counts.has(channel))
+    .map((channel) => `${counts.get(channel)} × ${channel}`);
+
+  const salvaged = counts.get("secours") ?? 0;
+  return (
+    `canaux : ${parts.join(", ") || "aucun"}` +
+    (salvaged > 0
+      ? ` — ${salvaged} passe(s) récupérée(s) par l'extracteur de secours, perdue(s) avant ce correctif`
+      : "")
+  );
+}
+
 export interface ReviewResult {
   /** Ce qui est publié dans la MR : `retained` coupé à MAX_REMARKS. */
   remarks: ValidatedRemark[];
@@ -859,6 +1086,7 @@ export async function runReview(
 
     const passResults: ValidatedRemark[][] = [];
     const passDurations: number[] = [];
+    const passChannels: ReviewChannel[] = [];
     const passFailures: Error[] = [];
     let totalDurationMs = 0;
 
@@ -879,6 +1107,7 @@ export async function runReview(
         const outcome = await runReviewPass(workspace, prompt, context);
         passResults.push(outcome.remarks);
         passDurations.push(outcome.durationMs);
+        passChannels.push(outcome.channel);
         totalDurationMs += outcome.durationMs;
 
         if (config.reviewPasses > 1) {
@@ -886,7 +1115,7 @@ export async function runReview(
           log.info(
             `[revue] passe ${pass}/${config.reviewPasses} : ${tally.total} remarque(s) ` +
               `(${tally.fresh} nouvelle(s), ${tally.duplicates} doublon(s)), ` +
-              `${Math.round(tally.durationMs / 1000)} s`,
+              `${Math.round(tally.durationMs / 1000)} s, canal=${outcome.channel}`,
           );
         }
       } catch (error) {
@@ -909,6 +1138,9 @@ export async function runReview(
 
     const remarks = aggregateRemarks(passResults, aggregation);
     const published = remarks.slice(0, config.maxRemarks);
+    // Toujours journalisé, même à une seule passe : c'est ce comptage qui
+    // permettra de mesurer la fréquence du problème plutôt que de la subir.
+    log.info(`[revue] ${formatChannelSummary(passChannels)}`);
     if (config.reviewPasses > 1) {
       log.info(
         `[revue] ${formatPassSummary(
@@ -959,7 +1191,11 @@ async function runReviewPass(
   workspace: { repo: string; meta: string },
   prompt: string,
   context: MergeRequestContext,
-): Promise<{ remarks: ValidatedRemark[]; durationMs: number }> {
+): Promise<{
+  remarks: ValidatedRemark[];
+  durationMs: number;
+  channel: ReviewChannel;
+}> {
   let result: AgentResult;
 
   if (config.useDocker) {
@@ -984,15 +1220,15 @@ async function runReviewPass(
       `agent interrompu après ${config.agentTimeoutMs / 60_000} min`,
     );
 
-  let raw: string | null = null;
-  let channel = "fichier";
+  let fileContent: string | null = null;
   try {
-    raw = readFileSync(join(workspace.repo, OUTPUT_FILE), "utf8");
+    fileContent = readFileSync(join(workspace.repo, OUTPUT_FILE), "utf8");
   } catch {
-    raw = extractJson(result.stdout);
-    channel = "stdout";
+    // Fichier absent : le cas NORMAL en revue sandboxée (`edit` refusé).
   }
-  if (!raw) {
+
+  const source = selectRemarkSource(fileContent, result.stdout);
+  if (source === null) {
     // La sortie brute, pas seulement le code : sans elle, un échec de
     // `docker run` lui-même (code 125, profil ou option invalide, image
     // absente) se présente comme « le modèle n'a rien produit » et envoie
@@ -1001,26 +1237,36 @@ async function runReviewPass(
     // --security-opt seccomp invalide.
     const tail = result.stdout.trim().slice(-600);
     throw new Error(
-      `aucun JSON exploitable, ni fichier ni stdout (code ${result.code})` +
+      `aucune remarque exploitable — ni fichier, ni JSON sur stdout, ni prose ` +
+        `reconnaissable par l'extracteur de secours (code ${result.code})` +
         (tail
           ? ` — dernière sortie de l'agent :\n${tail}`
           : " — sortie vide"),
     );
   }
-  log.info(`JSON récupéré via ${channel}`);
 
-  const parsed = JSON.parse(raw) as { remarks?: unknown };
-  if (!Array.isArray(parsed.remarks))
-    throw new Error(`JSON sans tableau "remarks"`);
+  const { items, channel } = source;
+  if (channel === "secours") {
+    // warn, pas info : la passe est sauvée, mais le modèle n'a pas respecté le
+    // format demandé. C'est un fait à voir passer, pas une routine.
+    log.warn(
+      `[revue] aucun JSON dans la sortie — ${items.length} remarque(s) ` +
+        `reconstruite(s) depuis la prose par l'extracteur de secours`,
+    );
+  } else {
+    log.info(`[revue] remarques récupérées via ${channel}`);
+  }
 
   // Frontière de confiance : chaque élément est vérifié un par un avant
   // d'entrer dans validateRemarks, qui lui continue de recevoir un
   // Remark[] réellement typé (son rôle reste l'appartenance au diff et la
-  // déduplication, pas la forme du JSON).
+  // déduplication, pas la forme du JSON). Les candidats de l'extracteur de
+  // secours empruntent exactement le même chemin : rien de ce qu'il produit
+  // n'échappe à cette vérification.
   const shaped: Remark[] = [];
   const shapeRejected: string[] = [];
   const inventedSeverities: string[] = [];
-  parsed.remarks.forEach((item, index) => {
+  items.forEach((item, index) => {
     const result = parseRemark(item, index);
     if ("rejected" in result) {
       shapeRejected.push(result.rejected);
@@ -1066,5 +1312,63 @@ async function runReviewPass(
   // Pas de slice(0, maxRemarks) ici : le plafond s'applique APRÈS le vote
   // (voir runReview), sinon une passe tronquée à 5 priverait le vote de
   // remarques qu'une autre passe aurait confirmées.
-  return { remarks: valid, durationMs: result.durationMs };
+  return { remarks: valid, durationMs: result.durationMs, channel };
+}
+
+/**
+ * Choisit par quel canal lire les remarques d'une passe : fichier, JSON sur
+ * stdout, puis extracteur de secours. Renvoie null quand aucun des trois ne
+ * donne quoi que ce soit — le seul cas où une passe est réellement perdue.
+ *
+ * Deux propriétés que cette fonction doit garantir, et que les tests
+ * verrouillent :
+ *
+ * 1. Un canal qui échoue n'en condamne pas un autre. Avant ce correctif, un
+ *    fichier présent mais illisible faisait remonter l'exception de
+ *    JSON.parse sans même que stdout soit regardé, et un JSON sans tableau
+ *    "remarks" jetait la passe au lieu de laisser sa chance au secours.
+ * 2. Un `{"remarks":[]}` légitime — le modèle a cherché et n'a rien trouvé —
+ *    ne tombe JAMAIS dans le secours : c'est un tableau vide, donc une
+ *    réponse, pas une absence de réponse. Sans cette distinction, un verdict
+ *    « rien à signaler » serait converti en remarques glanées dans la prose
+ *    environnante, ce qui fabriquerait des faux positifs à partir de rien.
+ *
+ * Exportée pour être testée unitairement, sans Docker ni modèle (voir
+ * review.test.ts).
+ */
+export function selectRemarkSource(
+  fileContent: string | null,
+  stdout: string,
+): { items: unknown[]; channel: ReviewChannel } | null {
+  if (fileContent !== null) {
+    const fromFile = readRemarksArray(fileContent);
+    if (fromFile !== null) return { items: fromFile, channel: "fichier" };
+  }
+
+  const extracted = extractJson(stdout);
+  if (extracted !== null) {
+    const fromStdout = readRemarksArray(extracted);
+    if (fromStdout !== null)
+      return { items: fromStdout, channel: "json-stdout" };
+  }
+
+  const salvaged = salvageRemarks(stdout);
+  if (salvaged.length > 0) return { items: salvaged, channel: "secours" };
+
+  return null;
+}
+
+/**
+ * Un texte supposé JSON → son tableau `remarks`, ou null si ce texte n'est ni
+ * du JSON valide ni un objet portant un tableau `remarks`. Ne jette jamais :
+ * c'est ce qui permet à selectRemarkSource d'essayer les canaux l'un après
+ * l'autre.
+ */
+function readRemarksArray(raw: string): unknown[] | null {
+  try {
+    const parsed = JSON.parse(raw) as { remarks?: unknown };
+    return Array.isArray(parsed.remarks) ? parsed.remarks : null;
+  } catch {
+    return null;
+  }
 }

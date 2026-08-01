@@ -57,6 +57,13 @@ let formatPassSummary: (
   retained: number,
   published: number,
 ) => string;
+type Channel = "fichier" | "json-stdout" | "secours";
+let salvageRemarks: (text: string) => Record<string, unknown>[];
+let selectRemarkSource: (
+  fileContent: string | null,
+  stdout: string,
+) => { items: unknown[]; channel: Channel } | null;
+let formatChannelSummary: (channels: Channel[]) => string;
 
 before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
@@ -73,6 +80,9 @@ before(async () => {
     aggregateRemarks,
     tallyPasses,
     formatPassSummary,
+    salvageRemarks,
+    selectRemarkSource,
+    formatChannelSummary,
   } = await import("../../src/tasks/review.ts"));
 });
 
@@ -985,5 +995,241 @@ describe("formatPassSummary — la ligne qui rend les trois modes comparables", 
       3,
     );
     assert.match(line, /mode=independent, agrégation=vote/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Extraction de secours : une passe dont le modèle a produit des remarques
+// identifiables ne doit plus être perdue.
+//
+// Mesuré le 1er août 2026 (3 revues × 3 passes, MR !5, qwen3.6-35b-a3b) :
+// 4 passes sur 9 ont fini en « aucun JSON exploitable (code 0) ». Le modèle
+// avait rendu sept remarques toutes correctes, en prose markdown — dont un
+// défaut que ce modèle est le seul de toute la campagne à trouver. Tout était
+// jeté.
+// ---------------------------------------------------------------------------
+
+/** Extrait réel d'une passe perdue de la campagne. */
+const PROSE_MESUREE = [
+  "Après analyse du diff et des fichiers sources, voici mes remarques :",
+  "",
+  "- **src/validateTodo.js:29** — **error** confirmé : `validateDescription` compare",
+  "  `value.length` à `MAX_TITLE_LENGTH` (200) au lieu de `MAX_DESCRIPTION_LENGTH` (2000).",
+  "",
+  "- **src/todosRouter.js:106** — **error** confirmé : `Math.min(start + perPage.value,",
+  "  total - 1)` soustrait 1 à la borne supérieure de `slice()`.",
+  "",
+  "- **src/validateTodo.js:13** — **error** : `validateTitle` utilise",
+  "  `value.length >= MAX_TITLE_LENGTH` au lieu de `>`.",
+  "",
+  "Voilà, ces trois points me semblent les plus importants.",
+].join("\n");
+
+describe("salvageRemarks — la prose n'est plus jetée", () => {
+  test("le format markdown RÉELLEMENT mesuré est reconstruit intégralement", () => {
+    const salvaged = salvageRemarks(PROSE_MESUREE);
+    assert.equal(salvaged.length, 3);
+    assert.deepEqual(
+      salvaged.map((r) => `${r.file}:${r.line}`),
+      ["src/validateTodo.js:29", "src/todosRouter.js:106", "src/validateTodo.js:13"],
+    );
+    assert.deepEqual(
+      salvaged.map((r) => r.severity),
+      ["error", "error", "error"],
+      "publier en info ce que le modèle a classé error le ferait couper par le plafond",
+    );
+  });
+
+  test("l'étiquette de gravité ne pollue pas le message, le fond est conservé", () => {
+    const [first] = salvageRemarks(PROSE_MESUREE);
+    assert.doesNotMatch(String(first?.message), /^error/);
+    assert.match(String(first?.message), /MAX_TITLE_LENGTH/);
+    assert.match(String(first?.message), /MAX_DESCRIPTION_LENGTH/);
+  });
+
+  test("un item replié sur plusieurs lignes est recollé, pas coupé en deux", () => {
+    const salvaged = salvageRemarks(PROSE_MESUREE);
+    // `slice()` est sur la SECONDE ligne de l'item ; s'il manque, le
+    // découpage a perdu la continuation.
+    assert.match(String(salvaged[1]?.message), /borne supérieure de `slice\(\)`/);
+    assert.equal(salvaged.length, 3, "aucune continuation ne doit devenir un item");
+  });
+
+  test("TOUT ce qui sort passe parseRemark : la frontière de confiance ne bouge pas", () => {
+    for (const [index, candidate] of salvageRemarks(PROSE_MESUREE).entries()) {
+      const parsed = parseRemark(candidate, index);
+      assert.ok(
+        !("rejected" in parsed),
+        `candidat #${index} rejeté : ${JSON.stringify(candidate)}`,
+      );
+    }
+  });
+
+  test("une sortie vide ne produit rien — jamais d'invention à partir de rien", () => {
+    assert.deepEqual(salvageRemarks(""), []);
+    assert.deepEqual(salvageRemarks("   \n\n  \n"), []);
+  });
+
+  test("de la prose SANS localisation ne produit rien", () => {
+    const bavardage = [
+      "J'ai lu l'ensemble des fichiers modifiés.",
+      "",
+      "Le code me semble globalement correct, rien de bloquant à signaler.",
+      "- La pagination mériterait un test supplémentaire.",
+    ].join("\n");
+    assert.deepEqual(salvageRemarks(bavardage), []);
+  });
+
+  test("une ligne mal formée n'emporte JAMAIS les bonnes", () => {
+    const mixte = [
+      "- ligne sans aucune localisation exploitable",
+      "- **src/a.js:12** — **warning** : borne mal calculée",
+      "- src/b.js:pas-un-nombre — error : illisible",
+      "- 1. src/c.js:0 — error : ligne 0 impossible",
+      "- **src/d.js:7** — **error** : second défaut réel",
+    ].join("\n");
+    const salvaged = salvageRemarks(mixte);
+    assert.deepEqual(
+      salvaged.map((r) => `${r.file}:${r.line}`),
+      ["src/a.js:12", "src/d.js:7"],
+    );
+  });
+
+  test("les formats de liste courants sont reconnus, gras ou non", () => {
+    const varie = [
+      "1. src/a.js:5 — error : numéroté, sans gras",
+      "2) src/b.js:6 - warning: parenthèse fermante et deux-points",
+      "* `src/c.js:7` — info — astérisque et backticks",
+      "#### src/d.js:8",
+      "   Le titre porte la localisation, le message suit.",
+    ].join("\n");
+    assert.deepEqual(
+      salvageRemarks(varie).map((r) => `${r.file}:${r.line}`),
+      ["src/a.js:5", "src/b.js:6", "src/c.js:7", "src/d.js:8"],
+    );
+  });
+
+  test("aucune gravité reconnue : le champ est ABSENT, pas inventé", () => {
+    const [candidate] = salvageRemarks("- src/a.js:12 — la borne est mal calculée");
+    assert.equal(candidate?.severity, undefined);
+    // parseRemark repliera sur "info" SANS signaler de sévérité inventée : le
+    // modèle n'en a effectivement donné aucune.
+    const parsed = parseRemark(candidate, 0) as { unknownSeverity?: string };
+    assert.equal(parsed.unknownSeverity, undefined);
+  });
+
+  test("une localisation citée en MILIEU de phrase garde le message entier", () => {
+    const [candidate] = salvageRemarks(
+      "- Le test attend un message figé alors que src/server.js:18 le construit dynamiquement.",
+    );
+    assert.equal(candidate?.file, "src/server.js");
+    assert.match(String(candidate?.message), /^Le test attend un message figé/);
+  });
+
+  test("un préfixe de TEXTE, même court, suffit à garder le message entier", () => {
+    // La distinction n'est pas une distance mais la nature de ce qui précède :
+    // du bruit markdown (en-tête) ou des mots (phrase). Ici « Dans » est un
+    // mot, donc la localisation fait partie du message.
+    const [candidate] = salvageRemarks("- Dans src/a.js:12 la borne est fausse.");
+    assert.match(String(candidate?.message), /^Dans src\/a\.js:12/);
+  });
+
+  test("un `objet.propriété` ordinaire n'est pas pris pour une localisation", () => {
+    assert.deepEqual(
+      salvageRemarks("- La valeur de config.maxRemarks vaut 5 par défaut."),
+      [],
+    );
+  });
+
+  test("une sortie pathologique est bornée", () => {
+    const enorme = Array.from(
+      { length: 500 },
+      (_, i) => `- src/f${i}.js:${i + 1} — error : défaut ${i}`,
+    ).join("\n");
+    assert.equal(salvageRemarks(enorme).length, 100);
+  });
+});
+
+describe("selectRemarkSource — trois canaux, essayés dans l'ordre", () => {
+  const JSON_NU =
+    '{"remarks":[{"file":"src/a.js","line":12,"severity":"error","message":"m"}]}';
+
+  test("les TROIS formats observés sur la campagne sont désormais exploités", () => {
+    // 1. JSON dans un bloc fenced
+    const fence = selectRemarkSource(null, "Voici :\n```json\n" + JSON_NU + "\n```\n");
+    assert.equal(fence?.channel, "json-stdout");
+    assert.equal(fence?.items.length, 1);
+
+    // 2. JSON nu sur stdout
+    const nu = selectRemarkSource(null, `blabla\n${JSON_NU}\nfin`);
+    assert.equal(nu?.channel, "json-stdout");
+    assert.equal(nu?.items.length, 1);
+
+    // 3. prose markdown — le format qui faisait perdre 4 passes sur 9
+    const prose = selectRemarkSource(null, PROSE_MESUREE);
+    assert.equal(prose?.channel, "secours");
+    assert.equal(prose?.items.length, 3);
+  });
+
+  test("le fichier prime quand il est exploitable", () => {
+    const source = selectRemarkSource(JSON_NU, PROSE_MESUREE);
+    assert.equal(source?.channel, "fichier");
+  });
+
+  test('{"remarks":[]} est une RÉPONSE, pas une absence : jamais de secours', () => {
+    // Le piège que ce test verrouille : un modèle qui a cherché et n'a rien
+    // trouvé, entouré de prose citant des fichiers. Sans la distinction
+    // « tableau vide » / « pas de tableau », le secours fabriquerait des faux
+    // positifs à partir d'un verdict correct.
+    const stdout = [
+      "J'ai relu src/a.js:12 et src/b.js:30, rien à signaler.",
+      '{"remarks":[]}',
+    ].join("\n");
+    const source = selectRemarkSource(null, stdout);
+    assert.equal(source?.channel, "json-stdout");
+    assert.deepEqual(source?.items, []);
+  });
+
+  test("un fichier présent mais ILLISIBLE ne condamne plus la passe", () => {
+    // Avant ce correctif, JSON.parse jetait ici sans que stdout soit regardé.
+    const source = selectRemarkSource("{ceci n'est pas du JSON", `x\n${JSON_NU}`);
+    assert.equal(source?.channel, "json-stdout");
+  });
+
+  test('un JSON sans tableau "remarks" laisse sa chance au secours', () => {
+    const source = selectRemarkSource(
+      null,
+      `{"remarks":"oups"}\n\n${PROSE_MESUREE}`,
+    );
+    assert.equal(source?.channel, "secours");
+    assert.equal(source?.items.length, 3);
+  });
+
+  test("null seulement quand il n'y a VRAIMENT rien : le seul cas de passe perdue", () => {
+    assert.equal(selectRemarkSource(null, ""), null);
+    assert.equal(
+      selectRemarkSource(null, "docker: Error response from daemon: no such image"),
+      null,
+    );
+  });
+});
+
+describe("formatChannelSummary — mesurer la fréquence au lieu de la subir", () => {
+  test("une passe récupérée est NOMMÉE comme telle, pas noyée dans le total", () => {
+    const line = formatChannelSummary(["json-stdout", "secours", "json-stdout"]);
+    assert.match(line, /2 × json-stdout/);
+    assert.match(line, /1 × secours/);
+    assert.match(line, /1 passe\(s\) récupérée\(s\) par l'extracteur de secours/);
+    assert.match(line, /perdue\(s\) avant ce correctif/);
+  });
+
+  test("aucun secours : rien n'est ajouté, la ligne reste sobre", () => {
+    const line = formatChannelSummary(["json-stdout", "json-stdout"]);
+    assert.match(line, /canaux : 2 × json-stdout/);
+    assert.doesNotMatch(line, /secours/);
+  });
+
+  test("toutes les passes perdues : la ligne le dit sans mentir sur un canal", () => {
+    assert.match(formatChannelSummary([]), /canaux : aucun/);
   });
 });

@@ -328,12 +328,24 @@ Chaque passe émet une ligne, puis la revue en émet une récapitulative :
 
 ```
 [revue] passe 2/3 (mode=exclusion)
-[revue] passe 2/3 : 6 remarque(s) (2 nouvelle(s), 4 doublon(s)), 15 s
+[revue] aucun JSON dans la sortie — 7 remarque(s) reconstruite(s) depuis la prose
+        par l'extracteur de secours
+[revue] passe 2/3 : 6 remarque(s) (2 nouvelle(s), 4 doublon(s)), 15 s, canal=secours
+[revue] canaux : 2 × json-stdout, 1 × secours — 1 passe(s) récupérée(s) par
+        l'extracteur de secours, perdue(s) avant ce correctif
 [revue] 3 passe(s) (mode=exclusion, agrégation=union) : 5 + 2 + 0 remarque(s)
         nouvelle(s), 4 doublon(s), 41 s → 7 distincte(s), 7 retenue(s), 5 publiée(s)
 [revue] plafond de publication atteint : 2 remarque(s) retenue(s) non publiée(s) (MAX_REMARKS=5)
 ```
 
+- **`canal=`** / **`canaux :`** — par où les remarques ont été lues :
+  `fichier` (l'agent a écrit `.cds-review.json` — jamais en revue sandboxée),
+  `json-stdout` (le cas normal), `secours` (aucun JSON, remarques reconstruites
+  depuis la prose par `salvageRemarks`). Une passe `secours` est une passe qui
+  **aurait été perdue** : mesuré le 1er août 2026, 4 passes sur 9 finissaient
+  en « aucun JSON exploitable » alors que le modèle avait produit sept
+  remarques correctes en markdown. La ligne `canaux :` compte ces
+  récupérations pour que leur fréquence se mesure au lieu de se subir.
 - **`N nouvelle(s)`** — remarques dont la clé `fichier:ligne` n'était apparue
   dans **aucune** passe précédente. C'est la métrique centrale : si la passe 3
   n'apporte jamais rien, le protocole est à deux passes, pas trois.
