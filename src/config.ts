@@ -295,6 +295,14 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
      * prix d'un appel de modèle en moins par implémentation.
      */
     chainedReview: env.CHAINED_REVIEW !== "0",
+    /**
+     * Bras témoin du protocole de validation des conventions de test (voir
+     * TEST_CONVENTIONS, tasks/implement.ts) : PROMPT_TEST_CONVENTIONS=0
+     * retire le bloc du prompt, pour mesurer un même jeu de bugs AVEC et
+     * SANS. Sans ce témoin, un score absolu ne dit pas d'où il vient. Actif
+     * par défaut — la coupure ne sert qu'aux campagnes de mesure.
+     */
+    promptTestConventions: env.PROMPT_TEST_CONVENTIONS !== "0",
     gitAuthorName: env.GIT_AUTHOR_NAME ?? "cds-agent",
     gitAuthorEmail: env.GIT_AUTHOR_EMAIL ?? "cds-agent@local.invalid",
     /**

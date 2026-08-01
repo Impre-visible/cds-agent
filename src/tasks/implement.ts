@@ -705,7 +705,11 @@ export function buildPrompt(
     // Placées AVANT l'instruction de lancement de la suite : ce sont des
     // consignes de rédaction, elles doivent être lues pendant que l'agent
     // écrit, pas après qu'il a commencé à faire passer ses tests.
-    `## Conventions de test à appliquer\n${TEST_CONVENTIONS.map((rule) => `- ${rule}`).join("\n")}`,
+    // Débranchables (PROMPT_TEST_CONVENTIONS=0) UNIQUEMENT pour le bras
+    // témoin des campagnes de mesure — voir config.ts.
+    config.promptTestConventions
+      ? `## Conventions de test à appliquer\n${TEST_CONVENTIONS.map((rule) => `- ${rule}`).join("\n")}`
+      : "",
     `Lance \`${testCommand}\` et corrige tes tests jusqu'à ce que tout passe.`,
     scope.forbidden,
     bugInstruction,
