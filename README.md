@@ -444,6 +444,12 @@ sur une campagne mesurée, trois faux positifs sur trois étaient vérifiables e
 ouvrant le fichier cité. Une explication qui justifie une remarque fausse est
 pire qu'une absence de réponse.
 
+La réponse arrive **dans le fil**, et rien n'est ajouté au niveau de la merge
+request : l'accusé de réception est supprimé une fois la réponse publiée. Ce
+qui reste comme signal de fin de traitement, c'est la **réaction** (✅ / ❌)
+posée sur votre propre message — elle ne crée aucune note. Sur une MR relue
+plusieurs fois, c'est ce qui évite de noyer la conversation sous des accusés.
+
 Trois points à connaître :
 
 - **Il faut mentionner le bot.** Le daemon est piloté par les to-dos GitLab

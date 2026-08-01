@@ -20,6 +20,7 @@ const BOT_USERNAME = "cds-bot";
 
 let detectIntent: typeof import("../../src/tasks/router.ts").detectIntent;
 let isThreadFollowUp: typeof import("../../src/tasks/router.ts").isThreadFollowUp;
+let reportInThread: typeof import("../../src/tasks/router.ts").reportInThread;
 let report: typeof import("../../src/tasks/router.ts").report;
 let intentRefusalReason: typeof import("../../src/tasks/router.ts").intentRefusalReason;
 let refuseRequestedCapabilities: typeof import("../../src/tasks/router.ts").refuseRequestedCapabilities;
@@ -65,7 +66,7 @@ before(async () => {
   process.env.GITLAB_REQUEST_TIMEOUT_MS = "500";
   process.env.GITLAB_MAX_RETRIES = "0";
 
-  ({ detectIntent, isThreadFollowUp, report, intentRefusalReason, refuseRequestedCapabilities, resolveIntent } =
+  ({ detectIntent, isThreadFollowUp, reportInThread, report, intentRefusalReason, refuseRequestedCapabilities, resolveIntent } =
     await import("../../src/tasks/router.ts"));
 });
 
@@ -733,5 +734,132 @@ describe("isThreadFollowUp — le contexte ne prime jamais sur une commande", ()
       isThreadFollowUp("ta review me paraît fausse ici", BOT_USERNAME),
       true,
     );
+  });
+});
+
+/**
+ * Chantier « fil de discussion » : une réponse dans un fil ne doit RIEN
+ * laisser au niveau de la merge request. Sans ça, chaque question ajoutait
+ * une note « Explication ajoutée dans le fil » qui noyait la conversation
+ * réelle sous des accusés de réception.
+ */
+describe("reportInThread — répondre dans le fil sans polluer la MR", () => {
+  const THREAD = { discussionId: "abc123" };
+
+  /**
+   * Enregistre la route de publication dans le fil ; renvoie ce qui y a été
+   * posté. Le corps est lu dans le FLUX de la requête, pas dans l'URL :
+   * createDiscussionNote passe par apiForm, qui envoie un
+   * application/x-www-form-urlencoded (voir gitlab/client.ts).
+   */
+  function acceptDiscussionNote(): { body: string } {
+    const captured = { body: "" };
+    routes.set(
+      "POST /api/v4/projects/42/merge_requests/7/discussions/abc123/notes",
+      (req, res) => {
+        const chunks: Buffer[] = [];
+        req.on("data", (c: Buffer) => chunks.push(c));
+        req.on("end", () => {
+          captured.body =
+            new URLSearchParams(Buffer.concat(chunks).toString("utf8")).get("body") ??
+            "";
+          respondJson(res, 201, { id: 777 });
+        });
+      },
+    );
+    return captured;
+  }
+
+  function acceptReaction(): void {
+    routes.set(
+      "DELETE /api/v4/projects/42/merge_requests/7/notes/99/award_emoji/900",
+      (_req, res) => {
+        res.writeHead(204);
+        res.end();
+      },
+    );
+    routes.set(
+      "POST /api/v4/projects/42/merge_requests/7/notes/99/award_emoji",
+      (_req, res) => respondJson(res, 201, { id: 901 }),
+    );
+  }
+
+  test("la réponse va dans le fil, l'accusé est SUPPRIMÉ, et aucune note n'est créée sur la MR", async () => {
+    const posted = acceptDiscussionNote();
+    acceptReaction();
+    routes.set("DELETE /api/v4/projects/42/merge_requests/7/notes/501", (_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+
+    await reportInThread(
+      request({ ack: { ackNoteId: 501, awardId: 900 } }),
+      THREAD,
+      "voici l'explication",
+      "delivered",
+    );
+
+    assert.match(posted.body, /voici l'explication/);
+    assert.ok(
+      calls.includes("DELETE /api/v4/projects/42/merge_requests/7/notes/501"),
+      "l'accusé de réception doit être supprimé",
+    );
+    assert.ok(
+      !calls.includes("POST /api/v4/projects/42/merge_requests/7/notes"),
+      "aucune note ne doit être créée au niveau de la merge request",
+    );
+    assert.ok(
+      !calls.includes("PUT /api/v4/projects/42/merge_requests/7/notes/501"),
+      "l'accusé ne doit pas être édité : il disparaît",
+    );
+  });
+
+  test("la RÉACTION survit à la suppression : elle est posée sur la note de l'auteur", async () => {
+    acceptDiscussionNote();
+    acceptReaction();
+    routes.set("DELETE /api/v4/projects/42/merge_requests/7/notes/501", (_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+
+    await reportInThread(
+      request({ ack: { ackNoteId: 501, awardId: 900 } }),
+      THREAD,
+      "explication",
+      "delivered",
+    );
+
+    // C'est ce qui reste comme signal de fin de traitement sans créer de note.
+    assert.ok(
+      calls.includes("POST /api/v4/projects/42/merge_requests/7/notes/99/award_emoji"),
+    );
+  });
+
+  test("si la publication dans le fil ÉCHOUE, on retombe sur la MR : rien n'est perdu", async () => {
+    // Pas de route pour le fil → 404. Mieux vaut une note de trop qu'un
+    // résultat qui disparaît.
+    routes.set("PUT /api/v4/projects/42/merge_requests/7/notes/501", (_req, res) =>
+      respondJson(res, 200, fakeNote(501)),
+    );
+    acceptReaction();
+
+    await reportInThread(
+      request({ ack: { ackNoteId: 501, awardId: 900 } }),
+      THREAD,
+      "explication",
+      "delivered",
+    );
+
+    assert.ok(calls.includes("PUT /api/v4/projects/42/merge_requests/7/notes/501"));
+    assert.ok(
+      !calls.includes("DELETE /api/v4/projects/42/merge_requests/7/notes/501"),
+      "l'accusé ne doit JAMAIS être supprimé quand la publication a échoué",
+    );
+  });
+
+  test("sans accusé de réception, la réponse part quand même dans le fil", async () => {
+    const posted = acceptDiscussionNote();
+    await reportInThread(request(), THREAD, "explication", "delivered");
+    assert.match(posted.body, /explication/);
   });
 });

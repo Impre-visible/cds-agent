@@ -540,6 +540,69 @@ function buildReviewFlaggedReport(result: ImplementResult, seconds: number): str
 }
 
 /**
+ * Publie un compte rendu DANS le fil, et ne laisse rien au niveau de la merge
+ * request.
+ *
+ * Sans ça, chaque question posée dans un fil laissait une note de plus sur la
+ * MR (« Explication ajoutée dans le fil »), alors que tout ce qui compte est
+ * déjà dans le fil : sur une MR relue plusieurs fois, ça noie la conversation
+ * réelle sous des accusés de réception.
+ *
+ * Ce qui subsiste comme signal de fin de traitement : la RÉACTION, posée sur
+ * la note de l'auteur de la demande (voir evolveReaction) — elle ne crée
+ * aucune note et survit à la suppression de l'accusé.
+ *
+ * Ordre des opérations, qui n'est pas indifférent : on ne supprime l'accusé
+ * QU'APRÈS avoir publié dans le fil. L'inverse ferait disparaître la seule
+ * trace de la demande si la publication échouait. Et si c'est la publication
+ * dans le fil qui échoue, on retombe sur report() au niveau de la MR : mieux
+ * vaut une note de trop qu'un résultat perdu.
+ */
+export async function reportInThread(
+  request: AgentRequest,
+  thread: { discussionId: string },
+  body: string,
+  outcome: TaskOutcome,
+): Promise<void> {
+  try {
+    await gitlab.createDiscussionNote(
+      request.projectId,
+      request.kind,
+      request.iid,
+      thread.discussionId,
+      `${body}\n\n<sub>cds-agent</sub>`,
+    );
+  } catch (error) {
+    log.warn(
+      `publication dans le fil impossible (${(error as Error).message}) — ` +
+        `repli sur un commentaire au niveau de la merge request`,
+    );
+    await report(request, body, outcome);
+    return;
+  }
+
+  if (request.ack) {
+    await evolveReaction(request, request.ack, outcome);
+    try {
+      await gitlab.deleteNote(
+        request.projectId,
+        request.kind,
+        request.iid,
+        request.ack.ackNoteId,
+      );
+    } catch (error) {
+      // Best-effort : l'accusé reste alors affiché « traitement en cours »,
+      // ce qui est trompeur — on l'édite pour dire où regarder plutôt que de
+      // le laisser mentir.
+      log.warn(
+        `suppression de l'accusé de réception impossible (${(error as Error).message})`,
+      );
+      await report(request, "🤖 Réponse publiée dans le fil concerné.", outcome);
+    }
+  }
+}
+
+/**
  * Répond dans le fil quand la demande est une relance d'une conversation où
  * le bot est déjà intervenu. Rend `true` si la demande a été prise en charge
  * ici — l'appelant s'arrête alors, il n'y a pas d'intention à résoudre.
@@ -587,7 +650,7 @@ async function answerInThread(
 
   const refusal = intentRefusalReason(request.kind, "review", project.capabilities);
   if (refusal) {
-    await report(request, `🤖 Demande refusée : ${refusal}.`, "failed");
+    await reportInThread(request, thread, `🤖 Demande refusée : ${refusal}.`, "failed");
     return true;
   }
 
@@ -604,10 +667,11 @@ async function answerInThread(
     );
 
     if (answer === undefined) {
-      // La question reste sans réponse : on le dit, plutôt que de laisser
-      // quelqu'un attendre devant un fil muet.
-      await report(
+      // La question reste sans réponse : on le dit DANS LE FIL, là où quelqu'un
+      // attend, plutôt que de laisser un fil muet.
+      await reportInThread(
         request,
+        thread,
         "🤖 Je n'ai pas réussi à produire d'explication (voir les journaux du daemon). Reformulez la question ou relancez.",
         "failed",
       );
@@ -618,14 +682,7 @@ async function answerInThread(
     // dépôt et du fil, tous deux non fiables. Même traitement qu'en publish.ts
     // (§5.6) — jamais une mention qui notifie réellement quelqu'un, jamais une
     // quick action exécutée avec le PAT du bot.
-    await gitlab.createDiscussionNote(
-      context.projectId,
-      request.kind,
-      context.targetIid,
-      thread.discussionId,
-      `${defuseMentions(answer)}\n\n<sub>cds-agent</sub>`,
-    );
-    await report(request, "🤖 Explication ajoutée dans le fil.", "delivered");
+    await reportInThread(request, thread, defuseMentions(answer), "delivered");
     return true;
   } finally {
     workspace.dispose();

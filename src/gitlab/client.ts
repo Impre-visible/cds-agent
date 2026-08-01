@@ -321,6 +321,25 @@ export const gitlab = {
       body: JSON.stringify({ body }),
     }),
 
+  /**
+   * Chantier « fil de discussion » : supprime une note du bot.
+   *
+   * Sert à retirer l'accusé de réception une fois la réponse publiée DANS le
+   * fil : sans ça, chaque question laisserait une note de plus au niveau de
+   * la merge request, alors que tout ce qui compte est déjà dans le fil. La
+   * réaction, elle, est posée sur la note de l'auteur (voir evolveReaction) —
+   * elle survit à cette suppression et reste le signal de fin de traitement.
+   */
+  deleteNote: (
+    projectId: number,
+    kind: ResourceKind,
+    iid: number,
+    noteId: number,
+  ) =>
+    api<void>(`/projects/${projectId}/${kind}/${iid}/notes/${noteId}`, {
+      method: "DELETE",
+    }),
+
   // Réponse typée (id de la réaction posée) : §6.10 en a besoin pour pouvoir
   // ensuite la supprimer (deleteAwardOnNote/deleteAwardOnResource ci-dessous)
   // au moment de la faire évoluer 👀 → ✅/❌, l'API award emoji ne proposant
