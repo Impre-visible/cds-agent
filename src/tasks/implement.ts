@@ -4,6 +4,7 @@ import { collectChanges, DEFAULT_CAPABILITIES, type RepoCapabilities } from "./g
 import { repoCapabilitiesFor, type ResolvedProject } from "../projects.ts";
 import { gitlab } from "../gitlab/client.ts";
 import { defuseMentions } from "../daemon/request.ts";
+import { runChainedReview, type ChainedFinding } from "./chained-review.ts";
 import {
   createWorkspace,
   fingerprintGitMeta,
@@ -85,7 +86,16 @@ export interface ImplementResult {
    * Republié dans le rapport pour que le demandeur juge sans avoir à rejouer
    * quoi que ce soit — le workspace, lui, est détruit immédiatement après.
    */
-  artifacts?: WrittenFile[];  /**
+  artifacts?: WrittenFile[];
+  /**
+   * Constats de la relecture croisée (voir tasks/chained-review.ts),
+   * renseigné pour "pushed" et "mr-opened" quand elle a tourné. La
+   * distinction compte pour le rapport : `undefined` = pas de relecture
+   * (option coupée ou passage en échec, journalisé), `[]` = elle a tourné et
+   * n'a rien trouvé.
+   */
+  chainedFindings?: ChainedFinding[];
+  /**
    * URL de la merge request ouverte par le bot. Renseigné pour "mr-opened"
    * (capacité publishMode="dedicated-mr") et pour "tests-failing" — où la MR
    * est en Draft et porte des tests rouges, seul moyen de ne pas détruire un
@@ -1022,6 +1032,18 @@ export async function runImplement(
       };
     }
 
+    // Relecture croisée AVANT publication : la suite est verte, mais une
+    // suite verte est précisément ce qu'un agent qui épouse un défaut
+    // produit (angle mort mesuré, voir tasks/chained-review.ts). Le résultat
+    // n'est jamais bloquant — la livraison a lieu quoi qu'il arrive, les
+    // constats partent dans le rapport comme points à vérifier.
+    const chainedFindings = await runChainedReview(
+      repo,
+      workspace.meta,
+      context.projectPath,
+      paths,
+    );
+
     // Le refus de pousser sur une branche protégée reste inconditionnel,
     // MAIS ne s'applique qu'au mode "source-branch" : en mode "dedicated-mr"
     // (ci-dessous), on ne pousse jamais sur `branch` elle-même, seulement sur
@@ -1051,6 +1073,7 @@ export async function runImplement(
         files: paths,
         durationMs: Date.now() - started,
         mrUrl,
+        chainedFindings,
       };
     }
 
@@ -1077,6 +1100,7 @@ export async function runImplement(
       detail: `${paths.length} fichier(s) de test poussé(s)`,
       files: paths,
       durationMs: Date.now() - started,
+      chainedFindings,
     };
   } finally {
     workspace.dispose();

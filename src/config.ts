@@ -286,6 +286,15 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
      * ne gagne quoi que ce soit.
      */
     reviewPasses: finiteNumber(env, "REVIEW_PASSES", 1, { min: 1, max: 7 }),
+    /**
+     * Relecture croisée après une implémentation livrée (voir
+     * tasks/chained-review.ts) : un second passage du modèle, en lecture
+     * seule, qui relit les tests poussés contre le code source qu'ils
+     * importent. Activée par défaut — c'est la seule réponse à l'angle mort
+     * mesuré (test vert qui grave un bug) — CHAINED_REVIEW=0 la coupe, au
+     * prix d'un appel de modèle en moins par implémentation.
+     */
+    chainedReview: env.CHAINED_REVIEW !== "0",
     gitAuthorName: env.GIT_AUTHOR_NAME ?? "cds-agent",
     gitAuthorEmail: env.GIT_AUTHOR_EMAIL ?? "cds-agent@local.invalid",
     /**

@@ -193,6 +193,35 @@ export const MAX_TEST_ARTIFACT_CHARS = 2_000;
  */
 export const MAX_TEST_ARTIFACT_TOTAL_CHARS = 6_000;
 
+// ---------------------------------------------------------------------------
+// Relecture croisée (tasks/chained-review.ts) — budget du prompt
+// ---------------------------------------------------------------------------
+//
+// La relecture croisée relit les tests qu'une implémentation vient de pousser
+// CONTRE le code source qu'ils importent — réponse à l'angle mort mesuré le
+// 1er août 2026 : un modèle a décrit un bug en commentaire puis choisi la
+// seule valeur d'entrée qui l'évite, suite verte, rien ne le signale. Le
+// diff des tests seul ne suffit pas : « attend qu'une description de 2001
+// caractères soit rejetée » n'est suspect qu'à côté de MAX_DESCRIPTION_LENGTH
+// = 2000 — d'où l'inclusion du source, et donc ces plafonds (un fichier
+// source n'est pas borné par nature, contrairement à un diff).
+
+/** Contenu d'un fichier source joint au prompt de relecture croisée, par fichier. */
+export const CHAINED_SOURCE_FILE_CHARS = 6_000;
+
+/** Budget cumulé des fichiers source joints — au-delà, coupés visiblement. */
+export const CHAINED_SOURCE_TOTAL_CHARS = 16_000;
+
+/**
+ * Nombre de fichiers source suivis depuis les imports des tests. Au-delà,
+ * les tests importent trop de modules pour une relecture ciblée — les
+ * premiers dans l'ordre des imports sont gardés, le prompt dit ce qui manque.
+ */
+export const CHAINED_MAX_SOURCE_FILES = 6;
+
+/** Constats de relecture croisée republiés dans le rapport — au-delà, tronqués en le disant. */
+export const CHAINED_MAX_FINDINGS = 5;
+
 /**
  * Raison d'abandon d'une demande après épuisement de MAX_ATTEMPTS
  * (daemon/index.ts, notifyGiveUp), republiée dans un commentaire GitLab

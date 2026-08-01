@@ -453,6 +453,29 @@ function buildTestsFailingReport(
   return [...preamble, output, artifacts].filter(Boolean).join("\n\n");
 }
 
+/**
+ * Section « relecture croisée » du rapport d'une implémentation livrée.
+ * La distinction undefined/[] vient d'ImplementResult.chainedFindings :
+ * `undefined` = pas de relecture (option coupée ou passage en échec), rien à
+ * afficher — le rapport ne doit pas prétendre qu'une vérification a eu lieu ;
+ * `[]` = elle a tourné et n'a rien trouvé, ce qui se dit explicitement.
+ */
+function chainedReviewNote(result: ImplementResult): string {
+  const findings = result.chainedFindings;
+  if (findings === undefined) return "";
+  if (findings.length === 0) {
+    return "\n\n🔎 Relecture croisée : rien à signaler sur les tests livrés.";
+  }
+  const lines = findings.map(
+    (finding) =>
+      `- \`${defuseMentions(finding.file)}\` : ${defuseMentions(finding.message)}`,
+  );
+  return (
+    "\n\n🔎 **Relecture croisée** — la suite est verte, mais ces points méritent un œil humain avant de faire confiance aux tests :\n" +
+    lines.join("\n")
+  );
+}
+
 export async function runTask(request: AgentRequest): Promise<void> {
   log.info(`[worker] démarrage ${request.key}`);
 
@@ -613,7 +636,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
       };
       await report(
         request,
-        messages[result.status] + capabilityNote,
+        messages[result.status] + capabilityNote + chainedReviewNote(result),
         outcomes[result.status],
       );
       log.info(`[worker] terminé ${request.key} — ${result.status}`);
