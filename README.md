@@ -26,7 +26,7 @@ sur un dépôt qui compte.
 - [Lancement](#lancement)
 - [Scripts npm](#scripts-npm)
 - [Images Docker](#images-docker)
-- [Modèle local](#modèle-local)
+- [Modèle (local ou distant)](#modèle-local-ou-distant)
 - [Proxy d'entreprise](#proxy-dentreprise)
 - [Journalisation](#journalisation)
 - [Observabilité](#observabilité)
@@ -142,7 +142,7 @@ merge requests sont gérées pour l'instant »).
   `docker run` — la sandbox est activée par défaut (voir
   [Configuration](#configuration)).
 - **Un serveur d'inférence compatible OpenAI** joignable depuis l'hôte
-  (LM Studio en pratique ; voir [Modèle local](#modèle-local)).
+  (LM Studio en pratique ; voir [Modèle (local ou distant)](#modèle-local-ou-distant)).
 - **`opencode`** : pas requis sur l'hôte pour l'usage normal (il est installé
   *dans* l'image `docker/agent.Dockerfile`) ; requis en revanche si vous
   utilisez `ALLOW_UNSANDBOXED=1` (exécution hors Docker), qui appelle le
@@ -509,7 +509,7 @@ n'est pas forcément celui baké dans l'image.
 Si vos noms d'image diffèrent de ces exemples, ajustez `AGENT_IMAGE` et
 `DOCKER_DEFAULT_IMAGE`/`DOCKER_IMAGES` en conséquence dans `.env`.
 
-## Modèle local
+## Modèle (local ou distant)
 
 Le daemon ne parle pas directement à un modèle : il génère un prompt, le
 dépose dans le workspace de la tâche, et lance `opencode run --model
@@ -522,8 +522,9 @@ Ce qu'il faut avoir en place :
    `http://127.0.0.1:1234/v1` — `INFERENCE_UPSTREAM_URL`).
 2. Un modèle chargé dont l'identifiant apparaît dans `AGENT_MODEL`, au format
    `fournisseur/modèle` (ex. `lmstudio/qwen2.5-coder-7b-instruct-mlx`) —
-   validé au démarrage, la partie après `/` sert de clé de modèle dans la
-   config opencode générée.
+   validé au démarrage. Dans la config opencode générée, la partie avant le
+   premier `/` nomme le fournisseur déclaré et celle d'après sert de clé de
+   modèle : les deux suivent cette variable.
 3. Par défaut (sans `CONTAINER_INFERENCE_URL`), le conteneur agent ne connaît
    **que** l'adresse d'un proxy HTTP filtrant démarré localement pour la
    durée de l'exécution (`src/tools/proxy.ts`), qui relaie exclusivement vers
@@ -536,6 +537,35 @@ Ce qu'il faut avoir en place :
 Aucun modèle n'est fourni ni téléchargé par ce projet : c'est à
 l'opérateur de charger un modèle dans LM Studio (ou tout serveur compatible
 OpenAI) avant de lancer le daemon.
+
+### Viser un fournisseur distant plutôt que l'inférence locale
+
+Rien n'oblige l'upstream à être local. Il suffit de trois réglages, sans
+changement de code :
+
+```dotenv
+INFERENCE_UPSTREAM_URL=https://api.scaleway.ai/v1
+INFERENCE_API_KEY=<clé du fournisseur>
+AGENT_MODEL=scaleway/mistral-nemo-instruct
+```
+
+Une URL `https://` est relayée en TLS par le proxy. **La clé ne descend
+jamais dans le conteneur agent** : c'est le proxy, côté hôte, qui l'ajoute en
+`Authorization: Bearer` au moment de relayer, et il écrase l'en-tête envoyé
+par le conteneur (qui ne porte qu'un placeholder inerte). Elle ne figure pas
+non plus dans la liste blanche de `sanitizedEnv()`, donc aucun processus
+enfant ne la reçoit — même traitement que `GITLAB_TOKEN`.
+
+L'unique exception est `CONTAINER_INFERENCE_URL`, qui court-circuite le
+proxy : plus personne n'authentifie alors la requête à la place du conteneur,
+et la clé doit y descendre pour que l'appel aboutisse. Une raison de plus de
+réserver cette échappatoire à une inférence locale.
+
+Deux points à garder en tête avant de brancher un fournisseur facturé : le
+prompt envoyé contient le code du dépôt relu (voir [Limites
+connues](#limites-connues) pour ce que le proxy ne filtre pas), et le
+`AGENT_TIMEOUT_MINUTES` calibré pour une inférence locale n'a pas la même
+signification face à une API distante.
 
 ## Proxy d'entreprise
 
@@ -577,7 +607,7 @@ reconnues) dans l'environnement du daemon :
 
 **Le conteneur agent (`runAgentInSandbox`) ne reçoit jamais ce proxy**,
 décision délibérée : son réseau est volontairement restreint au seul proxy
-d'inférence local (voir [Modèle local](#modèle-local) ci-dessus) — lui
+d'inférence local (voir [Modèle (local ou distant)](#modèle-local-ou-distant) ci-dessus) — lui
 transmettre en plus le proxy d'entreprise élargirait sa portée réseau, à
 l'exact opposé de cette restriction.
 

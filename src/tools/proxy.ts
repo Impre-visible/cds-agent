@@ -4,6 +4,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -22,6 +23,13 @@ export interface InferenceProxyOptions {
    * host.docker.internal n'a de sens que dans le netns d'un conteneur).
    */
   upstreamUrl: string;
+  /**
+   * Clé d'API de l'upstream (INFERENCE_API_KEY), absente pour une inférence
+   * locale qui n'en demande pas. Renseignée, elle est ajoutée ICI en
+   * `Authorization: Bearer` au moment de relayer : elle ne transite jamais
+   * par le conteneur agent, qui ne voit que l'adresse de ce proxy.
+   */
+  apiKey?: string;
   /** Port d'écoute local ; 0 (recommandé) laisse l'OS choisir un port libre. */
   port?: number;
   /** Répertoire où déposer les traces requête/réponse (debug) ; omis = pas de trace disque. */
@@ -62,7 +70,7 @@ export function startInferenceProxy(
   const upstream = new URL(options.upstreamUrl);
 
   const server = createServer((req, res) => {
-    handleRequest(req, res, upstream, options.logDir);
+    handleRequest(req, res, upstream, options.apiKey, options.logDir);
   });
 
   return new Promise((resolve, reject) => {
@@ -85,10 +93,38 @@ export function startInferenceProxy(
   });
 }
 
+/**
+ * En-têtes envoyés à l'upstream. `host` est réécrit (celui reçu désigne le
+ * proxy, pas la cible — un upstream en vhost/TLS répondrait 404 ou refuserait
+ * le SNI). L'`Authorization` est TOUJOURS remplacé quand une clé est
+ * configurée : le conteneur envoie celui de sa configuration opencode (un
+ * placeholder, voir agent/sandbox.ts) et il ne doit jamais primer sur la vraie
+ * clé de l'hôte. Sans clé configurée on laisse passer ce que le client a
+ * envoyé — comportement inchangé pour une inférence locale sans
+ * authentification.
+ */
+function upstreamHeaders(
+  req: IncomingMessage,
+  upstream: URL,
+  apiKey: string | undefined,
+): NodeJS.Dict<string | string[]> {
+  const headers: NodeJS.Dict<string | string[]> = {
+    ...req.headers,
+    host: upstream.host,
+  };
+  if (apiKey) {
+    // Node normalise les en-têtes entrants en minuscules ; poser "authorization"
+    // suffit donc à écraser celui du client, sans risque de doublon de casse.
+    headers.authorization = `Bearer ${apiKey}`;
+  }
+  return headers;
+}
+
 function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   upstream: URL,
+  apiKey: string | undefined,
   logDir: string | undefined,
 ): void {
   const chunks: Buffer[] = [];
@@ -100,13 +136,21 @@ function handleRequest(
 
     if (isChat && logDir) logChatRequest(body, logDir);
 
-    const proxied = httpRequest(
+    // Un upstream distant (Scaleway, OpenRouter, une passerelle interne...)
+    // est en HTTPS : le relayer avec node:http produirait une connexion en
+    // clair sur le port 443, qui échoue de façon opaque côté TLS. Le choix
+    // du client suit donc le protocole de l'URL upstream — la liaison
+    // conteneur → proxy, elle, reste en HTTP local (voir containerUrl).
+    const secure = upstream.protocol === "https:";
+    const sendRequest = secure ? httpsRequest : httpRequest;
+
+    const proxied = sendRequest(
       {
         host: upstream.hostname,
-        port: upstream.port || (upstream.protocol === "https:" ? 443 : 80),
+        port: upstream.port || (secure ? 443 : 80),
         path: req.url,
         method: req.method,
-        headers: { ...req.headers, host: upstream.host },
+        headers: upstreamHeaders(req, upstream, apiKey),
       },
       (upstreamRes) => {
         res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
@@ -181,6 +225,7 @@ function logChatResponse(body: Buffer, logDir: string): void {
 if (import.meta.url === `file://${process.argv[1]}`) {
   startInferenceProxy({
     upstreamUrl: config.inferenceUpstreamUrl,
+    apiKey: config.inferenceApiKey,
     port: config.inferenceProxyPort,
     logDir: tmpdir(),
   }).then((proxy) => {

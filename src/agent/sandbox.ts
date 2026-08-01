@@ -279,6 +279,29 @@ function needsHostGateway(url: string): boolean {
   }
 }
 
+/**
+ * Clé d'API écrite dans la configuration opencode DU CONTENEUR — à ne pas
+ * confondre avec config.inferenceApiKey, qui est la vraie.
+ *
+ * Chemin normal (proxy filtrant) : un placeholder inerte. La vraie clé reste
+ * sur l'hôte, où le proxy la pose lui-même en en-tête Authorization (voir
+ * tools/proxy.ts) ; l'agent, lui, exécute du code écrit par un LLM et peut
+ * relire sa propre configuration — lui confier un secret utilisable contre un
+ * fournisseur facturé n'aurait aucune contrepartie. Le placeholder n'est pas
+ * gratuit pour autant : le SDK openai-compatible refuse une clé vide, et LM
+ * Studio ignore sa valeur.
+ *
+ * Chemin dérogatoire (CONTAINER_INFERENCE_URL) : plus de proxy dans la
+ * boucle, donc plus personne pour authentifier la requête. La vraie clé doit
+ * descendre dans le conteneur, sans quoi un upstream distant répondrait 401.
+ * C'est le prix explicite de cette échappatoire — une raison de plus de la
+ * réserver à une inférence locale, comme le dit déjà .env.example.
+ */
+function containerApiKey(): string {
+  if (!config.inferenceUrl) return "lm-studio";
+  return config.inferenceApiKey ?? "lm-studio";
+}
+
 export async function runAgentInSandbox(
   repo: string,
   meta: string,
@@ -309,7 +332,12 @@ export async function runAgentInSandbox(
   // de l'agent).
   const proxy = config.inferenceUrl
     ? undefined
-    : await startInferenceProxy({ upstreamUrl: config.inferenceUpstreamUrl });
+    : await startInferenceProxy({
+        upstreamUrl: config.inferenceUpstreamUrl,
+        // INFERENCE_API_KEY est confiée au proxy, pas au conteneur : c'est lui
+        // qui pose l'en-tête Authorization en relayant (voir tools/proxy.ts).
+        apiKey: config.inferenceApiKey,
+      });
 
   try {
     // config.inferenceUrl reste une échappatoire explicite (voir config.ts) :
@@ -322,17 +350,43 @@ export async function runAgentInSandbox(
       throw new Error("proxy d'inférence introuvable");
     }
 
+    // Le format "fournisseur/modèle" d'AGENT_MODEL est validé au démarrage
+    // par config.ts (validateAgentModel) : ni le fournisseur ni le modèle ne
+    // peuvent être vides ici. Découpage au PREMIER "/" seulement — un
+    // identifiant de modèle distant peut lui-même en contenir
+    // (ex. "scaleway/mistral/nemo-instruct"), et un split("/")[1] tronquerait
+    // silencieusement le reste.
+    const slash = config.agentModel.indexOf("/");
+    const providerId = config.agentModel.slice(0, slash);
+    const modelId = config.agentModel.slice(slash + 1);
+
+    // La clé du bloc `provider` doit être exactement le fournisseur passé à
+    // `opencode run --model <fournisseur>/<modèle>`, sinon opencode cherche un
+    // fournisseur qu'on ne lui a jamais décrit. Elle suit donc AGENT_MODEL au
+    // lieu d'être figée sur "lmstudio" : c'est ce qui permet de viser un
+    // fournisseur distant (AGENT_MODEL=scaleway/... + INFERENCE_UPSTREAM_URL +
+    // INFERENCE_API_KEY) sans devoir mentir sur son nom.
     const opencodeConfig = JSON.stringify({
       $schema: "https://opencode.ai/config.json",
       provider: {
-        lmstudio: {
+        [providerId]: {
           npm: "@ai-sdk/openai-compatible",
-          name: "LM Studio",
-          options: { baseURL: modelBaseUrl, apiKey: "lm-studio" },
-          // Le format "fournisseur/modèle" d'AGENT_MODEL est validé au
-          // démarrage par config.ts (validateAgentModel) : split("/")[1] ne
-          // peut donc plus produire une clé de modèle vide ici.
-          models: { [config.agentModel.split("/")[1] ?? ""]: { name: "agent" } },
+          name: providerId,
+          options: { baseURL: modelBaseUrl, apiKey: containerApiKey() },
+          // `limit` explicite : sans lui, opencode réclame 32 000 tokens de
+          // sortie par défaut sur un fournisseur custom (opencode#1735), ce
+          // qui fait refuser la requête par tout modèle dont le plafond est
+          // plus bas — trois candidats éliminés pour cette seule raison lors
+          // de la campagne du 1er août 2026 (voir config.ts).
+          models: {
+            [modelId]: {
+              name: "agent",
+              limit: {
+                context: config.inferenceContextLimit,
+                output: config.inferenceOutputLimit,
+              },
+            },
+          },
         },
       },
     });

@@ -360,6 +360,52 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
      */
     inferenceUpstreamUrl: env.INFERENCE_UPSTREAM_URL ?? "http://127.0.0.1:1234/v1",
     /**
+     * Clé d'API du serveur d'inférence — absente par défaut (LM Studio en
+     * local n'en réclame aucune). Renseignée, elle vise un fournisseur
+     * distant (Scaleway, OpenRouter, une passerelle interne...) : c'est le
+     * PROXY d'inférence qui l'ajoute en `Authorization: Bearer` au moment de
+     * relayer vers inferenceUpstreamUrl (voir tools/proxy.ts), jamais le
+     * conteneur agent. Le secret reste donc sur l'hôte, hors de portée d'un
+     * agent qui lirait sa propre configuration opencode ou son
+     * environnement — même raisonnement que GITLAB_TOKEN, jamais confié à un
+     * processus non fiable (voir sanitizedEnv() plus bas, dont la liste
+     * blanche n'inclut délibérément pas cette variable).
+     *
+     * Seule exception, assumée : CONTAINER_INFERENCE_URL court-circuite le
+     * proxy, il n'y a alors plus personne pour injecter l'en-tête et la clé
+     * doit descendre jusqu'au conteneur (voir agent/sandbox.ts).
+     */
+    inferenceApiKey: env.INFERENCE_API_KEY,
+    /**
+     * Fenêtre de contexte et budget de sortie déclarés à opencode pour le
+     * modèle de l'agent (bloc `models[...].limit` de la configuration générée,
+     * voir agent/sandbox.ts).
+     *
+     * Sans ce bloc, opencode réclame 32 000 tokens de SORTIE par défaut sur un
+     * fournisseur custom (bug connu, opencode#1735). Mesuré le 1er août 2026 :
+     * trois modèles sur onze ont été éliminés de la campagne pour cette seule
+     * raison, sans rapport avec leur qualité —
+     *   gemma-3-27b-it   → "max_completion_tokens is limited to 8192"
+     *   devstral-2-123b  → "max_completion_tokens is limited to 16384"
+     *   holo2-30b-a3b    → contexte max 22000, requête 15493 + 32000 demandés
+     * dont devstral-2-123b, un candidat sérieux du palier 128 Go.
+     *
+     * Défauts prudents (128k de contexte, 16k de sortie) : tiennent chez tous
+     * les modèles retenus de la campagne. Un modèle à fenêtre plus courte se
+     * règle par ces deux variables plutôt qu'en éditant le code — c'est
+     * exactement le genre de réglage qui change d'un déploiement à l'autre.
+     * Bornes larges mais réelles : une valeur nulle ou absurde produirait un
+     * refus du fournisseur bien plus loin, avec un message sans rapport.
+     */
+    inferenceContextLimit: finiteNumber(env, "INFERENCE_CONTEXT_LIMIT", 128_000, {
+      min: 1_000,
+      max: 10_000_000,
+    }),
+    inferenceOutputLimit: finiteNumber(env, "INFERENCE_OUTPUT_LIMIT", 16_000, {
+      min: 256,
+      max: 1_000_000,
+    }),
+    /**
      * Échappatoire explicite (§1.7) : par défaut absent, auquel cas le
      * conteneur agent ne connaît QUE l'adresse du proxy filtrant local
      * (démarré par runAgentInSandbox), jamais une route directe et ouverte

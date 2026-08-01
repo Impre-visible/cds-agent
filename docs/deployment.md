@@ -19,13 +19,14 @@ Le daemon a deux dépendances qui compliquent toute forme d'exécution
    usage courant). Ce n'est pas négociable : c'est le mécanisme central de
    confinement de l'agent (voir `docs/adr/0002-garde-fou-chemin-tests.md` et
    le README, section « Garde-fous de sécurité »).
-2. **Une inférence locale joignable.** Le proxy d'inférence
-   (`src/tools/proxy.ts`) résout `INFERENCE_UPSTREAM_URL` (LM Studio par
-   défaut, `127.0.0.1:1234`) **depuis le point de vue du process du daemon**,
-   pas depuis un conteneur. Un LM Studio qui tourne sur la machine de
-   l'opérateur suppose donc que le daemon tourne sur cette même machine, ou
-   qu'on redirige explicitement `INFERENCE_UPSTREAM_URL` vers une inférence
-   distante — ce que ce projet ne fait pas nativement.
+2. **Une inférence joignable.** Le proxy d'inférence (`src/tools/proxy.ts`)
+   résout `INFERENCE_UPSTREAM_URL` (LM Studio par défaut, `127.0.0.1:1234`)
+   **depuis le point de vue du process du daemon**, pas depuis un conteneur.
+   Un LM Studio qui tourne sur la machine de l'opérateur suppose donc que le
+   daemon tourne sur cette même machine. À défaut, `INFERENCE_UPSTREAM_URL`
+   peut viser une inférence distante — y compris en `https://` et avec une
+   clé d'API (`INFERENCE_API_KEY`, posée par le proxy et jamais transmise au
+   conteneur agent) : voir le README, section « Modèle (local ou distant) ».
 
 ### Le cas particulier d'un daemon conteneurisé
 
