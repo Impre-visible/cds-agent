@@ -572,6 +572,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
         rejected: `⛔ Modifications refusées après ${seconds} s — ${defuseMentions(result.detail)}`,
         "tests-red": `❌ Les tests ne passent pas après ${seconds} s, rien n'a été poussé.\n\n<details><summary>Sortie</summary>\n\n\`\`\`\n${defuseMentions(result.detail.slice(-TESTS_RED_REPORT_TAIL_CHARS))}\n\`\`\`\n\n</details>`,
         "tests-failing": buildTestsFailingReport(result, seconds),
+        "tests-broken": `❌ Les tests écrits n'ont même pas pu être exécutés en ${seconds} s — ${defuseMentions(result.detail)}.\n\n<details><summary>Sortie du lanceur</summary>\n\n\`\`\`\n${defuseMentions((result.output ?? "").slice(-TESTS_RED_REPORT_TAIL_CHARS))}\n\`\`\`\n\n</details>`,
         "no-change": `🤷 L'agent n'a produit aucune modification en ${seconds} s.`,
       };
 
@@ -603,6 +604,9 @@ export async function runTask(request: AgentRequest): Promise<void> {
         // implement.ts). Le ranger avec ❌ était précisément l'erreur que la
         // campagne du 1er août 2026 a rendue visible.
         "tests-failing": "to-triage",
+        // Un fichier que le lanceur ne peut pas exécuter n'a rien à trancher :
+        // c'est une panne de production de l'agent, pas une découverte.
+        "tests-broken": "failed",
         rejected: "failed",
         "tests-red": "failed",
         "no-change": "failed",

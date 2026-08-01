@@ -62,6 +62,15 @@ export interface ImplementResult {
      * repart en "pushed" et grave le défaut dans la suite.
      */
     | "tests-failing"
+    /**
+     * La suite est rouge après l'agent, mais AUCUNE assertion n'a tourné :
+     * le lanceur n'a pas pu exécuter au moins un fichier écrit (faute de
+     * syntaxe, import manquant, require erroné). Rien à trancher — c'est du
+     * bruit, pas une découverte — donc pas de MR Draft : avant cette
+     * distinction, un fichier invalide ouvrait une MR « à trancher » pour
+     * un travail que personne ne pouvait juger.
+     */
+    | "tests-broken"
     | "mr-opened";
   detail: string;
   files: string[];
@@ -186,6 +195,35 @@ export async function openDedicatedMergeRequest(
   });
 
   return { branchName, mrUrl: mr.web_url };
+}
+
+/**
+ * Atteste que des ASSERTIONS ont réellement tourné et échoué, par opposition
+ * à un fichier que le lanceur n'a pas pu exécuter du tout.
+ *
+ * Le signal est discriminant et a été observé sur les deux cas réels : une
+ * vraie assertion en échec produit une ligne de synthèse comptant les tests
+ * échoués — « Tests  1 failed | 92 passed (93) » (Vitest),
+ * « Tests: 1 failed, 80 passed » (Jest), « fail 1 » (node:test) — tandis
+ * qu'un fichier cassé fait échouer le FICHIER sans qu'aucun test n'y tourne :
+ * la ligne « Tests » ne compte alors que des passed. Cas mixte (un fichier
+ * cassé ET une assertion en échec ailleurs) : le motif matche, on préserve —
+ * il y a bien quelque chose à trancher.
+ *
+ * Par lanceur, donc par dépôt : projects.json peut fournir son propre motif
+ * via commands.assertionPattern (voir src/projects.ts) pour un lanceur au
+ * format de sortie différent. Insensible à la casse dans les deux cas.
+ */
+export const DEFAULT_ASSERTION_FAILURE_RE =
+  /Tests[:\s]\s*\d+\s*failed|✖ fail(?:ing tests)?\s*[1-9]|\bfail\s+[1-9]\d*\b/i;
+
+/** Exportée pour être testée unitairement (voir implement.test.ts). */
+export function assertionsRanAndFailed(
+  output: string,
+  pattern?: string,
+): boolean {
+  const re = pattern ? new RegExp(pattern, "i") : DEFAULT_ASSERTION_FAILURE_RE;
+  return re.test(output);
 }
 
 /**
@@ -916,6 +954,21 @@ export async function runImplement(
       // fait passer sa suite en épousant le bug repart en "pushed".
       const output = verdict.output.slice(-COMMAND_OUTPUT_TAIL_CHARS);
       const artifacts = readWrittenFiles(repo, paths);
+
+      // Sur la sortie COMPLÈTE, pas la queue tronquée : la ligne de synthèse
+      // est en fin de sortie dans les lanceurs connus, mais rien ne l'impose.
+      if (!assertionsRanAndFailed(verdict.output, project.commands.assertionPattern)) {
+        return {
+          status: "tests-broken",
+          detail:
+            `le lanceur n'a pas pu exécuter les tests écrits (aucune assertion n'a tourné : ` +
+            `faute de syntaxe, import manquant...) — rien à trancher, rien n'est poussé`,
+          files: paths,
+          output,
+          durationMs: Date.now() - started,
+        };
+      }
+
       const detail =
         `l'agent a écrit ${paths.length} fichier(s) que le code ne satisfait pas — ` +
         `soit le test est incorrect, soit le code contient un défaut : à trancher humainement`;

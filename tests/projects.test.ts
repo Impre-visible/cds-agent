@@ -147,6 +147,39 @@ describe("parseProjectsFile — validation", () => {
 // (chemins de test uniquement) et writeBusinessCode (dépôt entier) que
 // l'ancien AGENT_CAPABILITIES exprimait via write:src/**|lib/**.
 // ---------------------------------------------------------------------------
+describe("commands.assertionPattern (fichier cassé ≠ assertion en échec, voir implement.ts)", () => {
+  test("accepté dans defaults comme par projet, résolu avec priorité au projet", () => {
+    const file = parseProjectsFile({
+      defaults: { commands: { assertionPattern: "DEFAUT: \\d+" } },
+      projects: {
+        "g/p": { users: ["alice"], commands: { assertionPattern: "PROJET: \\d+" } },
+        "g/q": { users: ["alice"] },
+      },
+    });
+    assert.equal(resolveProject(file, "g/p", BASELINE)!.commands.assertionPattern, "PROJET: \\d+");
+    assert.equal(resolveProject(file, "g/q", BASELINE)!.commands.assertionPattern, "DEFAUT: \\d+");
+  });
+
+  test("absent partout : résolu undefined — c'est implement.ts qui porte le défaut", () => {
+    const file = parseProjectsFile({ projects: { "g/p": { users: ["alice"] } } });
+    assert.equal(resolveProject(file, "g/p", BASELINE)!.commands.assertionPattern, undefined);
+  });
+
+  test("une regex invalide est refusée AU CHARGEMENT, en nommant le champ", () => {
+    assert.throws(
+      () => parseProjectsFile({ projects: { "g/p": { commands: { assertionPattern: "(" } } } }),
+      /assertionPattern.*regex/,
+    );
+  });
+
+  test("chaîne vide refusée, comme install et test", () => {
+    assert.throws(
+      () => parseProjectsFile({ projects: { "g/p": { commands: { assertionPattern: "" } } } }),
+      /chaîne non vide/,
+    );
+  });
+});
+
 describe("mergeRequest.writablePaths — parsing et formedness des motifs", () => {
   test("un projet avec writeTests: true et des motifs valides est accepté", () => {
     assert.doesNotThrow(() =>

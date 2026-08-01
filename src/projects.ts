@@ -88,6 +88,17 @@ export interface ResolvedCapabilities {
 export interface CommandsConfig {
   install: string;
   test: string;
+  /**
+   * Motif (regex, insensible à la casse) qui, présent dans la sortie du
+   * lanceur de tests, atteste que des ASSERTIONS ont réellement tourné et
+   * échoué — par opposition à un fichier de test que le lanceur n'a même pas
+   * pu exécuter (faute de syntaxe, import manquant). tasks/implement.ts s'en
+   * sert pour ne préserver en MR Draft "à trancher" que le premier cas : le
+   * second est du bruit pur, rapporté comme un échec. Optionnel — le défaut
+   * (DEFAULT_ASSERTION_FAILURE_RE, implement.ts) couvre Vitest/Jest/node:test ;
+   * cette clé n'existe que pour un lanceur au format de sortie différent.
+   */
+  assertionPattern?: string;
 }
 
 export interface DockerConfig {
@@ -184,6 +195,7 @@ interface ParsedCapabilitiesBlock {
 interface ParsedCommandsBlock {
   install?: string;
   test?: string;
+  assertionPattern?: string;
 }
 
 interface ParsedDockerBlock {
@@ -359,10 +371,10 @@ function parseCommandsBlock(raw: unknown, path: string): ParsedCommandsBlock {
   if (!isPlainObject(raw)) {
     throw new Error(`projects.json invalide : "${path}" doit être un objet`);
   }
-  assertOnlyKeys(raw, ["install", "test"], path);
+  assertOnlyKeys(raw, ["install", "test", "assertionPattern"], path);
 
   const result: ParsedCommandsBlock = {};
-  for (const key of ["install", "test"] as const) {
+  for (const key of ["install", "test", "assertionPattern"] as const) {
     if (!(key in raw)) continue;
     const value = raw[key];
     if (typeof value !== "string" || !value.trim()) {
@@ -371,6 +383,19 @@ function parseCommandsBlock(raw: unknown, path: string): ParsedCommandsBlock {
       );
     }
     result[key] = value;
+  }
+
+  // Une regex invalide échouerait bien plus tard, au moment de classifier la
+  // sortie d'une suite de tests — loin du réglage fautif. Même politique que
+  // le reste du fichier : refuser au chargement, en nommant le champ.
+  if (result.assertionPattern !== undefined) {
+    try {
+      new RegExp(result.assertionPattern, "i");
+    } catch (error) {
+      throw new Error(
+        `projects.json invalide : "${path}.assertionPattern" n'est pas une regex valide — ${(error as Error).message}`,
+      );
+    }
   }
   return result;
 }
@@ -541,6 +566,10 @@ export function resolveProject(
       install:
         entry.commands.install ?? file.defaults.commands.install ?? baseline.commands.install,
       test: entry.commands.test ?? file.defaults.commands.test ?? baseline.commands.test,
+      // Pas de repli baseline : aucun équivalent env (le défaut vit dans
+      // implement.ts, au plus près du classifieur qui l'applique).
+      assertionPattern:
+        entry.commands.assertionPattern ?? file.defaults.commands.assertionPattern,
     },
     docker: {
       image: entry.docker.image ?? file.defaults.docker.image ?? baseline.docker.image,

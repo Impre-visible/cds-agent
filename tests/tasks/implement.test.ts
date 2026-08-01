@@ -26,6 +26,7 @@ let buildPrompt: (
 ) => string;
 let buildInstallCommand: (installCommand: string, ignoreScripts: boolean) => string;
 let rollbackAgentChanges: (repo: string) => Promise<void>;
+let assertionsRanAndFailed: (output: string, pattern?: string) => boolean;
 let preserveFailingTests: (
   repo: string,
   projectId: number,
@@ -132,6 +133,7 @@ before(async () => {
     buildPrompt,
     buildInstallCommand,
     rollbackAgentChanges,
+    assertionsRanAndFailed,
     preserveFailingTests,
     readWrittenFiles,
     buildBotBranchName,
@@ -1005,6 +1007,38 @@ describe("openDedicatedMergeRequest (§A.3 : mode publishMode=\"dedicated-mr\")"
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
+    });
+  });
+
+  // Une MR Draft « à trancher » n'a de sens que si des assertions ont tourné :
+  // un fichier que le lanceur ne peut pas exécuter est du bruit, pas une
+  // découverte.
+  describe("assertionsRanAndFailed (fichier cassé ≠ assertion en échec)", () => {
+    test("Vitest, assertion réelle : la ligne de synthèse compte des failed", () => {
+      const output = " Test Files  1 failed | 5 passed (6)\n      Tests  1 failed | 92 passed (93)\n";
+      assert.equal(assertionsRanAndFailed(output), true);
+    });
+
+    test("Vitest, fichier cassé : le fichier échoue mais aucun test n'a tourné", () => {
+      const output = [
+        "FAIL tests/broken.test.js [ tests/broken.test.js ]",
+        "Error: Cannot find module '../src/inexistant'",
+        " Test Files  1 failed | 5 passed (6)",
+        "      Tests  92 passed (92)",
+      ].join("\n");
+      assert.equal(assertionsRanAndFailed(output), false);
+    });
+
+    test("Jest et node:test sont couverts par le motif par défaut", () => {
+      assert.equal(assertionsRanAndFailed("Tests:       1 failed, 80 passed, 81 total"), true);
+      assert.equal(assertionsRanAndFailed("ℹ tests 12\nℹ pass 11\nℹ fail 1\n"), true);
+      assert.equal(assertionsRanAndFailed("ℹ tests 12\nℹ pass 12\nℹ fail 0\n"), false);
+    });
+
+    test("un motif par dépôt (commands.assertionPattern) remplace le défaut", () => {
+      const output = "ECHEC-ASSERTION: 3 cas rouges";
+      assert.equal(assertionsRanAndFailed(output), false, "le défaut ne le reconnaît pas");
+      assert.equal(assertionsRanAndFailed(output, "ECHEC-ASSERTION: \\d+"), true);
     });
   });
 
