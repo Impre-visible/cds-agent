@@ -169,6 +169,31 @@ export const COMMAND_OUTPUT_TAIL_CHARS = 1_200;
 export const TESTS_RED_REPORT_TAIL_CHARS = 1_500;
 
 /**
+ * Contenu d'UN fichier de test écrit par l'agent, republié dans le rapport
+ * quand la suite reste rouge alors que la baseline était verte (statut
+ * "tests-failing", voir tasks/implement.ts).
+ *
+ * Ce cas recouvre deux situations opposées et mécaniquement indiscernables :
+ * l'agent a écrit une assertion fausse, ou il a trouvé un vrai défaut du code.
+ * Rien dans le dépôt ne permet de trancher — un humain, si — mais seulement
+ * s'il voit l'assertion. D'où la republication du contenu et pas seulement du
+ * message d'échec : sans elle, le résultat le plus précieux que le bot puisse
+ * produire est jeté avec le workspace.
+ *
+ * 2 000 caractères couvrent très largement un fichier de test normal (500 à
+ * 1 500 en pratique) ; au-delà, la coupe est visible dans le texte publié.
+ */
+export const MAX_TEST_ARTIFACT_CHARS = 2_000;
+
+/**
+ * Plafond cumulé des contenus republiés (tous fichiers confondus), pour qu'un
+ * agent qui écrit dix fichiers ne produise pas un commentaire GitLab
+ * illisible. Les fichiers sont pris dans l'ordre ; ceux qui ne rentrent plus
+ * sont nommés sans leur contenu, jamais passés sous silence.
+ */
+export const MAX_TEST_ARTIFACT_TOTAL_CHARS = 6_000;
+
+/**
  * Raison d'abandon d'une demande après épuisement de MAX_ATTEMPTS
  * (daemon/index.ts, notifyGiveUp), republiée dans un commentaire GitLab
  * visible du demandeur. Un message d'erreur brut peut être long (pile

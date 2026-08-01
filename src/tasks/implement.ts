@@ -3,6 +3,7 @@ import { runAgent } from "../agent/runner.ts";
 import { collectChanges, DEFAULT_CAPABILITIES, type RepoCapabilities } from "./guard.ts";
 import { repoCapabilitiesFor, type ResolvedProject } from "../projects.ts";
 import { gitlab } from "../gitlab/client.ts";
+import { defuseMentions } from "../daemon/request.ts";
 import {
   createWorkspace,
   fingerprintGitMeta,
@@ -11,22 +12,78 @@ import {
 } from "../agent/workspace.ts";
 import type { TaskContextBase } from "../types.ts";
 import { basename, resolve, join } from "node:path";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { runAgentInSandbox } from "../agent/sandbox.ts";
-import { MAX_ISSUE_DESCRIPTION_CHARS, COMMAND_OUTPUT_TAIL_CHARS } from "../limits.ts";
+import {
+  MAX_ISSUE_DESCRIPTION_CHARS,
+  COMMAND_OUTPUT_TAIL_CHARS,
+  MAX_TEST_ARTIFACT_CHARS,
+  MAX_TEST_ARTIFACT_TOTAL_CHARS,
+} from "../limits.ts";
 import { log } from "../log.ts";
 
+/**
+ * Fichier écrit par l'agent, republié tel quel dans le rapport (statut
+ * "tests-failing"). `truncated` dit si le contenu a été coupé au plafond
+ * MAX_TEST_ARTIFACT_CHARS — jamais une coupe silencieuse.
+ */
+export interface WrittenFile {
+  path: string;
+  content: string;
+  truncated: boolean;
+}
+
 export interface ImplementResult {
-  status: "pushed" | "rejected" | "no-change" | "tests-red" | "mr-opened";
+  status:
+    | "pushed"
+    | "rejected"
+    | "no-change"
+    /**
+     * L'environnement était déjà cassé AVANT que l'agent n'intervienne :
+     * installation en échec, ou suite de référence déjà rouge. Rien n'a été
+     * tenté, il n'y a rien à interpréter — à distinguer soigneusement de
+     * "tests-failing" ci-dessous, qui portait autrefois le même statut et
+     * signifie exactement l'inverse.
+     */
+    | "tests-red"
+    /**
+     * La baseline était VERTE, seuls des fichiers dans le périmètre ont
+     * changé, et la suite est rouge après l'agent : il a écrit une assertion
+     * que le code ne satisfait pas.
+     *
+     * Deux lectures possibles, opposées et impossibles à départager
+     * mécaniquement : son test est faux, ou le code a un défaut. C'est
+     * précisément le cas où le bot a peut-être trouvé quelque chose — et
+     * c'était jusqu'ici rapporté comme une panne, à l'identique d'un `npm
+     * install` en échec, sans que le travail produit n'atteigne jamais
+     * GitLab. Le pipeline récompensait donc le comportement inverse : un
+     * agent qui fait passer son test en épousant le comportement buggé
+     * repart en "pushed" et grave le défaut dans la suite.
+     */
+    | "tests-failing"
+    | "mr-opened";
   detail: string;
   files: string[];
   durationMs: number;
   /**
-   * URL de la merge request ouverte par le bot — renseigné uniquement quand
-   * status vaut "mr-opened" (capacité publishMode="dedicated-mr", voir
-   * openDedicatedMergeRequest plus bas). `undefined` dans tous les autres cas,
-   * y compris "pushed" (push direct : pas de MR à référencer ici).
+   * Sortie de la suite de tests, renseignée pour "tests-failing" : c'est
+   * l'assertion en échec elle-même, l'information qui permet de trancher.
+   */
+  output?: string;
+  /**
+   * Contenu des fichiers écrits par l'agent, renseigné pour "tests-failing".
+   * Republié dans le rapport pour que le demandeur juge sans avoir à rejouer
+   * quoi que ce soit — le workspace, lui, est détruit immédiatement après.
+   */
+  artifacts?: WrittenFile[];
+  /**
+   * URL de la merge request ouverte par le bot. Renseigné pour "mr-opened"
+   * (capacité publishMode="dedicated-mr") et pour "tests-failing" — où la MR
+   * est en Draft et porte des tests rouges, seul moyen de ne pas détruire un
+   * travail potentiellement juste. `undefined` partout ailleurs, y compris
+   * "pushed" (push direct : pas de MR à référencer), et pour un
+   * "tests-failing" dont l'ouverture de MR a échoué (repli sur `artifacts`).
    */
   mrUrl?: string;
 }
@@ -63,6 +120,20 @@ export function buildBotBranchName(targetIid: number): string {
  * simulant l'endpoint GitLab de création de MR — même approche que
  * checkHeadIntegrity ci-dessous et que publishReview (tasks/publish.test.ts).
  */
+export interface DedicatedMergeRequestOptions {
+  /**
+   * Préfixe le titre par "Draft:" — GitLab refuse alors la fusion tant que
+   * le préfixe est là. Utilisé pour le statut "tests-failing" : cette MR
+   * porte des tests ROUGES, elle est faite pour être lue et tranchée, jamais
+   * fusionnée par mégarde depuis la liste des MR.
+   */
+  draft?: boolean;
+  /** Remplace le titre par défaut (le préfixe Draft s'applique par-dessus). */
+  title?: string;
+  /** Bloc ajouté en fin de description (sortie d'échec des tests, consignes de lecture). */
+  extraDescription?: string;
+}
+
 export async function openDedicatedMergeRequest(
   repo: string,
   projectId: number,
@@ -70,18 +141,32 @@ export async function openDedicatedMergeRequest(
   targetBranch: string,
   requester: string,
   requestText: string,
+  options: DedicatedMergeRequestOptions = {},
 ): Promise<{ branchName: string; mrUrl: string }> {
   const branchName = buildBotBranchName(targetIid);
   await git(repo, ["push", "origin", `HEAD:${branchName}`], true);
 
+  const title = options.title ?? `cds-agent : tests demandés par @${requester}`;
+
   const mr = await gitlab.createMergeRequest(projectId, {
     source_branch: branchName,
     target_branch: targetBranch,
-    title: `cds-agent : tests demandés par @${requester}`,
-    description:
+    title: options.draft ? `Draft: ${title}` : title,
+    description: [
       `Merge request ouverte automatiquement par cds-agent (capacité ` +
-      `"dedicated-mr" : le résultat n'est jamais poussé directement sur ` +
-      `\`${targetBranch}\`, à relire avant fusion).\n\nDemande d'origine : ${requestText}`,
+        `"dedicated-mr" : le résultat n'est jamais poussé directement sur ` +
+        `\`${targetBranch}\`, à relire avant fusion).`,
+      // requestText vient d'un commentaire GitLab et extraDescription
+      // contient de la sortie de commande : deux textes non maîtrisés qui
+      // atterrissent dans une description de MR, où une mention notifie
+      // réellement les gens et une quick action s'exécute. Même traitement
+      // qu'ailleurs (§5.6) — c'était un trou avant ce correctif, la
+      // description reprenait requestText brut.
+      `Demande d'origine : ${defuseMentions(requestText)}`,
+      options.extraDescription ? defuseMentions(options.extraDescription) : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
   });
 
   return { branchName, mrUrl: mr.web_url };
@@ -401,10 +486,25 @@ export function buildPrompt(
     : "";
 
   const scope = writeScopeInstructions(capabilities);
+  // Deux instructions se suivaient ici : « corrige tes tests jusqu'à ce que
+  // tout passe » puis « si le code a un bug, écris quand même le test correct
+  // et arrête-toi ». Rien ne disait laquelle l'emporte, et le pipeline
+  // tranchait dans le mauvais sens : un test rouge était rapporté comme une
+  // panne et le travail jeté, tandis qu'un test qui passe en épousant le
+  // comportement buggé partait en "pushed". Ce texte lève l'ambiguïté et dit
+  // explicitement que s'arrêter sur un test rouge est un résultat attendu et
+  // conservé (voir le statut "tests-failing" dans ImplementResult) — la seule
+  // chose qui reste interdite est d'écrire une assertion dont on sait
+  // qu'elle est fausse pour obtenir du vert.
   const bugInstruction =
     capabilities.writablePaths === "all"
       ? "Si un test échoue à cause d'un bug du code source, corrige ce bug."
-      : "Si un test échoue à cause d'un bug du code source, écris quand même le test correct et arrête-toi.";
+      : [
+          "Si un test échoue parce que TON test est faux, corrige ton test.",
+          "Si un test échoue parce que le CODE SOURCE a un défaut, n'y touche pas : garde l'assertion correcte, laisse-la rouge, et arrête-toi en expliquant le défaut que tu as trouvé.",
+          "N'écris JAMAIS une assertion qui décrit un comportement que tu juges incorrect dans le seul but d'obtenir une suite verte.",
+          "Une suite rouge sur une assertion juste n'est pas un échec de ta part : ce résultat est conservé et transmis à un humain.",
+        ].join(" ");
 
   return [
     DATA_PREAMBLE,
@@ -418,6 +518,59 @@ export function buildPrompt(
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+/**
+ * Relit le contenu des fichiers écrits par l'agent, pour le republier dans le
+ * rapport (statut "tests-failing" — voir ImplementResult). Le workspace est
+ * détruit dans le `finally` de runImplement : sans cette lecture, le travail
+ * de l'agent n'existe plus nulle part une fois la tâche terminée.
+ *
+ * Trois plafonds, tous à coupe VISIBLE plutôt que silencieuse :
+ * par fichier (MAX_TEST_ARTIFACT_CHARS), en cumul (MAX_TEST_ARTIFACT_TOTAL_CHARS),
+ * et un fichier illisible (supprimé, binaire, droits) qui est nommé plutôt
+ * qu'omis — un trou dans le rapport ferait conclure à tort que l'agent n'a
+ * rien écrit là.
+ *
+ * Exportée pour être testée unitairement (voir implement.test.ts).
+ */
+export function readWrittenFiles(repo: string, paths: string[]): WrittenFile[] {
+  const files: WrittenFile[] = [];
+  let budget = MAX_TEST_ARTIFACT_TOTAL_CHARS;
+
+  for (const path of paths) {
+    if (budget <= 0) {
+      files.push({
+        path,
+        content: "[... non montré : plafond global du rapport atteint ...]",
+        truncated: true,
+      });
+      continue;
+    }
+
+    let raw: string;
+    try {
+      raw = readFileSync(join(repo, path), "utf8");
+    } catch (error) {
+      files.push({
+        path,
+        content: `[illisible : ${(error as Error).message}]`,
+        truncated: false,
+      });
+      continue;
+    }
+
+    const cap = Math.min(MAX_TEST_ARTIFACT_CHARS, budget);
+    const truncated = raw.length > cap;
+    const content = truncated
+      ? `${raw.slice(0, cap)}\n[... tronqué, ${raw.length - cap} caractère(s) non montré(s) ...]`
+      : raw;
+
+    files.push({ path, content, truncated });
+    budget -= content.length;
+  }
+
+  return files;
 }
 
 export async function runImplement(
@@ -602,10 +755,86 @@ export async function runImplement(
       docker: project.docker,
     });
     if (!verdict.ok) {
+      // La baseline était verte (vérifiée plus haut) et rien hors périmètre
+      // n'a bougé (offending/deletedTests vides ci-dessus) : l'agent a donc
+      // écrit une assertion que le code ne satisfait pas. Soit son test est
+      // faux, soit le code a un défaut — rien ici ne permet de trancher, et
+      // aucune heuristique ne le pourra : c'est le même jugement que "trouver
+      // un bug", qu'on sait mesurément hors de portée des modèles visés.
+      //
+      // Ce qu'on peut faire, en revanche, c'est arrêter de le JETER. Jusqu'à
+      // ce correctif, ce cas partageait le statut "tests-red" avec un `npm
+      // install` en échec, et seul le message d'échec atteignait GitLab :
+      // le contenu des tests écrits mourait avec le workspace. Le pipeline
+      // récompensait donc exactement le mauvais comportement — un agent qui
+      // fait passer sa suite en épousant le bug repart en "pushed".
+      const output = verdict.output.slice(-COMMAND_OUTPUT_TAIL_CHARS);
+      const artifacts = readWrittenFiles(repo, paths);
+      const detail =
+        `l'agent a écrit ${paths.length} fichier(s) que le code ne satisfait pas — ` +
+        `soit le test est incorrect, soit le code contient un défaut : à trancher humainement`;
+
+      // Mesuré le 1er août 2026, et c'est LE résultat de la campagne : les
+      // deux seuls modèles à avoir attrapé un vrai bug (qwen3.6-35b-a3b et
+      // qwen3.5-397b-a17b, tous deux sur le bug #4) sont repartis d'ici les
+      // mains vides, leur travail détruit avec le workspace. Les deux modèles
+      // qui ont "réussi" (pushed) sont ceux qui n'avaient rien trouvé — dont
+      // un qui a gravé un bug dans la suite après l'avoir décrit en
+      // commentaire. Le pipeline publiait le mauvais comportement et jetait
+      // le bon.
+      //
+      // On passe donc par la MR dédiée, quelles que soient les capacités du
+      // dépôt : ces tests sont ROUGES, ils ne doivent jamais atteindre la
+      // branche source, même quand pushToSourceBranch est accordé — mais ils
+      // valent bien mieux que rien. En Draft : la MR est faite pour être lue
+      // et tranchée, pas fusionnée depuis une liste. Le diff de la MR EST le
+      // rapport (les tests écrits), la description porte ce que le diff ne
+      // peut pas montrer (la sortie d'échec).
+      let mrUrl: string | undefined;
+      try {
+        await git(repo, ["add", "--all"]);
+        await git(repo, [
+          "commit",
+          "-m",
+          `test: assertions non satisfaites, à trancher (demande de @${context.requester})`,
+        ]);
+        ({ mrUrl } = await openDedicatedMergeRequest(
+          repo,
+          context.projectId,
+          context.targetIid,
+          branch,
+          context.requester,
+          context.requestText,
+          {
+            draft: true,
+            title: `cds-agent : tests rouges à trancher (@${context.requester})`,
+            extraDescription: [
+              `⚠️ **Ces tests échouent volontairement.** La suite de référence était VERTE avant intervention et seuls des fichiers autorisés ont été modifiés : l'agent a donc écrit une assertion que le code ne satisfait pas.`,
+              `Deux lectures possibles, que rien ne permet de départager automatiquement : soit l'assertion est fausse, soit elle a mis au jour un défaut du code. Comparez le diff au code testé avant de fusionner ou de fermer.`,
+              `<details><summary>Sortie de la suite</summary>\n\n\`\`\`\n${output}\n\`\`\`\n\n</details>`,
+            ].join("\n\n"),
+          },
+        ));
+        log.info(`[implement] tests rouges préservés en MR dédiée : ${mrUrl}`);
+      } catch (error) {
+        // Repli sur le comportement d'avant ce correctif, en pire cas
+        // seulement : le contenu des tests part alors dans le commentaire
+        // GitLab (artifacts), ce qui reste préférable à une perte sèche.
+        log.warn(
+          `[implement] MR dédiée impossible pour des tests rouges (${(error as Error).message}) — ` +
+            `repli sur la republication du contenu dans le rapport`,
+        );
+      }
+
       return {
-        status: "tests-red",
-        detail: `les tests écrits ne passent pas :\n${verdict.output.slice(-COMMAND_OUTPUT_TAIL_CHARS)}`,
+        status: "tests-failing",
+        detail: mrUrl
+          ? detail
+          : `${detail} ; MR dédiée impossible, contenu republié ci-dessous`,
         files: paths,
+        output,
+        artifacts,
+        mrUrl,
         durationMs: Date.now() - started,
       };
     }

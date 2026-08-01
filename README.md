@@ -50,7 +50,9 @@ flowchart TD
     I --> J[extraction JSON, validation, publication ligne / fichier / général]
     H -->|implémente les tests| K[clone superficiel, install, tests de référence, agent en sandbox]
     K --> L[contrôle HEAD + .git, garde-fou de chemin, tests rejoués, push si vert]
-    J --> M[la note d'accusé de réception est éditée : résultat + 👀 → ✅/❌]
+    L -->|suite rouge sur une assertion juste| N[tests-failing : MR dédiée en Draft, à trancher humainement]
+    N --> M
+    J --> M[la note d'accusé de réception est éditée : résultat + 👀 → ✅/🔍/❌]
     L --> M
 ```
 
@@ -124,9 +126,15 @@ Déroulé, dans l'ordre :
     branche source (défaut) ou ouverture d'une merge request dédiée du bot
     (`pushToSourceBranch: false`).
 11. **Rapport** — la note d'accusé de réception (étape 6) est éditée pour
-    porter le résultat, et sa réaction passe de 👀 à ✅ ou ❌. Le demandeur
-    est toujours informé, y compris en cas d'échec. Si l'édition échoue —
-    note supprimée entre-temps — le résultat est publié dans une note
+    porter le résultat, et sa réaction passe de 👀 à l'une de **trois**
+    issues : ✅ livré (suite verte), 🔍 rien n'est livré mais il y a une
+    décision humaine à prendre (`tests-failing` — voir
+    [Garde-fous](#garde-fous-de-sécurité)), ❌ échec réel (installation
+    cassée, suite déjà rouge, refus). Trois et non deux délibérément : ranger
+    `tests-failing` avec ✅ le confondrait avec un run livré, le ranger avec ❌
+    avec une panne — c'est le seul cas où le bot a peut-être trouvé un défaut.
+    Le demandeur est toujours informé, y compris en cas d'échec. Si l'édition
+    échoue — note supprimée entre-temps — le résultat est publié dans une note
     neuve plutôt que perdu.
 
 Le seul flux réellement câblé aujourd'hui est celui des **merge requests** :
@@ -715,6 +723,24 @@ commentaires du code cité :
   `seccomp=` attend un chemin de fichier de profil, pas un mot-clé),
   `--pids-limit`, `--ulimit nofile`, réseau `none` par défaut (`bridge`
   uniquement pour l'exécution de l'agent, via le proxy d'inférence).
+- **Un test rouge sur une assertion juste n'est plus jeté**
+  (`tests-failing`, `src/tasks/implement.ts`) : quand la suite de référence
+  était verte, que seuls des fichiers autorisés ont changé et que la suite est
+  rouge après l'agent, le travail part dans une **merge request dédiée en
+  Draft** (branche `cds-agent/…`, jamais la branche source, quelles que
+  soient les capacités du dépôt), dont le diff porte les tests écrits et la
+  description la sortie d'échec. Un humain tranche entre « l'assertion est
+  fausse » (fermer) et « le code a un défaut » (fusionner). Si l'ouverture de
+  la MR échoue, repli sur la republication du contenu dans le commentaire —
+  jamais une perte sèche.
+
+  Mesuré le 1er août 2026, et c'est ce qui a motivé ce correctif : sur quatre
+  modèles, **les deux seuls à avoir attrapé un vrai bug repartaient les mains
+  vides** (leur travail détruit avec le workspace), pendant que les deux qui
+  n'avaient rien trouvé voyaient le leur publié — dont un qui a gravé un bug
+  dans la suite après l'avoir décrit en commentaire. Le pipeline publiait le
+  mauvais comportement et jetait le bon. `pushed` n'est pas un succès,
+  `tests-failing` n'est pas un échec.
 - **Revue réellement en lecture seule** (`permissionsFor`, même fichier) : la
   configuration opencode générée refuse `edit`, `bash` et `webfetch` pour une
   revue comme pour le planificateur ; seule une tâche d'implémentation reçoit

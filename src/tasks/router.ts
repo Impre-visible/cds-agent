@@ -3,7 +3,7 @@ import { config } from "../config.ts";
 import { gitlab } from "../gitlab/client.ts";
 import { publishReview } from "./publish.ts";
 import { runReview } from "./review.ts";
-import { runImplement } from "./implement.ts";
+import { runImplement, type ImplementResult } from "./implement.ts";
 import { describeCapabilities, isDefaultCapabilities } from "./guard.ts";
 import { repoCapabilitiesFor, type ResolvedCapabilities, type ResolvedProject } from "../projects.ts";
 import {
@@ -291,9 +291,40 @@ export async function resolveIntent(
 }
 
 /**
+ * Issue d'une demande, du point de vue de quelqu'un qui parcourt une liste de
+ * MR sans lire les commentaires.
+ *
+ * C'était un booléen (`ok`) jusqu'au 1er août 2026, et la campagne de mesure a
+ * montré que deux valeurs ne suffisent pas : `tests-failing` n'appartient à
+ * aucun des deux sacs. Le mettre avec `pushed` reviendrait à confondre les
+ * deux résultats les plus opposés qui existent (on a mesuré que les modèles
+ * qui livrent sont ceux qui n'ont rien trouvé) ; le laisser avec `x` le range
+ * parmi les vraies pannes, alors qu'il signale précisément le contraire —
+ * quelque chose à regarder.
+ *
+ * Trois issues, donc, et pas un booléen qu'il faudrait rediscuter au prochain
+ * statut ajouté :
+ * - "delivered" : livré, suite verte (pushed, mr-opened) ;
+ * - "to-triage" : rien n'est livré, mais il y a une décision humaine à
+ *   prendre — c'est un résultat, pas une panne ;
+ * - "failed"    : échec réel (install cassé, suite déjà rouge, refus, erreur).
+ */
+export type TaskOutcome = "delivered" | "to-triage" | "failed";
+
+/**
+ * L'API award emoji accepte n'importe quel nom de la table gemoji : rien
+ * n'obligeait à se limiter à deux réactions.
+ */
+const OUTCOME_EMOJI: Record<TaskOutcome, string> = {
+  delivered: "white_check_mark",
+  "to-triage": "mag",
+  failed: "x",
+};
+
+/**
  * §6.10 : fait évoluer la réaction 👀 (posée par daemon/index.ts::acknowledge())
- * vers ✅ ou ❌ selon l'issue de la tâche. L'API award emoji ne propose pas de
- * mise à jour en place : on supprime l'ancienne réaction (si elle a pu être
+ * vers ✅, 🔍 ou ❌ selon l'issue de la tâche. L'API award emoji ne propose pas
+ * de mise à jour en place : on supprime l'ancienne réaction (si elle a pu être
  * posée, voir AckHandle.awardId) avant d'en poser une nouvelle. Best-effort,
  * comme l'accusé de réception initial : un échec ici ne doit jamais faire
  * perdre le résultat déjà publié par report() ci-dessous.
@@ -301,10 +332,10 @@ export async function resolveIntent(
 async function evolveReaction(
   request: AgentRequest,
   ack: AckHandle,
-  ok: boolean,
+  outcome: TaskOutcome,
 ): Promise<void> {
   const { projectId, kind, iid, noteId } = request;
-  const emoji = ok ? "white_check_mark" : "x";
+  const emoji = OUTCOME_EMOJI[outcome];
 
   try {
     if (ack.awardId !== null) {
@@ -342,7 +373,7 @@ async function evolveReaction(
 export async function report(
   request: AgentRequest,
   body: string,
-  ok: boolean,
+  outcome: TaskOutcome,
 ): Promise<void> {
   const fullBody = `${body}\n\n<sub>cds-agent</sub>`;
 
@@ -355,7 +386,7 @@ export async function report(
         request.ack.ackNoteId,
         fullBody,
       );
-      await evolveReaction(request, request.ack, ok);
+      await evolveReaction(request, request.ack, outcome);
       return;
     } catch (error) {
       log.warn(
@@ -366,7 +397,60 @@ export async function report(
   }
 
   await gitlab.createNote(request.projectId, request.kind, request.iid, fullBody);
-  if (request.ack) await evolveReaction(request, request.ack, ok);
+  if (request.ack) await evolveReaction(request, request.ack, outcome);
+}
+
+/**
+ * Compte rendu du statut "tests-failing" : la baseline était verte, l'agent
+ * n'a touché que des fichiers autorisés, et son assertion n'est pas
+ * satisfaite par le code.
+ *
+ * Ce rapport publie le CONTENU des fichiers écrits, pas seulement le message
+ * d'échec — c'est toute la différence entre « le bot est tombé en panne » et
+ * « le bot a peut-être trouvé un défaut, voici l'assertion, tranchez ». Le
+ * workspace est détruit juste après runImplement : ce commentaire est le seul
+ * endroit où ce travail continue d'exister.
+ *
+ * Tout ce qui vient de l'agent ou du dépôt traverse defuseMentions() avant
+ * republication, y compris le contenu des fichiers : un test écrit par un LLM
+ * peut parfaitement contenir « @tout-le-monde » ou une quick action GitLab
+ * dans un commentaire ou une chaîne (même logique qu'en publish.ts, §5.6).
+ */
+function buildTestsFailingReport(
+  result: ImplementResult,
+  seconds: number,
+): string {
+  const preamble = [
+    `⚠️ **À trancher** — en ${seconds} s, ${defuseMentions(result.detail)}.`,
+    `La suite de référence était verte avant intervention et seuls des fichiers autorisés ont été modifiés : soit l'assertion est fausse, soit elle a mis au jour un défaut du code. Rien n'a été poussé sur la branche source.`,
+  ];
+
+  // Chemin nominal : le travail est préservé dans une MR dédiée en Draft, et
+  // son diff EST le rapport. Inutile de recopier le contenu des fichiers ici
+  // — le lien vaut mieux qu'un commentaire de plusieurs centaines de lignes.
+  if (result.mrUrl) {
+    return [
+      ...preamble,
+      `📝 Les tests écrits sont préservés dans une merge request **Draft** : ${result.mrUrl}`,
+      `Comparez son diff au code testé, puis fusionnez (l'assertion était juste, le défaut est réel) ou fermez (l'assertion était fausse).`,
+    ].join("\n\n");
+  }
+
+  // Repli : l'ouverture de la MR a échoué. Le contenu part dans le
+  // commentaire, ce qui reste très préférable à une perte sèche — le
+  // workspace, lui, est déjà détruit.
+  const artifacts = (result.artifacts ?? [])
+    .map(
+      (artifact) =>
+        `<details><summary>${defuseMentions(artifact.path)}</summary>\n\n\`\`\`\n${defuseMentions(artifact.content)}\n\`\`\`\n\n</details>`,
+    )
+    .join("\n");
+
+  const output = result.output
+    ? `<details><summary>Sortie de la suite</summary>\n\n\`\`\`\n${defuseMentions(result.output.slice(-TESTS_RED_REPORT_TAIL_CHARS))}\n\`\`\`\n\n</details>`
+    : "";
+
+  return [...preamble, output, artifacts].filter(Boolean).join("\n\n");
 }
 
 export async function runTask(request: AgentRequest): Promise<void> {
@@ -377,7 +461,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
       await report(
         request,
         "🤖 Seules les merge requests sont gérées pour l'instant.",
-        false,
+        "failed",
       );
       return;
     }
@@ -429,7 +513,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
               ? ` Le planificateur a répondu : « ${defuseMentions(decision.plannerReason)} ».`
               : ""
           }`;
-      await report(request, message, false);
+      await report(request, message, "failed");
       return;
     }
 
@@ -453,7 +537,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
     // dépôt ?".
     const refusal = intentRefusalReason(request.kind, intent, project.capabilities);
     if (refusal) {
-      await report(request, `🤖 Demande refusée : ${refusal}.`, false);
+      await report(request, `🤖 Demande refusée : ${refusal}.`, "failed");
       return;
     }
 
@@ -487,6 +571,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
         "mr-opened": `✅ Merge request dédiée ouverte en ${seconds} s — ${defuseMentions(result.detail)}`,
         rejected: `⛔ Modifications refusées après ${seconds} s — ${defuseMentions(result.detail)}`,
         "tests-red": `❌ Les tests ne passent pas après ${seconds} s, rien n'a été poussé.\n\n<details><summary>Sortie</summary>\n\n\`\`\`\n${defuseMentions(result.detail.slice(-TESTS_RED_REPORT_TAIL_CHARS))}\n\`\`\`\n\n</details>`,
+        "tests-failing": buildTestsFailingReport(result, seconds),
         "no-change": `🤷 L'agent n'a produit aucune modification en ${seconds} s.`,
       };
 
@@ -504,14 +589,35 @@ export async function runTask(request: AgentRequest): Promise<void> {
         ? ""
         : `\n\n🔓 Capacités élargies pour ce dépôt : ${describeCapabilities(capabilities)}.`;
 
-      const ok = result.status === "pushed" || result.status === "mr-opened";
-      await report(request, messages[result.status] + capabilityNote, ok);
+      // Une table exhaustive plutôt qu'une expression booléenne : le
+      // vérificateur de types refusera de compiler si un statut est ajouté
+      // sans qu'on ait décidé de son issue, là où un `=== "pushed" || ...`
+      // rangeait silencieusement tout nouveau statut avec les pannes. C'est
+      // exactement ce qui est arrivé à "tests-failing".
+      const outcomes: Record<typeof result.status, TaskOutcome> = {
+        pushed: "delivered",
+        "mr-opened": "delivered",
+        // Rien n'est livré, mais ce n'est pas une panne : c'est le seul cas
+        // où le bot a peut-être trouvé un défaut réel (voir
+        // buildTestsFailingReport et le statut "tests-failing" côté
+        // implement.ts). Le ranger avec ❌ était précisément l'erreur que la
+        // campagne du 1er août 2026 a rendue visible.
+        "tests-failing": "to-triage",
+        rejected: "failed",
+        "tests-red": "failed",
+        "no-change": "failed",
+      };
+      await report(
+        request,
+        messages[result.status] + capabilityNote,
+        outcomes[result.status],
+      );
       log.info(`[worker] terminé ${request.key} — ${result.status}`);
       return;
     }
 
     if (executionContext.files.length === 0) {
-      await report(request, "🤖 Aucun changement à relire — le diff est vide.", false);
+      await report(request, "🤖 Aucun changement à relire — le diff est vide.", "failed");
       return;
     }
 
@@ -533,7 +639,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
       await report(
         request,
         `🤖 Revue terminée en ${seconds} s : aucune remarque exploitable. Les remarques produites ne correspondaient à aucun fichier du diff et ont été écartées.${truncationWarning}`,
-        true,
+        "delivered",
       );
       return;
     }
@@ -561,7 +667,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
     await report(
       request,
       `🤖 Revue terminée en ${seconds} s — ${outcomes.length} remarque(s) publiée(s)${detail}${truncationWarning}`,
-      true,
+      "delivered",
     );
 
     log.info(
@@ -580,7 +686,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
     await report(
       request,
       `🤖 La tâche a échoué : \`${defuseMentions(message)}\``,
-      false,
+      "failed",
     ).catch(() => {});
   }
 }

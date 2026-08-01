@@ -251,7 +251,7 @@ describe("report — édition de l'accusé de réception (§6.10)", () => {
       },
     );
 
-    await report(request({ ack: { ackNoteId: 501, awardId: 900 } }), "résultat", true);
+    await report(request({ ack: { ackNoteId: 501, awardId: 900 } }), "résultat", "delivered");
 
     assert.ok(calls.includes("PUT /api/v4/projects/42/merge_requests/7/notes/501"));
     assert.ok(
@@ -262,10 +262,10 @@ describe("report — édition de l'accusé de réception (§6.10)", () => {
       calls.includes("DELETE /api/v4/projects/42/merge_requests/7/notes/99/award_emoji/900"),
       "l'ancienne réaction 👀 doit être supprimée",
     );
-    assert.equal(awardedName, "white_check_mark", "ok=true doit poser ✅");
+    assert.equal(awardedName, "white_check_mark", '"delivered" doit poser ✅');
   });
 
-  test("ok=false pose ❌ plutôt que ✅", async () => {
+  test('"failed" pose ❌ plutôt que ✅', async () => {
     routes.set("PUT /api/v4/projects/42/merge_requests/7/notes/501", (_req, res) =>
       respondJson(res, 200, fakeNote(501)),
     );
@@ -285,8 +285,44 @@ describe("report — édition de l'accusé de réception (§6.10)", () => {
       },
     );
 
-    await report(request({ ack: { ackNoteId: 501, awardId: 900 } }), "échec", false);
+    await report(request({ ack: { ackNoteId: 501, awardId: 900 } }), "échec", "failed");
     assert.equal(awardedName, "x");
+  });
+
+  // Le booléen `ok` n'avait que deux sacs, et "tests-failing" n'appartient à
+  // aucun des deux : le ranger avec ✅ le confondrait avec un run livré (or
+  // la campagne du 1er août 2026 a montré que les modèles qui livrent sont
+  // ceux qui n'ont rien trouvé), le ranger avec ❌ le confond avec une panne.
+  test('"to-triage" pose 🔍 — ni un succès livré, ni une panne', async () => {
+    routes.set("PUT /api/v4/projects/42/merge_requests/7/notes/501", (_req, res) =>
+      respondJson(res, 200, fakeNote(501)),
+    );
+    routes.set(
+      "DELETE /api/v4/projects/42/merge_requests/7/notes/99/award_emoji/900",
+      (_req, res) => {
+        res.writeHead(204);
+        res.end();
+      },
+    );
+    let awardedName = "";
+    routes.set(
+      "POST /api/v4/projects/42/merge_requests/7/notes/99/award_emoji",
+      (req, res) => {
+        awardedName =
+          new URL(req.url ?? "/", "http://localhost").searchParams.get("name") ?? "";
+        respondJson(res, 201, { id: 906 });
+      },
+    );
+
+    await report(
+      request({ ack: { ackNoteId: 501, awardId: 900 } }),
+      "à trancher",
+      "to-triage",
+    );
+
+    assert.equal(awardedName, "mag");
+    assert.notEqual(awardedName, "white_check_mark");
+    assert.notEqual(awardedName, "x");
   });
 
   test("édition impossible (note supprimée entre-temps) : republication d'une nouvelle note, le résultat n'est pas perdu", async () => {
@@ -321,7 +357,7 @@ describe("report — édition de l'accusé de réception (§6.10)", () => {
     await report(
       request({ ack: { ackNoteId: 501, awardId: 900 } }),
       "résultat important à ne pas perdre",
-      false,
+      "failed",
     );
 
     assert.ok(calls.includes("PUT /api/v4/projects/42/merge_requests/7/notes/501"));
@@ -339,7 +375,7 @@ describe("report — édition de l'accusé de réception (§6.10)", () => {
       respondJson(res, 201, fakeNote(1));
     });
 
-    await report(request(), "résultat", true);
+    await report(request(), "résultat", "delivered");
 
     assert.ok(created);
     assert.ok(
@@ -366,7 +402,7 @@ describe("report — édition de l'accusé de réception (§6.10)", () => {
     await report(
       request({ noteId: null, ack: { ackNoteId: 501, awardId: 900 } }),
       "résultat",
-      true,
+      "delivered",
     );
 
     assert.ok(calls.includes("DELETE /api/v4/projects/42/merge_requests/7/award_emoji/900"));
@@ -382,7 +418,7 @@ describe("report — édition de l'accusé de réception (§6.10)", () => {
       (_req, res) => respondJson(res, 201, { id: 905 }),
     );
 
-    await report(request({ ack: { ackNoteId: 501, awardId: null } }), "résultat", true);
+    await report(request({ ack: { ackNoteId: 501, awardId: null } }), "résultat", "delivered");
 
     assert.ok(!calls.some((c) => c.startsWith("DELETE")));
     assert.ok(calls.includes("POST /api/v4/projects/42/merge_requests/7/notes/99/award_emoji"));

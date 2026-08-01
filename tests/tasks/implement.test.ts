@@ -26,6 +26,10 @@ let buildPrompt: (
 ) => string;
 let buildInstallCommand: (installCommand: string, ignoreScripts: boolean) => string;
 let rollbackAgentChanges: (repo: string) => Promise<void>;
+let readWrittenFiles: (
+  repo: string,
+  paths: string[],
+) => { path: string; content: string; truncated: boolean }[];
 let buildBotBranchName: (targetIid: number) => string;
 let openDedicatedMergeRequest: (
   repo: string,
@@ -34,6 +38,7 @@ let openDedicatedMergeRequest: (
   targetBranch: string,
   requester: string,
   requestText: string,
+  options?: { draft?: boolean; title?: string; extraDescription?: string },
 ) => Promise<{ branchName: string; mrUrl: string }>;
 
 // Chantier "capacités" (§A.3) : openDedicatedMergeRequest passe par
@@ -88,6 +93,7 @@ before(async () => {
     buildPrompt,
     buildInstallCommand,
     rollbackAgentChanges,
+    readWrittenFiles,
     buildBotBranchName,
     openDedicatedMergeRequest,
   } = await import("../../src/tasks/implement.ts"));
@@ -571,6 +577,97 @@ describe("buildPrompt — capacités (chantier « capacités »)", () => {
     assert.match(prompt, /src\/generated\/\*\*/);
     assert.match(prompt, /tests\//);
   });
+
+  // Le prompt disait « corrige tes tests jusqu'à ce que tout passe » PUIS
+  // « si le code a un bug, écris quand même le test correct et arrête-toi »,
+  // sans dire laquelle l'emporte — pendant que le pipeline jetait la seconde
+  // branche (tests-red) et récompensait la première (pushed).
+  describe("l'agent ne doit plus avoir intérêt à graver le bug pour obtenir du vert", () => {
+    test("les deux causes d'échec sont distinguées explicitement", () => {
+      const prompt = buildPrompt(context());
+      assert.match(prompt, /parce que TON test est faux/);
+      assert.match(prompt, /parce que le CODE SOURCE a un défaut/);
+    });
+
+    test("écrire une assertion qu'on sait fausse pour obtenir du vert est interdit", () => {
+      const prompt = buildPrompt(context());
+      assert.match(prompt, /N'écris JAMAIS une assertion/);
+    });
+
+    test("s'arrêter sur un test rouge est annoncé comme un résultat conservé, pas comme un échec", () => {
+      const prompt = buildPrompt(context());
+      assert.match(prompt, /n'est pas un échec de ta part/);
+      assert.match(prompt, /conservé et transmis à un humain/);
+    });
+
+    test('writablePaths="all" : consigne inchangée, l\'agent corrige le bug lui-même', () => {
+      const prompt = buildPrompt(context(), "npm test", {
+        writablePaths: "all",
+        publishMode: "source-branch",
+      });
+      assert.match(prompt, /corrige ce bug/);
+      assert.ok(!prompt.includes("N'écris JAMAIS une assertion"));
+    });
+  });
+});
+
+// Le workspace est détruit dès runImplement terminé : sans cette lecture, le
+// travail de l'agent n'existe plus nulle part.
+describe("readWrittenFiles (statut « tests-failing »)", () => {
+  let dir: string;
+
+  before(() => {
+    dir = mkdtempSync(join(tmpdir(), "cds-artifacts-"));
+    mkdirSync(join(dir, "tests"), { recursive: true });
+    writeFileSync(
+      join(dir, "tests", "todo.test.js"),
+      "expect(sum(1, 2)).toBe(3);\n",
+      "utf8",
+    );
+  });
+
+  after(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("rend le contenu réel du fichier écrit", () => {
+    const [written] = readWrittenFiles(dir, ["tests/todo.test.js"]);
+    assert.equal(written?.path, "tests/todo.test.js");
+    assert.equal(written?.content, "expect(sum(1, 2)).toBe(3);\n");
+    assert.equal(written?.truncated, false);
+  });
+
+  test("un fichier trop long est coupé VISIBLEMENT, jamais en silence", () => {
+    writeFileSync(join(dir, "tests", "gros.test.js"), "x".repeat(5_000), "utf8");
+    const [written] = readWrittenFiles(dir, ["tests/gros.test.js"]);
+    assert.equal(written?.truncated, true);
+    assert.match(written?.content ?? "", /tronqué, \d+ caractère\(s\) non montré\(s\)/);
+  });
+
+  test("un fichier illisible est NOMMÉ plutôt qu'omis — un trou ferait conclure à tort", () => {
+    const [written] = readWrittenFiles(dir, ["tests/jamais-ecrit.js"]);
+    assert.equal(written?.path, "tests/jamais-ecrit.js");
+    assert.match(written?.content ?? "", /illisible/);
+  });
+
+  test("le plafond cumulé borne le rapport, et les fichiers évincés restent listés", () => {
+    for (const name of ["a", "b", "c", "d", "e"]) {
+      writeFileSync(join(dir, "tests", `${name}.test.js`), "y".repeat(2_000), "utf8");
+    }
+    const written = readWrittenFiles(
+      dir,
+      ["a", "b", "c", "d", "e"].map((name) => `tests/${name}.test.js`),
+    );
+    assert.equal(written.length, 5, "aucun fichier ne doit disparaître du rapport");
+    const total = written.reduce((sum, file) => sum + file.content.length, 0);
+    assert.ok(
+      total < 7_000,
+      `le rapport doit rester borné (${total} caractères produits)`,
+    );
+    assert.match(
+      written[written.length - 1]?.content ?? "",
+      /plafond global/,
+      "le dernier fichier doit dire pourquoi il n'est pas montré",
+    );
+  });
 });
 
 // Chantier "projects.json" : resolveCapabilities/resolveCommand (Map par
@@ -718,6 +815,97 @@ describe("openDedicatedMergeRequest (§A.3 : mode publishMode=\"dedicated-mr\")"
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  // Mesuré le 1er août 2026 : les deux seuls modèles à avoir attrapé un vrai
+  // bug sont repartis les mains vides (statut tests-failing → aucun push →
+  // workspace détruit), pendant que les deux modèles qui n'avaient rien
+  // trouvé voyaient leur travail publié. La MR Draft est ce qui remet le
+  // pipeline à l'endroit.
+  describe("tests rouges à trancher : Draft + description qui porte la sortie", () => {
+    test("le titre est préfixé Draft: — cette MR se lit, elle ne se fusionne pas d'un clic", async () => {
+      const { root, repo } = makeRepoWithOrigin();
+      try {
+        mkdirSync(join(repo, "tests"), { recursive: true });
+        writeFileSync(join(repo, "tests", "rouge.test.js"), "// assertion\n");
+        await git(repo, ["add", "--all"]);
+        await git(repo, ["commit", "-m", "test: assertions non satisfaites"]);
+
+        receivedMergeRequests = [];
+        await openDedicatedMergeRequest(repo, 42, 7, "main", "alice", "écris des tests", {
+          draft: true,
+          title: "cds-agent : tests rouges à trancher (@alice)",
+          extraDescription: "Sortie : 1 test échoue",
+        });
+
+        assert.equal(
+          receivedMergeRequests[0]?.title,
+          "Draft: cds-agent : tests rouges à trancher (@alice)",
+        );
+        assert.match(receivedMergeRequests[0]?.description ?? "", /Sortie : 1 test échoue/);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("mentions et quick actions sont neutralisées dans la description — elle notifie de vraies personnes", async () => {
+      const { root, repo } = makeRepoWithOrigin();
+      try {
+        mkdirSync(join(repo, "tests"), { recursive: true });
+        writeFileSync(join(repo, "tests", "x.test.js"), "// t\n");
+        await git(repo, ["add", "--all"]);
+        await git(repo, ["commit", "-m", "test: x"]);
+
+        receivedMergeRequests = [];
+        await openDedicatedMergeRequest(
+          repo,
+          42,
+          7,
+          "main",
+          "alice",
+          "coucou @tout-le-monde",
+          { extraDescription: "sortie contenant @admin et\n/merge" },
+        );
+
+        const description = receivedMergeRequests[0]?.description ?? "";
+        assert.ok(
+          !/(^|[^`])@tout-le-monde/.test(description),
+          "la mention de la demande d'origine doit être neutralisée",
+        );
+        assert.ok(
+          !/(^|[^`])@admin/.test(description),
+          "la mention issue de la sortie de commande doit l'être aussi",
+        );
+        assert.ok(
+          !/^\/merge$/m.test(description),
+          "une quick action en début de ligne ne doit pas rester exécutable",
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("sans options : titre et description identiques à avant ce correctif", async () => {
+      const { root, repo } = makeRepoWithOrigin();
+      try {
+        mkdirSync(join(repo, "tests"), { recursive: true });
+        writeFileSync(join(repo, "tests", "y.test.js"), "// t\n");
+        await git(repo, ["add", "--all"]);
+        await git(repo, ["commit", "-m", "test: y"]);
+
+        receivedMergeRequests = [];
+        await openDedicatedMergeRequest(repo, 42, 7, "main", "alice", "demande");
+
+        assert.equal(
+          receivedMergeRequests[0]?.title,
+          "cds-agent : tests demandés par @alice",
+          "aucun préfixe Draft sur le chemin nominal",
+        );
+        assert.match(receivedMergeRequests[0]?.description ?? "", /Demande d'origine : demande/);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 
   test("deux demandes successives sur la même MR ouvrent deux branches distinctes, sans collision", async () => {
