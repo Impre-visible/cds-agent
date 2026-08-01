@@ -432,8 +432,15 @@ réaction posée sur votre propre message, qui n'ajoute rien à la conversation.
 | Tests poussés sur la branche | ✅ — *aucune note*, les commits sont visibles |
 | MR dédiée ouverte | ✅ + une note avec son adresse |
 | Mise en garde (capacités restreintes, relecture croisée) | ✅ + une note qui la porte |
-| À trancher (`tests-failing`, `review-flagged`) | 🔍 + le compte rendu complet |
+| À trancher (`tests-failing`, `review-flagged`) | 🔍 + le compte rendu complet, **et le réglage qui lèverait l'arrêt** |
 | Échec | ❌ + la cause |
+
+Quand le bot s'arrête faute de permission, il le **dit dans le rapport** et
+nomme le réglage à changer. Un `tests-failing` sur un dépôt en tests-seuls
+signifie « j'ai conclu à un défaut du code et je n'ai pas le droit d'y
+toucher » : le compte rendu indique alors `"writeBusinessCode": true` et son
+prix (accès à tout le dépôt, perte du point d'arrêt humain). Vous n'avez pas à
+aller lire le code pour savoir que le comportement se règle.
 
 Ce qui disparaît des notes ne disparaît pas des **journaux** du daemon : durée,
 répartition des remarques par emplacement, position dans la file, revue

@@ -21,6 +21,7 @@ const BOT_USERNAME = "cds-bot";
 let detectIntent: typeof import("../../src/tasks/router.ts").detectIntent;
 let isThreadFollowUp: typeof import("../../src/tasks/router.ts").isThreadFollowUp;
 let reportInThread: typeof import("../../src/tasks/router.ts").reportInThread;
+let grantHint: typeof import("../../src/tasks/router.ts").grantHint;
 let report: typeof import("../../src/tasks/router.ts").report;
 let intentRefusalReason: typeof import("../../src/tasks/router.ts").intentRefusalReason;
 let refuseRequestedCapabilities: typeof import("../../src/tasks/router.ts").refuseRequestedCapabilities;
@@ -66,7 +67,7 @@ before(async () => {
   process.env.GITLAB_REQUEST_TIMEOUT_MS = "500";
   process.env.GITLAB_MAX_RETRIES = "0";
 
-  ({ detectIntent, isThreadFollowUp, reportInThread, report, intentRefusalReason, refuseRequestedCapabilities, resolveIntent } =
+  ({ detectIntent, isThreadFollowUp, reportInThread, grantHint, report, intentRefusalReason, refuseRequestedCapabilities, resolveIntent } =
     await import("../../src/tasks/router.ts"));
 });
 
@@ -938,5 +939,38 @@ describe("report — un succès ne se raconte pas", () => {
 
     await report(request(), "🤖 message", "failed");
     assert.equal(created, true);
+  });
+});
+
+/**
+ * « Faudrait essayer de le dire, parce que si je dois te demander à chaque
+ * fois... » — un `tests-failing` veut dire que l'agent a conclu à un défaut du
+ * code et s'est arrêté PARCE QU'IL N'AVAIT PAS LE DROIT d'y toucher. Vu du
+ * demandeur, ça ressemble à un abandon, et le seul moyen de savoir que ça se
+ * règle était de lire le code.
+ */
+describe("grantHint — le rapport dit lui-même quel réglage lèverait l'arrêt", () => {
+  test("tests seuls : le rapport nomme le réglage ET son prix", () => {
+    const hint = grantHint({ writablePaths: "tests-only", publishMode: "dedicated-mr" });
+    assert.match(hint, /writeBusinessCode/);
+    assert.match(hint, /projects\.json/);
+    // Un réglage annoncé sans son coût est un piège : il donne accès à TOUT
+    // le dépôt et supprime le point d'arrêt humain.
+    assert.match(hint, /TOUT le dépôt/);
+    assert.match(hint, /point d'arrêt humain/);
+  });
+
+  test("motifs ciblés : même suggestion, le code source reste hors de portée", () => {
+    const hint = grantHint({
+      writablePaths: ["src/generated/**"],
+      publishMode: "dedicated-mr",
+    });
+    assert.match(hint, /writeBusinessCode/);
+  });
+
+  test("droit DÉJÀ accordé : rien n'est suggéré — ce serait du bruit", () => {
+    // L'agent pouvait corriger : s'il s'est arrêté, ce n'est pas faute de
+    // permission, et proposer un réglage déjà actif n'apprendrait rien.
+    assert.equal(grantHint({ writablePaths: "all", publishMode: "source-branch" }), "");
   });
 });

@@ -6,7 +6,11 @@ import { runReview } from "./review.ts";
 import { botParticipates, findThread, runExplain } from "./explain.ts";
 import { createWorkspace } from "../agent/workspace.ts";
 import { runImplement, type ImplementResult } from "./implement.ts";
-import { describeCapabilities, isDefaultCapabilities } from "./guard.ts";
+import {
+  describeCapabilities,
+  isDefaultCapabilities,
+  type RepoCapabilities,
+} from "./guard.ts";
 import { repoCapabilitiesFor, type ResolvedCapabilities, type ResolvedProject } from "../projects.ts";
 import {
   runPlanner,
@@ -450,14 +454,42 @@ export async function report(
  * peut parfaitement contenir « @tout-le-monde » ou une quick action GitLab
  * dans un commentaire ou une chaîne (même logique qu'en publish.ts, §5.6).
  */
+/**
+ * Le levier disponible pour ne PAS s'arrêter là la prochaine fois.
+ *
+ * Un `tests-failing` veut dire que l'agent a conclu à un défaut du code et
+ * s'est arrêté — parce que le prompt le lui ordonne quand il n'a pas le droit
+ * de toucher au code source (voir bugInstruction dans implement.ts). Vu du
+ * demandeur, ça ressemble à un abandon, et la seule façon de savoir que le
+ * comportement se règle était de lire le code. Le rapport le dit désormais
+ * lui-même.
+ *
+ * Rend "" quand `writeBusinessCode` est déjà accordé : l'agent avait alors le
+ * droit de corriger et ne s'est pas arrêté par manque de permission — suggérer
+ * un réglage déjà actif serait du bruit.
+ *
+ * Exportée pour être testée unitairement (voir router.test.ts).
+ */
+export function grantHint(capabilities: RepoCapabilities): string {
+  if (capabilities.writablePaths === "all") return "";
+  return (
+    `🔒 Je n'ai pas le droit de modifier le code source de ce dépôt, seulement d'écrire des tests : ` +
+    `c'est pour ça que je m'arrête ici au lieu de corriger le défaut moi-même. ` +
+    `Pour que je le corrige, accordez \`"writeBusinessCode": true\` à ce dépôt dans \`projects.json\` ` +
+    `(attention : ça donne accès à TOUT le dépôt, et vous perdez ce point d'arrêt humain).`
+  );
+}
+
 function buildTestsFailingReport(
   result: ImplementResult,
   seconds: number,
+  capabilities: RepoCapabilities,
 ): string {
   const preamble = [
     `⚠️ **À trancher** — en ${seconds} s, ${defuseMentions(result.detail)}.`,
     `La suite de référence était verte avant intervention et seuls des fichiers autorisés ont été modifiés : soit l'assertion est fausse, soit elle a mis au jour un défaut du code. Rien n'a été poussé sur la branche source.`,
-  ];
+    grantHint(capabilities),
+  ].filter(Boolean);
 
   // Chemin nominal : le travail est préservé dans une MR dédiée en Draft, et
   // son diff EST le rapport. Inutile de recopier le contenu des fichiers ici
@@ -826,12 +858,16 @@ export async function runTask(request: AgentRequest): Promise<void> {
       // publish.ts (§5.6). Appliqué sur le texte final (après troncature du
       // "tests-red", pas avant) : c'est ce texte-là, exactement, qui part
       // dans le commentaire.
+      // Déclaré AVANT la table des messages : buildTestsFailingReport en a
+      // besoin pour dire quel réglage lèverait l'arrêt (voir grantHint).
+      const capabilities = repoCapabilitiesFor(project.capabilities.mergeRequest);
+
       const messages: Record<typeof result.status, string> = {
         pushed: `✅ Tests poussés sur \`${executionContext.sourceBranch}\` en ${seconds} s — ${defuseMentions(result.detail)}`,
         "mr-opened": `✅ Merge request dédiée ouverte en ${seconds} s — ${defuseMentions(result.detail)}`,
         rejected: `⛔ Modifications refusées après ${seconds} s — ${defuseMentions(result.detail)}`,
         "tests-red": `❌ Les tests ne passent pas après ${seconds} s, rien n'a été poussé.\n\n<details><summary>Sortie</summary>\n\n\`\`\`\n${defuseMentions(result.detail.slice(-TESTS_RED_REPORT_TAIL_CHARS))}\n\`\`\`\n\n</details>`,
-        "tests-failing": buildTestsFailingReport(result, seconds),
+        "tests-failing": buildTestsFailingReport(result, seconds, capabilities),
         "review-flagged": buildReviewFlaggedReport(result, seconds),
         "tests-broken": `❌ Les tests écrits n'ont même pas pu être exécutés en ${seconds} s — ${defuseMentions(result.detail)}.\n\n<details><summary>Sortie du lanceur</summary>\n\n\`\`\`\n${defuseMentions((result.output ?? "").slice(-TESTS_RED_REPORT_TAIL_CHARS))}\n\`\`\`\n\n</details>`,
         "no-change": `🤷 L'agent n'a produit aucune modification en ${seconds} s.`,
@@ -846,7 +882,6 @@ export async function runTask(request: AgentRequest): Promise<void> {
       // celle utilisée par runImplement() ci-dessus, à partir du même
       // `project.capabilities.mergeRequest` : un seul calcul du "que peut
       // faire l'agent sur ce dépôt", jamais deux qui pourraient diverger.
-      const capabilities = repoCapabilitiesFor(project.capabilities.mergeRequest);
       const capabilityNote = isDefaultCapabilities(capabilities)
         ? ""
         : `\n\n🔓 Capacités élargies pour ce dépôt : ${describeCapabilities(capabilities)}.`;
