@@ -3,6 +3,8 @@ import { config } from "../config.ts";
 import { gitlab } from "../gitlab/client.ts";
 import { publishReview } from "./publish.ts";
 import { runReview } from "./review.ts";
+import { botParticipates, findThread, runExplain } from "./explain.ts";
+import { createWorkspace } from "../agent/workspace.ts";
 import { runImplement, type ImplementResult } from "./implement.ts";
 import { describeCapabilities, isDefaultCapabilities } from "./guard.ts";
 import { repoCapabilitiesFor, type ResolvedCapabilities, type ResolvedProject } from "../projects.ts";
@@ -81,6 +83,25 @@ function fallbackIntent(normalized: string): Intent {
   if (hasImplementWords && !hasReview) return "implement";
 
   return "unknown";
+}
+
+/**
+ * Chantier « fil de discussion » : un texte peut-il être une relance de
+ * conversation, ou dit-il explicitement autre chose ?
+ *
+ * `false` uniquement quand le texte porte une COMMANDE explicite
+ * (« @bot review », « @bot implement-tests ») : dans ce cas l'intention est
+ * dite en toutes lettres et le contexte du fil ne doit pas la détourner.
+ * Sinon `true` — y compris pour un texte vide de mots-clés, qui est
+ * précisément la forme d'une relance (« j'ai pas compris »).
+ *
+ * Le repli par mots-clés n'entre PAS en compte : « pourquoi ce test ? » posé
+ * dans un fil contient « test » sans pour autant demander d'en écrire.
+ *
+ * Exportée pour être testée unitairement (voir router.test.ts).
+ */
+export function isThreadFollowUp(text: string, botUsername: string): boolean {
+  return explicitCommand(text, botUsername) === null;
 }
 
 /** Exportée pour être testée unitairement (voir router.test.ts) : fonction pure, aucune dépendance réseau. */
@@ -518,6 +539,99 @@ function buildReviewFlaggedReport(result: ImplementResult, seconds: number): str
   return [...preamble, artifacts].filter(Boolean).join("\n\n");
 }
 
+/**
+ * Répond dans le fil quand la demande est une relance d'une conversation où
+ * le bot est déjà intervenu. Rend `true` si la demande a été prise en charge
+ * ici — l'appelant s'arrête alors, il n'y a pas d'intention à résoudre.
+ *
+ * Ce qui déclenche : la note de la demande appartient à un fil (pas un
+ * commentaire isolé) où le bot a au moins une note. Autrement dit, quelqu'un
+ * répond à quelque chose que le bot a écrit. Un fil ouvert par un humain où
+ * le bot est intervenu compte tout autant — voir botParticipates.
+ *
+ * Ce qui ne déclenche PAS, et c'est une limite à connaître : une réponse dans
+ * un fil SANS mentionner le bot. Le daemon est piloté par les to-dos GitLab
+ * (voir docs/adr/0001-polling-plutot-que-webhook.md), et GitLab n'en crée que
+ * sur mention ou interpellation directe — jamais sur « quelqu'un a répondu
+ * dans un fil ». Il faut donc écrire « @bot j'ai pas compris ». S'en
+ * affranchir demanderait de sonder périodiquement les discussions de chaque
+ * MR déjà touchée, soit un modèle de polling entièrement différent.
+ *
+ * Capacité requise : `review` sur le type de cible. Répondre à une question
+ * sur une remarque est la même nature d'acte que produire cette remarque —
+ * ça ne produit qu'un commentaire, et ça n'écrit jamais dans le dépôt (voir
+ * runExplain, qui tourne en lecture seule).
+ */
+async function answerInThread(
+  request: AgentRequest,
+  context: MergeRequestContext,
+  project: ResolvedProject,
+): Promise<boolean> {
+  if (request.noteId === null) return false;
+  // Une COMMANDE EXPLICITE l'emporte toujours. « @bot review » écrit dans un
+  // fil où le bot a déjà parlé demande une revue, pas une explication : le
+  // contexte ne doit jamais primer sur une intention dite en toutes lettres.
+  if (isThreadFollowUp(request.text, config.botUsername) === false) return false;
+
+  const thread = await findThread(
+    context.projectId,
+    request.kind,
+    context.targetIid,
+    request.noteId,
+  );
+  if (!thread || !botParticipates(thread, config.botUsername)) return false;
+
+  log.info(
+    `[worker] relance dans le fil ${thread.discussionId} (${thread.notes.length} message(s))`,
+  );
+
+  const refusal = intentRefusalReason(request.kind, "review", project.capabilities);
+  if (refusal) {
+    await report(request, `🤖 Demande refusée : ${refusal}.`, "failed");
+    return true;
+  }
+
+  const workspace = await createWorkspace(context.projectPath, context.sourceBranch, {
+    depth: config.cloneDepth,
+  });
+  try {
+    const answer = await runExplain(
+      workspace.repo,
+      workspace.meta,
+      context.projectPath,
+      context.targetIid,
+      thread,
+    );
+
+    if (answer === undefined) {
+      // La question reste sans réponse : on le dit, plutôt que de laisser
+      // quelqu'un attendre devant un fil muet.
+      await report(
+        request,
+        "🤖 Je n'ai pas réussi à produire d'explication (voir les journaux du daemon). Reformulez la question ou relancez.",
+        "failed",
+      );
+      return true;
+    }
+
+    // defuseMentions : la réponse du modèle cite du code et des noms venus du
+    // dépôt et du fil, tous deux non fiables. Même traitement qu'en publish.ts
+    // (§5.6) — jamais une mention qui notifie réellement quelqu'un, jamais une
+    // quick action exécutée avec le PAT du bot.
+    await gitlab.createDiscussionNote(
+      context.projectId,
+      request.kind,
+      context.targetIid,
+      thread.discussionId,
+      `${defuseMentions(answer)}\n\n<sub>cds-agent</sub>`,
+    );
+    await report(request, "🤖 Explication ajoutée dans le fil.", "delivered");
+    return true;
+  } finally {
+    workspace.dispose();
+  }
+}
+
 export async function runTask(request: AgentRequest): Promise<void> {
   log.info(`[worker] démarrage ${request.key}`);
 
@@ -559,6 +673,16 @@ export async function runTask(request: AgentRequest): Promise<void> {
         "contexte incohérent : demande sans configuration de projet résolue (authorize() aurait dû la refuser)",
       );
     }
+
+    // Chantier « fil de discussion » : AVANT toute résolution d'intention.
+    //
+    // Une question posée dans un fil où le bot a déjà parlé — « j'ai pas
+    // compris, tu peux détailler ? » — n'a ni commande explicite ni mot-clé
+    // reconnaissable : resolveIntent la classerait "unknown" et répondrait le
+    // message d'aide, ce qui est exactement l'inverse de ce qu'on veut. C'est
+    // le CONTEXTE (une réponse dans une conversation en cours), pas le texte,
+    // qui détermine l'intention ici.
+    if (await answerInThread(request, context, project)) return;
 
     // Chantier "planificateur" : remplace l'appel direct à detectIntent().
     // Le chemin déterministe (commande explicite, puis repli par mots-clés)

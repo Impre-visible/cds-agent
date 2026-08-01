@@ -2,6 +2,7 @@ import { config } from "../config.ts";
 import { performFetch } from "./proxy-fetch.ts";
 import { GITLAB_ERROR_BODY_CHARS, MAX_LIST_PAGES } from "../limits.ts";
 import type {
+  Discussion,
   GitLabUser,
   Note,
   ResourceKind,
@@ -416,6 +417,40 @@ export const gitlab = {
   ) =>
     apiPage<Note>(
       `/projects/${projectId}/${kind}/${iid}/notes?per_page=100&sort=${order}&order_by=created_at&page=${page}`,
+    ),
+
+  /**
+   * Chantier « fil de discussion » : les notes d'une cible, GROUPÉES par fil.
+   * L'API des notes (notesPage ci-dessus) ne dit PAS à quelle discussion
+   * appartient une note — c'est seulement ici que le lien existe. C'est donc
+   * le seul moyen de retrouver le fil qui contient la note d'une demande, et
+   * de savoir si le bot y a déjà parlé.
+   */
+  discussionsPage: (
+    projectId: number,
+    kind: ResourceKind,
+    iid: number,
+    page: number,
+  ) =>
+    apiPage<Discussion>(
+      `/projects/${projectId}/${kind}/${iid}/discussions?per_page=100&page=${page}`,
+    ),
+
+  /**
+   * Répond DANS un fil existant, plutôt que d'ouvrir un nouveau commentaire.
+   * C'est ce qui fait qu'une explication reste attachée à la remarque qu'elle
+   * explique, au lieu de repartir en bas de la merge request.
+   */
+  createDiscussionNote: (
+    projectId: number,
+    kind: ResourceKind,
+    iid: number,
+    discussionId: string,
+    body: string,
+  ) =>
+    apiForm<{ id: number }>(
+      `/projects/${projectId}/${kind}/${iid}/discussions/${encodeURIComponent(discussionId)}/notes`,
+      { body },
     ),
 
   project: (path: string) =>

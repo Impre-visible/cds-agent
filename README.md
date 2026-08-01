@@ -22,6 +22,7 @@ sur un dépôt qui compte.
 - [Prérequis](#prérequis)
 - [Installation](#installation)
 - [Configuration](#configuration)
+- [Répondre dans un fil](#répondre-dans-un-fil)
 - [Capacités de l'agent](#capacités-de-lagent)
 - [Lancement](#lancement)
 - [Déploiement (docker compose)](#déploiement-docker-compose)
@@ -414,6 +415,52 @@ Une réserve de méthode, la même que pour les autres campagnes de ce projet :
 un run par mode est un tirage unique, et le non-déterminisme mesuré ici est
 précisément ce que ces passes cherchent à corriger. Trois runs par mode
 donnent une comparaison ; un seul donne une anecdote.
+
+## Répondre dans un fil
+
+Chaque remarque de revue est publiée en tant que **fil** sur la ligne
+concernée. On peut y répondre pour demander des précisions :
+
+```
+cds-agent  src/todoStore.js:28
+  warning — `needle` n'est pas passé en minuscules avant la comparaison.
+
+  romeo
+    @mon-bot j'ai pas compris, tu peux m'expliquer plus en détail ?
+
+  cds-agent
+    `needle` reçoit `q` tel quel, alors que `todo.title` est mis en
+    minuscules ligne 31. Chercher « PAIN » ne trouve donc pas « Acheter du
+    pain ». Le correctif tient en un `.toLowerCase()` ligne 28.
+```
+
+Le modèle reçoit **le fil entier** (pas seulement la dernière question — « j'ai
+pas compris » ne veut rien dire sans ce qu'il commente), le fichier et la ligne
+visés, et le dépôt cloné pour aller lire ce qu'il lui faut. Il tourne en
+**lecture seule** : le seul effet possible est une réponse ajoutée au fil.
+
+La consigne l'autorise explicitement à **contredire la remarque d'origine** :
+sur une campagne mesurée, trois faux positifs sur trois étaient vérifiables en
+ouvrant le fichier cité. Une explication qui justifie une remarque fausse est
+pire qu'une absence de réponse.
+
+Trois points à connaître :
+
+- **Il faut mentionner le bot.** Le daemon est piloté par les to-dos GitLab
+  (voir [`docs/adr/0001`](./docs/adr/0001-polling-plutot-que-webhook.md)), et
+  GitLab n'en crée que sur mention ou interpellation directe — jamais sur
+  « quelqu'un a répondu dans un fil ». S'en affranchir demanderait de sonder
+  périodiquement les discussions de chaque MR déjà touchée, soit un modèle de
+  polling entièrement différent.
+- **Une commande explicite l'emporte toujours.** `@bot review` écrit dans un
+  fil demande une revue, pas une explication : le contexte ne détourne jamais
+  une intention dite en toutes lettres.
+- **Le fil doit contenir au moins une note du bot.** Un fil entre humains, même
+  s'il pose une question, n'est pas une relance. Peu importe en revanche qui a
+  ouvert le fil.
+
+Capacité requise : `review` sur le type de cible — répondre à une question sur
+une remarque est la même nature d'acte que produire cette remarque.
 
 ## Capacités de l'agent
 

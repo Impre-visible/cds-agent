@@ -19,6 +19,7 @@ let calls: string[] = [];
 const BOT_USERNAME = "cds-bot";
 
 let detectIntent: typeof import("../../src/tasks/router.ts").detectIntent;
+let isThreadFollowUp: typeof import("../../src/tasks/router.ts").isThreadFollowUp;
 let report: typeof import("../../src/tasks/router.ts").report;
 let intentRefusalReason: typeof import("../../src/tasks/router.ts").intentRefusalReason;
 let refuseRequestedCapabilities: typeof import("../../src/tasks/router.ts").refuseRequestedCapabilities;
@@ -64,7 +65,7 @@ before(async () => {
   process.env.GITLAB_REQUEST_TIMEOUT_MS = "500";
   process.env.GITLAB_MAX_RETRIES = "0";
 
-  ({ detectIntent, report, intentRefusalReason, refuseRequestedCapabilities, resolveIntent } =
+  ({ detectIntent, isThreadFollowUp, report, intentRefusalReason, refuseRequestedCapabilities, resolveIntent } =
     await import("../../src/tasks/router.ts"));
 });
 
@@ -691,5 +692,46 @@ describe("resolveIntent (chantier « planificateur »)", () => {
 
     assert.equal(decision.execute, false, "l'injection ne doit JAMAIS aboutir à une exécution");
     assert.match(decision.refusal ?? "", /writeBusinessCode/);
+  });
+});
+
+/**
+ * Chantier « fil de discussion » : une question posée dans un fil où le bot a
+ * déjà parlé n'a ni commande ni mot-clé reconnaissable. C'est le CONTEXTE qui
+ * fait l'intention — sauf quand une commande dit explicitement autre chose.
+ */
+describe("isThreadFollowUp — le contexte ne prime jamais sur une commande", () => {
+  test("une relance ordinaire est bien traitée comme telle", () => {
+    for (const text of [
+      "j'ai pas compris, tu peux m'expliquer plus en détail ?",
+      "pourquoi ?",
+      `@${BOT_USERNAME} j'ai pas compris`,
+      "",
+    ]) {
+      assert.equal(isThreadFollowUp(text, BOT_USERNAME), true, JSON.stringify(text));
+    }
+  });
+
+  test("une COMMANDE explicite l'emporte, même écrite dans un fil", () => {
+    // Sans ça, « @bot review » posté en réponse à une remarque déclencherait
+    // une explication au lieu de la revue demandée.
+    assert.equal(isThreadFollowUp(`@${BOT_USERNAME} review`, BOT_USERNAME), false);
+    assert.equal(
+      isThreadFollowUp(`@${BOT_USERNAME} implement-tests`, BOT_USERNAME),
+      false,
+    );
+  });
+
+  test("le repli par MOTS-CLÉS n'entre pas en compte", () => {
+    // « pourquoi ce test échoue ? » contient « test » sans rien demander
+    // d'écrire : dans un fil, c'est une question, pas une commande.
+    assert.equal(
+      isThreadFollowUp("pourquoi ce test échoue ?", BOT_USERNAME),
+      true,
+    );
+    assert.equal(
+      isThreadFollowUp("ta review me paraît fausse ici", BOT_USERNAME),
+      true,
+    );
   });
 });

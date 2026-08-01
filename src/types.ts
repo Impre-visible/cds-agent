@@ -43,6 +43,31 @@ export interface Note {
   system: boolean;
   created_at: string;
   author: GitLabUser;
+  /**
+   * "DiffNote" quand la note est ancrée à une ligne du diff, "DiscussionNote"
+   * pour un fil sans ancrage, absent/null pour un commentaire isolé. Renseigné
+   * par l'API des discussions ; sert au chantier « fil de discussion » à dire
+   * à quel endroit du code une question se rapporte (voir tasks/explain.ts).
+   */
+  type?: string | null;
+  /** Ancrage de la note dans le diff, présent pour un type "DiffNote". */
+  position?: {
+    new_path?: string;
+    old_path?: string;
+    new_line?: number | null;
+    old_line?: number | null;
+  } | null;
+}
+
+/**
+ * Un fil de discussion GitLab : la note d'origine et toutes ses réponses.
+ * `individual_note` vaut true pour un commentaire isolé (pas un vrai fil) —
+ * on ne peut alors pas y répondre en tant que discussion.
+ */
+export interface Discussion {
+  id: string;
+  individual_note: boolean;
+  notes: Note[];
 }
 
 export type ResourceKind = "issues" | "merge_requests";

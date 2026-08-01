@@ -333,3 +333,32 @@ export const SHUTDOWN_GRACE_MS = 30_000;
  * compactage, alourdissant la relecture au démarrage.
  */
 export const COMPACT_THRESHOLD_LINES = 500;
+
+/**
+ * Chantier « fil de discussion » (tasks/explain.ts) : bornes du prompt d'une
+ * explication demandée dans un fil.
+ *
+ * Un fil de revue compte en pratique deux à cinq messages ; en garder vingt
+ * couvre très large tout en bornant le cas d'un fil qui aurait dérivé en
+ * conversation de trente échanges. Ce sont les DERNIERS qui sont gardés (la
+ * question posée est toujours le dernier message), et la coupe est annoncée
+ * dans le prompt plutôt que silencieuse.
+ */
+export const EXPLAIN_MAX_THREAD_NOTES = 20;
+
+/** Plafond par message du fil : une remarque de revue tient très en dessous. */
+export const EXPLAIN_NOTE_CHARS = 2_000;
+
+/**
+ * Lignes de source montrées de part et d'autre de la ligne visée par le fil.
+ * 40 de chaque côté : de quoi voir une fonction entière et ses voisines, ce
+ * qui est précisément là où se cachent les défauts qu'un diff seul masque
+ * (voir le bloc « Méthode » du prompt de revue).
+ */
+export const EXPLAIN_SOURCE_CONTEXT_LINES = 40;
+
+/**
+ * Plafond de la réponse publiée. Une explication est faite pour être lue dans
+ * un fil GitLab : au-delà, ce n'est plus une explication, c'est un rapport.
+ */
+export const EXPLAIN_ANSWER_CHARS = 6_000;
