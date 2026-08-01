@@ -34,8 +34,16 @@ const context = await buildContext(request);
 if (context.targetKind !== "merge_requests")
   throw new Error("contexte MR attendu");
 
-const { remarks, belowSeverity, overCap, durationMs, truncated, omittedFiles } =
-  await runReview(context, context.sourceBranch);
+const {
+  remarks,
+  belowSeverity,
+  overCap,
+  arbiterDropped,
+  arbitrated,
+  durationMs,
+  truncated,
+  omittedFiles,
+} = await runReview(context, context.sourceBranch);
 
 if (truncated) {
   console.log(
@@ -62,8 +70,12 @@ function section(title: string, items: typeof remarks): void {
   for (const remark of items) console.log(describe(remark));
 }
 
+// « arbitre : non » n'est PAS anodin dans une campagne : soit il était coupé,
+// soit il a échoué (le journal dit alors laquelle des deux). Le confondre avec
+// un arbitrage qui n'a rien écarté fausserait toute la comparaison.
 console.log(
-  `\n${remarks.length} remarque(s) publiée(s) en ${Math.round(durationMs / 1000)} s :\n`,
+  `\n${remarks.length} remarque(s) publiée(s) en ${Math.round(durationMs / 1000)} s ` +
+    `(arbitre : ${arbitrated ? "appliqué" : "non appliqué, repli sur le tri"}) :\n`,
 );
 for (const remark of remarks) console.log(describe(remark));
 
@@ -71,6 +83,13 @@ for (const remark of remarks) console.log(describe(remark));
 // à mesurer les filtres, pas le modèle : sur la MR !5, c'est exactement ce qui
 // a fait disparaître la seule détection du défaut D4 de toute la campagne. Cet
 // outil de mesure montre donc AUSSI ce qui a été écarté, cause par cause.
+// La liste des écartées par l'arbitre est la SEULE façon de mesurer s'il
+// écarte des vrais défauts. Sans elle, un arbitre trop zélé serait
+// indiscernable d'un modèle qui trouve moins.
+section(
+  "remarque(s) ÉCARTÉE(S) PAR L'ARBITRE (à relire : écarte-t-il des vrais défauts ?)",
+  arbiterDropped,
+);
 section(
   `remarque(s) retenue(s) mais SOUS LE SEUIL (MIN_SEVERITY=${config.minSeverity})`,
   belowSeverity,

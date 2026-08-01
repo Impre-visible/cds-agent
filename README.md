@@ -256,6 +256,15 @@ Quelques variables méritent une lecture attentive avant de démarrer :
   tous des `info`. Le signal porte sur la **nature**, pas sur le nombre. Ce que
   `MIN_SEVERITY` écarte n'est jamais perdu : `npm run review` l'affiche dans
   une section à part et le daemon le journalise.
+- **`REVIEW_ARBITER`** — passe d'arbitrage finale (voir `src/tasks/arbiter.ts`),
+  après l'agrégation et avant la publication : un dernier passage du modèle, en
+  lecture seule, qui **ouvre les fichiers cités** pour écarter les remarques que
+  le code contredit. Le tri par sévérité ne peut pas faire ça — il classe des
+  remarques prises isolément. L'arbitre **sélectionne, ordonne et reclasse ; il
+  ne reformule jamais** : son verdict ne porte que sur des numéros, le texte
+  publié reste mot pour mot celui de la passe qui l'a trouvé. Sans effet à
+  `REVIEW_PASSES=1`. Un échec de sa part n'enlève rien : la revue publie ce
+  qu'elle aurait publié sans lui.
 - **`REVIEW_PASSES`** / **`REVIEW_PASS_MODE`** / **`REVIEW_VOTE`** — banc
   d'essai des passes multiples, désactivé par défaut (`REVIEW_PASSES=1`
   reproduit le comportement d'avant, au caractère près dans le prompt). Le
@@ -347,6 +356,7 @@ Chaque passe émet une ligne, puis la revue en émet une récapitulative :
         l'extracteur de secours, perdue(s) avant ce correctif
 [revue] 3 passe(s) (mode=exclusion, agrégation=union) : 6 + 5 + 4 remarque(s)
         nouvelle(s), 3 doublon(s), 151 s → 15 distincte(s), 15 retenue(s), 10 publiée(s)
+[revue] arbitre appliqué : 3 remarque(s) écartée(s), 1 reclassée(s) sur 15 arbitrée(s)
 [revue] non publiées : 5 sous le seuil de sévérité (MIN_SEVERITY=warning),
         0 au-delà du plafond (MAX_REMARKS=15)
 ```
@@ -374,6 +384,12 @@ Chaque passe émet une ligne, puis la revue en émet une récapitulative :
   `MIN_SEVERITY` pour les voir), `au-delà du plafond` est un symptôme — des
   remarques recevables ont été coupées pour une raison de volume, ce qui ne
   devrait pratiquement jamais arriver aux valeurs par défaut.
+- **`arbitre appliqué :`** — l'arbitre a rendu un verdict exploitable. C'est la
+  seule ligne qui le prouve. En cas d'échec, deux lignes apparaissent à la
+  place : un `WARN [revue] arbitre en échec (<cause>)` puis un `INFO [revue]
+  arbitre non appliqué — repli sur le tri par sévérité`. Une revue sans aucune
+  des trois lignes signifie que l'arbitre n'a jamais été sollicité
+  (`REVIEW_PASSES=1` ou `REVIEW_ARBITER=0`).
 - Un **`WARN` « AUCUNE remarque publiable »** signale une revue vide alors que
   le modèle a bien trouvé quelque chose (tout est passé sous le seuil). Une
   revue vide parce que le code est sain et une revue vide parce que tout a été

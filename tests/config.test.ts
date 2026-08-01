@@ -736,3 +736,14 @@ describe("computeContainerProxyEnv (§B : proxy transmis au conteneur d'install/
     );
   });
 });
+
+describe("buildConfig — REVIEW_ARBITER (arbitre de fin de revue)", () => {
+  test("activé par défaut : c'est arbiterEnabled qui le neutralise à une seule passe", () => {
+    assert.equal(buildConfig(baseEnv()).reviewArbiter, true);
+  });
+
+  test('REVIEW_ARBITER=0 le coupe ; toute autre valeur le laisse', () => {
+    assert.equal(buildConfig(baseEnv({ REVIEW_ARBITER: "0" })).reviewArbiter, false);
+    assert.equal(buildConfig(baseEnv({ REVIEW_ARBITER: "1" })).reviewArbiter, true);
+  });
+});

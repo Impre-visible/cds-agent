@@ -10,6 +10,7 @@ import {
   type ValidatedRemark,
 } from "./diff.ts";
 import { runAgentInSandbox } from "../agent/sandbox.ts";
+import { arbiterEnabled, runArbiter } from "./arbiter.ts";
 import {
   MAX_ISSUE_DESCRIPTION_CHARS,
   MAX_ISSUE_COMMENTS_CHARS,
@@ -1152,6 +1153,14 @@ export interface ReviewResult {
   /** Écartées parce qu'au-delà de MAX_REMARKS, à gravité pourtant suffisante. */
   overCap: AggregatedRemark[];
   /**
+   * Écartées par l'arbitre de fin de revue (voir tasks/arbiter.ts) — vide
+   * quand il n'a pas tourné. Conservées pour la mesure : c'est en relisant
+   * cette liste qu'on saura s'il écarte des vrais défauts.
+   */
+  arbiterDropped: AggregatedRemark[];
+  /** L'arbitre a-t-il effectivement rendu un verdict ? false = repli sur le tri. */
+  arbitrated: boolean;
+  /**
    * Tout ce que l'agrégation a retenu, avant tout filtrage — trié.
    * `remarks ∪ belowSeverity ∪ overCap` en est une partition exacte.
    *
@@ -1237,8 +1246,6 @@ export async function runReview(
     let totalDurationMs = 0;
 
     for (let pass = 1; pass <= config.reviewPasses; pass++) {
-      if (config.reviewPasses > 1)
-        log.info(`[revue] passe ${pass}/${config.reviewPasses} (mode=${mode})`);
       try {
         // En mode `independent` (le défaut), buildPassAddendum rend "" et ce
         // prompt est rigoureusement `built.prompt` — on reconstruit quand même
@@ -1249,6 +1256,18 @@ export async function runReview(
           pass === 1
             ? built.prompt
             : buildPrompt(context, previous, mode).prompt;
+
+        // La TAILLE du prompt est journalisée à chaque passe, y compris à une
+        // seule passe : c'est la seule façon de trancher par la mesure, et non
+        // par hypothèse, si des passes ≥ 2 se mettent à échouer. L'écart entre
+        // une passe 1 et une passe ≥ 2 est exactement le bloc des remarques
+        // précédentes (buildPassAddendum) — mesuré à ~1 400 caractères pour
+        // 5 remarques, contre 20 000 pour le seul budget de diff, mais un
+        // chiffre relevé vaut mieux qu'un chiffre reconstitué après coup.
+        log.info(
+          `[revue] passe ${pass}/${config.reviewPasses} (mode=${mode}, ` +
+            `prompt=${prompt.length} car.)`,
+        );
 
         const outcome = await runReviewPass(workspace, prompt, context);
         passResults.push(outcome.remarks);
@@ -1282,7 +1301,40 @@ export async function runReview(
         new Error("aucune passe de revue n'a produit de résultat");
     }
 
-    const remarks = aggregateRemarks(passResults, aggregation);
+    const aggregated = aggregateRemarks(passResults, aggregation);
+
+    // Arbitrage APRÈS l'agrégation, AVANT tout filtre : l'arbitre doit voir
+    // les "info" pour pouvoir en promouvoir une qui le mérite, sinon
+    // MIN_SEVERITY l'aurait déjà écartée avant qu'il ne la lise.
+    const verdict = await runArbiter(
+      workspace.repo,
+      workspace.meta,
+      context.projectPath,
+      aggregated,
+    );
+    const remarks = verdict?.kept ?? aggregated;
+    const arbiterDropped = verdict?.dropped ?? [];
+    if (verdict) {
+      log.info(
+        `[revue] arbitre appliqué : ${verdict.dropped.length} remarque(s) écartée(s), ` +
+          `${verdict.reclassified} reclassée(s) sur ${aggregated.length} arbitrée(s)`,
+      );
+      if (verdict.kept.length === 0) {
+        log.warn(
+          `[revue] l'arbitre a écarté les ${aggregated.length} remarque(s) : ` +
+            `aucune ne sera publiée — la liste reste visible pour la mesure`,
+        );
+      }
+    } else if (arbiterEnabled(config.reviewPasses, config.reviewArbiter)) {
+      // runArbiter a déjà journalisé la cause en warn ; cette ligne dit la
+      // conséquence, pour que « arbitre en échec » et « arbitre absent » ne se
+      // confondent jamais dans un journal de campagne.
+      log.info(
+        `[revue] arbitre non appliqué — repli sur le tri par sévérité ` +
+          `(${aggregated.length} remarque(s) inchangée(s))`,
+      );
+    }
+
     const { published, belowSeverity, overCap } = partitionForPublication(
       remarks,
       config.minSeverity,
@@ -1332,6 +1384,8 @@ export async function runReview(
       remarks: published,
       belowSeverity,
       overCap,
+      arbiterDropped,
+      arbitrated: verdict !== undefined,
       retained: remarks,
       durationMs: totalDurationMs,
       truncated: built.truncatedFiles.length > 0 || built.omittedFiles.length > 0,

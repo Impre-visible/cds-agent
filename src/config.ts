@@ -411,6 +411,21 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
      */
     reviewVote: env.REVIEW_VOTE !== "0",
     /**
+     * Passe d'arbitrage après l'agrégation et AVANT la publication (voir
+     * tasks/arbiter.ts) : un dernier passage du modèle, en lecture seule, qui
+     * ouvre les fichiers cités pour écarter les remarques que le code
+     * contredit. Le tri par sévérité ne peut pas faire ça — il classe des
+     * remarques prises isolément.
+     *
+     * N'a d'effet qu'à REVIEW_PASSES > 1 (voir arbiterEnabled) : sur une passe
+     * unique il n'y a rien à arbitrer, et ce serait un appel de modèle de plus
+     * pour rien. Ce drapeau ne peut donc que DÉSACTIVER, jamais forcer.
+     *
+     * Un échec de l'arbitre n'enlève rien : la revue publie alors ce qu'elle
+     * aurait publié sans lui.
+     */
+    reviewArbiter: env.REVIEW_ARBITER !== "0",
+    /**
      * Relecture croisée après une implémentation livrée (voir
      * tasks/chained-review.ts) : un second passage du modèle, en lecture
      * seule, qui relit les tests poussés contre le code source qu'ils
