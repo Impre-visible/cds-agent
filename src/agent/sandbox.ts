@@ -163,6 +163,35 @@ export function buildDockerRunArgs(
     "CI=1",
     "-e",
     "FORCE_COLOR=0",
+    // --user <uid de l'hôte> (plus bas) désigne un utilisateur qui n'existe
+    // dans aucune image : Docker ne trouve alors pas d'entrée /etc/passwd et
+    // pose HOME=/ — vérifié, pas déduit. Combiné à --read-only, tout outil qui
+    // écrit son cache sous HOME échoue : `npm install` tente mkdir /.npm et
+    // s'arrête sur ENOENT, avant même que l'agent n'ait été lancé. C'est ce
+    // qui a bloqué toute une campagne de mesure au 1er août 2026, avec un
+    // message ("mkdir '/.npm'") qui ne désigne ni --user ni --read-only.
+    //
+    // La compensation appartient ICI, pas aux images : c'est cette fonction
+    // qui injecte --user, et projects.json accepte n'importe quelle image
+    // (projects.example.json donne "node:22-bookworm-slim" en défaut — une
+    // image amont, qui n'aura jamais les conventions de ce projet). Les deux
+    // Dockerfiles maison posent déjà exactement ces valeurs : ces -e y sont
+    // donc sans effet, et ne servent qu'à garantir la même convention quelle
+    // que soit l'image déclarée.
+    //
+    // Ces répertoires n'existent pas dans le tmpfs monté sur /tmp et ne sont
+    // pas précréés : /tmp est en mode 1777, chaque outil y crée les siens à la
+    // volée (vérifié avec npm sur une image amont, HOME absent inclus).
+    "-e",
+    "HOME=/tmp/agent",
+    "-e",
+    "XDG_CONFIG_HOME=/tmp/agent/.config",
+    "-e",
+    "XDG_DATA_HOME=/tmp/agent/.local/share",
+    "-e",
+    "XDG_CACHE_HOME=/tmp/agent/.cache",
+    "-e",
+    "npm_config_cache=/tmp/.npm",
   ];
 
   const user = options.user ?? hostUser();

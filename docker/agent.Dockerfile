@@ -19,6 +19,10 @@ RUN npm i -g opencode-ai@latest
 RUN useradd -m -u 1001 agent
 USER agent
 
+# Voir la note équivalente dans docker/node22.Dockerfile : buildDockerRunArgs
+# (agent/sandbox.ts) injecte désormais ces cinq mêmes valeurs en -e à chaque
+# `docker run`, pour que la convention tienne quelle que soit l'image — y
+# compris une image de ce dépôt qui n'aurait pas été reconstruite.
 ENV HOME=/tmp/agent \
     XDG_CONFIG_HOME=/tmp/agent/.config \
     XDG_DATA_HOME=/tmp/agent/.local/share \

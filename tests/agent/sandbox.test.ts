@@ -117,6 +117,48 @@ describe("buildDockerRunArgs", () => {
     assert.ok(args.includes("FOO=bar"));
   });
 
+  // --user <uid hôte> désigne un utilisateur absent de /etc/passwd : Docker
+  // pose alors HOME=/, que --read-only rend non inscriptible. `npm install`
+  // échouait sur mkdir '/.npm' avant même l'exécution de l'agent — mesuré, et
+  // reproduit avec une image amont.
+  describe("HOME et caches (contrepartie obligatoire de --user)", () => {
+    test("HOME et les caches pointent sous /tmp, seul inscriptible sous --read-only", () => {
+      const args = buildDockerRunArgs("/repo", "node:22", "npm test", "cds-x");
+      for (const expected of [
+        "HOME=/tmp/agent",
+        "XDG_CONFIG_HOME=/tmp/agent/.config",
+        "XDG_DATA_HOME=/tmp/agent/.local/share",
+        "XDG_CACHE_HOME=/tmp/agent/.cache",
+        "npm_config_cache=/tmp/.npm",
+      ]) {
+        assert.ok(args.includes(expected), `${expected} doit être passé en -e`);
+      }
+    });
+
+    test("ces valeurs valent pour TOUTE image, y compris une image amont sans convention maison", () => {
+      // projects.example.json donne "node:22-bookworm-slim" en défaut : une
+      // image qui n'aura jamais le bloc ENV des Dockerfiles de ce dépôt.
+      const args = buildDockerRunArgs(
+        "/repo",
+        "node:22-bookworm-slim",
+        "npm install",
+        "cds-x",
+      );
+      assert.ok(args.includes("HOME=/tmp/agent"));
+      assert.ok(args.includes("npm_config_cache=/tmp/.npm"));
+    });
+
+    test("un appelant garde le dernier mot : son -e est passé APRÈS, donc l'emporte pour docker", () => {
+      const args = buildDockerRunArgs("/repo", "node:22", "npm test", "cds-x", {
+        env: { HOME: "/tmp/ailleurs" },
+      });
+      assert.ok(
+        args.lastIndexOf("HOME=/tmp/ailleurs") > args.indexOf("HOME=/tmp/agent"),
+        "la valeur de l'appelant doit venir après celle par défaut",
+      );
+    });
+  });
+
   test("hostGateway ajoute --add-host uniquement si demandé", () => {
     const without = buildDockerRunArgs("/repo", "node:22", "npm test", "cds-x");
     assert.ok(!without.includes("--add-host"));

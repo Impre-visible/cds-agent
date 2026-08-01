@@ -15,5 +15,12 @@ USER agent
 # (mode 1777) — même modèle que docker/agent.Dockerfile, pour que les deux
 # images se comportent de façon identique et documentée une fois passées
 # dans sandbox.ts.
+# Ces valeurs sont désormais AUSSI injectées en -e par buildDockerRunArgs
+# (agent/sandbox.ts), aux mêmes valeurs exactement : projects.json accepte
+# n'importe quelle image, y compris une image amont qui n'aura jamais ce
+# bloc. Ce ENV ne sert donc plus qu'à une invocation manuelle de l'image hors
+# du daemon — et à ne pas dépendre d'une image reconstruite : une image
+# buildée avant l'ajout de ces lignes faisait échouer `npm install` sur
+# mkdir '/.npm', ce qui a bloqué une campagne entière.
 ENV HOME=/tmp/agent \
     npm_config_cache=/tmp/.npm
