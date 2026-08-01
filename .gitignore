@@ -15,3 +15,6 @@ projects.json
 
 # Poussière macOS — apparaît dès qu'on ouvre un dossier dans le Finder.
 .DS_Store
+
+# Journaux de campagne de mesure (npm run review ... | tee)
+revue-*.log
