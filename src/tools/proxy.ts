@@ -30,6 +30,14 @@ export interface InferenceProxyOptions {
    * par le conteneur agent, qui ne voit que l'adresse de ce proxy.
    */
   apiKey?: string;
+  /**
+   * Nom d'hôte annoncé au conteneur agent dans `containerUrl`
+   * (INFERENCE_PROXY_HOST, défaut `host.docker.internal`). Ce proxy écoute
+   * toujours sur 0.0.0.0 ; seule change l'adresse par laquelle on dit à
+   * l'agent de le joindre — l'hôte quand le daemon tourne dessus, le nom du
+   * conteneur du daemon quand il tourne lui-même en conteneur.
+   */
+  advertiseHost?: string;
   /** Port d'écoute local ; 0 (recommandé) laisse l'OS choisir un port libre. */
   port?: number;
   /** Répertoire où déposer les traces requête/réponse (debug) ; omis = pas de trace disque. */
@@ -85,7 +93,7 @@ export function startInferenceProxy(
       const port =
         address && typeof address === "object" ? address.port : (options.port ?? 0);
       resolve({
-        containerUrl: `http://host.docker.internal:${port}${upstream.pathname}`,
+        containerUrl: `http://${options.advertiseHost ?? "host.docker.internal"}:${port}${upstream.pathname}`,
         port,
         close: () => new Promise((res) => server.close(() => res())),
       });

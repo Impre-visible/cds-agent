@@ -114,7 +114,11 @@ export function buildDockerRunArgs(
     "--name",
     containerName,
     "--network",
-    options.network ? "bridge" : "none",
+    // config.agentDockerNetwork (défaut "bridge") plutôt que "bridge" en dur :
+    // quand le daemon tourne lui-même en conteneur, l'agent doit partager un
+    // réseau AVEC LUI pour joindre le proxy d'inférence par son nom. Sans
+    // réseau demandé, on reste sur "none" — le durcissement ne bouge pas.
+    options.network ? config.agentDockerNetwork : "none",
     "--memory",
     config.dockerMemory,
     "--cpus",
@@ -416,6 +420,7 @@ export async function runAgentInSandbox(
         // INFERENCE_API_KEY est confiée au proxy, pas au conteneur : c'est lui
         // qui pose l'en-tête Authorization en relayant (voir tools/proxy.ts).
         apiKey: config.inferenceApiKey,
+        advertiseHost: config.inferenceProxyHost,
       });
 
   try {

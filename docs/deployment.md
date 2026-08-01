@@ -2,11 +2,12 @@
 
 Ce document répond à une question simple : comment ce POC tourne-t-il
 ailleurs que dans un terminal ouvert avec `npm run dev` ? Aujourd'hui, la
-réponse honnête est : **il ne tourne nulle part ailleurs** — il n'existe ni
-Dockerfile pour le daemon lui-même, ni fichier `docker-compose`, ni unité
-systemd, ni pipeline de déploiement. Ce document documente la contrainte et
-propose ce qui est raisonnable à mettre en place, sans prétendre que c'est
-déjà fait.
+réponse est : **avec `docker compose up -d --build`** — voir
+[`docker-compose.yml`](../docker-compose.yml) et
+[`docker/daemon.Dockerfile`](../docker/daemon.Dockerfile), livrés depuis. Il
+n'existe en revanche toujours ni unité systemd fournie, ni pipeline de
+déploiement. Ce document documente les contraintes que ce mode d'exécution
+n'élimine pas, et ce qu'il coûte.
 
 ## Pourquoi ce n'est pas un simple oubli
 
@@ -30,33 +31,67 @@ Le daemon a deux dépendances qui compliquent toute forme d'exécution
 
 ### Le cas particulier d'un daemon conteneurisé
 
-La tentation naturelle serait d'écrire un `Dockerfile` pour le daemon
-lui-même, à côté de `docker/agent.Dockerfile` et `docker/node22.Dockerfile`.
-C'est réalisable techniquement (Node 26, aucune dépendance native), mais ça
-n'élimine aucune des deux contraintes ci-dessus — ça les déplace :
+C'est le mode livré (`docker compose up -d --build`), mais il n'élimine
+aucune des deux contraintes ci-dessus — il les déplace, et le compromis
+mérite d'être lu avant d'être accepté.
 
-- pour lancer `docker run` depuis l'intérieur d'un conteneur, il faut soit
-  monter le socket Docker de l'hôte en bind mount
-  (`-v /var/run/docker.sock:/var/run/docker.sock`), soit du Docker-in-Docker
-  complet. La première option donne au conteneur du daemon un accès
-  équivalent à root sur l'hôte (n'importe qui capable d'écrire dans ce
-  conteneur peut lancer n'importe quel conteneur, monter n'importe quel
-  chemin de l'hôte en volume, etc.) — un niveau de risque nettement supérieur
-  à celui que la sandbox de `sandbox.ts` cherche justement à réduire pour
-  l'agent lui-même. Conteneuriser le daemon pour mieux l'isoler, puis lui
-  donner cet accès pour qu'il puisse encore lancer Docker, ne va pas dans le
-  sens visé ;
-- l'inférence locale devrait alors être jointe via `host.docker.internal`
-  (ou un réseau `host`), ce qui revient à réintroduire, pour le conteneur du
-  daemon lui-même cette fois (pas celui de l'agent), une bonne partie de la
-  surface que le proxy filtrant de `src/tools/proxy.ts` cherche à réduire
-  pour l'agent.
+**Le socket Docker.** Pour lancer `docker run` depuis l'intérieur d'un
+conteneur, il faut soit monter le socket de l'hôte
+(`-v /var/run/docker.sock:/var/run/docker.sock`), soit du Docker-in-Docker
+complet. C'est la première option qui est retenue : les conteneurs agent sont
+des **frères**, pas des enfants. Conséquence à assumer — qui peut écrire sur
+ce socket peut démarrer un conteneur privilégié qui monte `/`, soit un accès
+équivalent à root sur l'hôte. Conteneuriser le daemon ne l'isole donc pas de
+la machine ; ce n'est pas ce que ça achète.
 
-Conclusion assumée : **conteneuriser le daemon lui-même n'est pas
-raisonnable pour ce POC**, tant que Docker-in-Docker réel ou un socket Docker
-partagé restent la seule voie technique disponible. Ce n'est pas une
-question d'effort d'implémentation, c'est un compromis de sécurité qui va à
-l'encontre de l'objectif du projet.
+Ce que ça achète réellement : un service qui redémarre seul après un crash et
+au redémarrage de la machine, une construction reproductible, et une
+configuration qui ne dépend plus de ce qui traîne dans le shell de celui qui
+lance `npm run dev`.
+
+Ce que ça ne dégrade **pas** : le code écrit par le modèle ne tourne jamais
+dans le conteneur du daemon. Il tourne dans les conteneurs agent, lancés avec
+`--cap-drop ALL`, `--read-only`, `--pids-limit` et `--network none` par
+défaut (voir `src/agent/sandbox.ts`). Ce durcissement est intact.
+
+Ce que ça dégrade : les conteneurs agent tournent sous l'uid du process
+daemon (`hostUser()`), soit root-dans-le-conteneur au lieu de l'uid de
+l'utilisateur. Sans capacités et en racine lecture seule, la portée reste
+faible — mais c'est une régression réelle par rapport au lancement depuis un
+terminal.
+
+#### Les deux pièges qui font échouer une version naïve
+
+Ils échouent tous les deux **en silence**, d'où leur traitement explicite
+dans `docker-compose.yml` :
+
+1. **L'identité des chemins.** Le daemon crée ses espaces de travail sous
+   `TMPDIR` (`mkdtemp`, voir `agent/workspace.ts`) puis les monte dans les
+   conteneurs agent (`-v <chemin>:/repo`). Ce chemin est interprété par le
+   moteur Docker de l'**hôte**, pas par le conteneur du daemon : un `/tmp`
+   interne donnerait un montage vide, sans erreur. `CDS_WORK_DIR` est donc
+   monté **au même chemin absolu des deux côtés**, et `TMPDIR` pointe dessus.
+2. **La joignabilité du proxy d'inférence.** Le proxy filtrant tourne *dans*
+   le process daemon (`tools/proxy.ts`) ; l'agent le joignait via
+   `host.docker.internal`, qui désigne l'hôte — donc plus le daemon une fois
+   celui-ci conteneurisé. Les deux sont mis sur un réseau Docker commun et
+   l'agent joint le daemon par son **nom** (`INFERENCE_PROXY_HOST` +
+   `AGENT_DOCKER_NETWORK`). Bénéfice de bord : aucun port à publier, alors
+   qu'exposer ce proxy reviendrait à offrir la vraie clé d'API à quiconque
+   sur le réseau de la machine.
+
+Le proxy filtrant conserve donc exactement son rôle : c'est toujours lui qui
+détient `INFERENCE_API_KEY`, et l'agent ne voit qu'une adresse locale au
+réseau Docker. `CONTAINER_INFERENCE_URL`, qui court-circuite le proxy et fait
+descendre la clé jusqu'au conteneur agent, reste déconseillé — plus encore
+dans ce mode.
+
+#### Redémarrage automatique
+
+`restart: unless-stopped` couvre le crash et le redémarrage de la machine.
+Sur macOS, il faut en plus que Docker Desktop soit réglé pour se lancer à
+l'ouverture de session (*Settings → General → Start Docker Desktop when you
+sign in*) : sans lui, aucun conteneur ne redémarre.
 
 ## Ce qui est raisonnable
 

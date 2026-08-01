@@ -1,6 +1,21 @@
 import { existsSync, readFileSync } from "node:fs";
 
+/**
+ * CDS_SKIP_DOTENV=1 : ne lit PAS .env. Posé par `npm test` (voir
+ * package.json), et pour une raison qui s'est vérifiée deux fois.
+ *
+ * loadDotEnv ne remplit que les clés absentes de process.env — inoffensif
+ * pour le daemon, mais pas pour la suite de tests : un test qui ne déclare
+ * pas explicitement une variable hérite alors de celle de l'OPÉRATEUR. Le
+ * 1er août 2026, l'ajout de CONTAINER_INFERENCE_URL et INFERENCE_API_KEY
+ * dans un .env local a fait échouer trois tests d'inférence qui passaient la
+ * minute d'avant, sans qu'une ligne de code ait bougé. La suite doit donner
+ * le même résultat sur le poste de développement et dans un runner vierge —
+ * c'est tout l'intérêt d'une CI, et ça ne tient que si `npm test` ne lit rien
+ * de la configuration de la machine.
+ */
 function loadDotEnv(path = ".env"): void {
+  if (process.env.CDS_SKIP_DOTENV === "1") return;
   if (!existsSync(path)) return;
   for (const raw of readFileSync(path, "utf8").split("\n")) {
     const line = raw.trim();
@@ -614,6 +629,31 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
      * différente de celle de l'hôte, si besoin.
      */
     containerNoProxy: env.CONTAINER_NO_PROXY,
+    /**
+     * Nom d'hôte par lequel le CONTENEUR AGENT joint le proxy d'inférence
+     * (voir tools/proxy.ts::containerUrl). Défaut `host.docker.internal` : le
+     * daemon tourne sur l'hôte, le conteneur agent doit sortir jusqu'à lui.
+     *
+     * À changer quand le daemon tourne LUI-MÊME en conteneur (voir
+     * docker-compose.yml) : `host.docker.internal` désigne alors l'hôte, pas
+     * le conteneur du daemon, et le proxy devient injoignable. On donne dans
+     * ce cas le nom du service daemon sur un réseau Docker partagé
+     * (AGENT_DOCKER_NETWORK ci-dessous) — ce qui évite AUSSI de publier le
+     * port du proxy : un proxy qui pose la vraie clé d'API en en-tête n'a
+     * aucune raison d'être joignable depuis le réseau de la machine.
+     */
+    inferenceProxyHost: env.INFERENCE_PROXY_HOST ?? "host.docker.internal",
+    /**
+     * Réseau Docker des conteneurs agent qui ont besoin du réseau (install,
+     * tests, inférence). Défaut `bridge`, le réseau par défaut de Docker —
+     * comportement inchangé.
+     *
+     * Renseigné, il doit nommer un réseau existant que le daemon partage avec
+     * eux : c'est ce qui permet à un agent de joindre le proxy par le NOM du
+     * conteneur du daemon plutôt que par host.docker.internal. Sans effet sur
+     * les conteneurs lancés sans réseau, qui restent en `none`.
+     */
+    agentDockerNetwork: env.AGENT_DOCKER_NETWORK ?? "bridge",
     // Port d'écoute du proxy filtrant démarré par runAgentInSandbox pour
     // chaque exécution de l'agent (0 = l'OS choisit un port libre, ce qui
     // évite toute collision si un proxy précédent n'a pas fini de se

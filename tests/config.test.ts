@@ -747,3 +747,59 @@ describe("buildConfig — REVIEW_ARBITER (arbitre de fin de revue)", () => {
     assert.equal(buildConfig(baseEnv({ REVIEW_ARBITER: "1" })).reviewArbiter, true);
   });
 });
+
+/**
+ * Déploiement du daemon en conteneur (docker-compose.yml). Les défauts
+ * reproduisent exactement le lancement depuis un terminal — c'est la
+ * condition pour que ce chantier ne change rien au mode mesuré.
+ */
+describe("buildConfig — daemon conteneurisé (INFERENCE_PROXY_HOST / AGENT_DOCKER_NETWORK)", () => {
+  test("les défauts sont ceux du lancement sur l'hôte", () => {
+    const config = buildConfig(baseEnv());
+    assert.equal(config.inferenceProxyHost, "host.docker.internal");
+    assert.equal(config.agentDockerNetwork, "bridge");
+  });
+
+  test("les deux se règlent indépendamment", () => {
+    const config = buildConfig(
+      baseEnv({
+        INFERENCE_PROXY_HOST: "cds-agent-daemon",
+        AGENT_DOCKER_NETWORK: "cds-agent-net",
+      }),
+    );
+    assert.equal(config.inferenceProxyHost, "cds-agent-daemon");
+    assert.equal(config.agentDockerNetwork, "cds-agent-net");
+  });
+});
+
+/**
+ * CDS_SKIP_DOTENV : `npm test` ne doit rien lire de la configuration de la
+ * machine. Mesuré le 1er août 2026 — l'ajout de CONTAINER_INFERENCE_URL dans
+ * un .env local a fait échouer trois tests d'inférence sans qu'une ligne de
+ * code ait bougé.
+ */
+describe("loadDotEnv — la suite de tests ne dépend pas du .env de l'opérateur", () => {
+  test("le drapeau est bien posé pendant cette suite", () => {
+    assert.equal(
+      process.env.CDS_SKIP_DOTENV,
+      "1",
+      "npm test doit poser CDS_SKIP_DOTENV=1 (voir package.json)",
+    );
+  });
+
+  test("aucune variable d'inférence de l'opérateur n'a fuité dans ce process", () => {
+    // Si ces variables apparaissent ici, c'est que .env a été lu : le même
+    // test tournerait alors différemment selon la machine.
+    for (const name of [
+      "CONTAINER_INFERENCE_URL",
+      "INFERENCE_API_KEY",
+      "INFERENCE_UPSTREAM_URL",
+    ]) {
+      assert.equal(
+        process.env[name],
+        undefined,
+        `${name} vient du .env local : la suite n'est plus reproductible`,
+      );
+    }
+  });
+});

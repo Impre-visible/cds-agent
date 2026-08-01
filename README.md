@@ -24,6 +24,7 @@ sur un dépôt qui compte.
 - [Configuration](#configuration)
 - [Capacités de l'agent](#capacités-de-lagent)
 - [Lancement](#lancement)
+- [Déploiement (docker compose)](#déploiement-docker-compose)
 - [Scripts npm](#scripts-npm)
 - [Images Docker](#images-docker)
 - [Modèle (local ou distant)](#modèle-local-ou-distant)
@@ -608,6 +609,43 @@ d'accepter de nouvelles tâches, jusqu'à 30 s sont laissées à la tâche en
 cours pour se terminer, puis le daemon sort. Un second signal force la
 sortie immédiate (les conteneurs Docker déjà lancés ne sont alors pas
 attendus).
+
+## Déploiement (docker compose)
+
+Pour faire tourner le daemon en service plutôt que dans un terminal ouvert :
+
+```bash
+# 1. .env et projects.json renseignés (voir Configuration ci-dessus), plus :
+#    CDS_WORK_DIR=<chemin ABSOLU d'un répertoire de travail sur l'hôte>
+mkdir -p "$CDS_WORK_DIR"
+
+# 2. build + lancement, redémarrage automatique compris
+docker compose up -d --build
+
+docker compose logs -f          # suivre
+curl -s localhost:8090/healthz  # vérifier
+docker compose down             # arrêter
+```
+
+`restart: unless-stopped` couvre le crash et le redémarrage de la machine
+(sur macOS, à condition que Docker Desktop se lance à l'ouverture de session).
+
+Trois choses à savoir avant de l'utiliser, détaillées dans
+[`docs/deployment.md`](./docs/deployment.md) et en tête de
+[`docker-compose.yml`](./docker-compose.yml) :
+
+- le service monte `/var/run/docker.sock` — un accès **équivalent à root sur
+  l'hôte**. C'est inévitable : le daemon a pour rôle de lancer des conteneurs.
+  Le code écrit par le modèle, lui, ne tourne jamais là : il tourne dans les
+  conteneurs agent, dont le durcissement est intact ;
+- `CDS_WORK_DIR` est monté **au même chemin absolu des deux côtés**. Les
+  espaces de travail que le daemon crée dessous sont montés dans les
+  conteneurs agent, et ces montages sont résolus par le moteur Docker de
+  l'hôte — un chemin interne au conteneur donnerait un montage vide, sans
+  erreur ;
+- le proxy d'inférence est joint par le **nom du conteneur** du daemon sur un
+  réseau Docker partagé, pas par `host.docker.internal` qui désignerait
+  l'hôte. Aucun port n'est publié : ce proxy détient `INFERENCE_API_KEY`.
 
 ## Scripts npm
 

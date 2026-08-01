@@ -292,11 +292,30 @@ describe("RequestStore — rétrocompatibilité du fichier d'état", () => {
     copyFileSync(source, path);
     const store = new RequestStore(path);
 
-    // Le fichier réel ne contient que des paires claimed/acked : la
-    // dernière entrée de chaque clé doit rester "acked", rejouable.
+    // Ce que ce test vérifie sur le fichier RÉEL : que le lecteur encaisse
+    // des données de production sans jeter et sans perdre de clé. Rien de
+    // plus.
+    //
+    // Il affirmait auparavant que chaque clé finissait en "acked", donc
+    // rejouable. C'était vrai le jour où il a été écrit et faux dès qu'un
+    // daemon a réellement tourné : un arrêt en pleine exécution laisse des
+    // entrées "running", une tâche terminée laisse "done" — mesuré le
+    // 1er août 2026 sur un fichier à 5 claimed, 5 running et 3 done. Un test
+    // qui affirme une propriété de DONNÉES VIVANTES que le daemon a le droit
+    // de changer ne teste plus le code, il teste l'humeur de la machine. Le
+    // contrat de rétrocompatibilité du format hérité, lui, reste couvert par
+    // le test ci-dessus, sur une fixture figée.
     for (const key of keys) {
-      assert.equal(store.statusOf(key), "acked");
-      assert.equal(canProcess(store.statusOf(key)), true);
+      const status = store.statusOf(key);
+      assert.ok(
+        status !== undefined,
+        `clé "${key}" présente dans le fichier réel mais inconnue du store`,
+      );
+      assert.equal(
+        typeof canProcess(status),
+        "boolean",
+        `statut "${status}" non classé par canProcess`,
+      );
     }
   });
 

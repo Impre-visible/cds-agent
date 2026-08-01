@@ -1,0 +1,24 @@
+# Ce qui ne doit JAMAIS entrer dans l'image du daemon (docker/daemon.Dockerfile).
+
+# Secrets et configuration de la machine : fournis à l'EXÉCUTION par
+# docker-compose.yml (env_file pour .env, bind mount pour projects.json).
+# Les copier dans l'image les figerait à la construction et les embarquerait
+# dans toute copie de cette image.
+.env
+projects.json
+
+# Reconstruit par `npm ci` dans l'image, et de toute façon lié à l'OS de la
+# machine de construction (binaires natifs).
+node_modules/
+
+# Données d'exécution, montées depuis l'hôte pour survivre au conteneur.
+state/
+
+# Sans intérêt pour l'exécution, et volumineux.
+.git/
+.github/
+node_modules/.cache/
+todo-dumps/
+context-dump.json
+revue-*.log
+.DS_Store

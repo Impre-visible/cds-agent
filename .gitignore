@@ -18,3 +18,6 @@ projects.json
 
 # Journaux de campagne de mesure (npm run review ... | tee)
 revue-*.log
+
+# Repertoire de travail du daemon conteneurise (CDS_WORK_DIR, voir docker-compose.yml)
+.cds-work/
