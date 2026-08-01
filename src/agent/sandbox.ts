@@ -331,11 +331,61 @@ function containerApiKey(): string {
   return config.inferenceApiKey ?? "lm-studio";
 }
 
+/**
+ * Ce que l'agent a le droit de FAIRE dans le conteneur, par nature de tâche.
+ * Distinct des capacités de projects.json, qui disent ce qu'il a le droit de
+ * PRODUIRE (quels chemins) : ici c'est la classe d'outils elle-même.
+ */
+export type AgentMode = "review" | "implement";
+
+/**
+ * Bloc `permission` de la configuration opencode générée.
+ *
+ * Mesuré pendant la campagne du 1er août 2026 : le §1.8 du dossier annonçait
+ * une revue « en lecture seule (outils d'écriture bloqués) », ce qui était
+ * faux — rien ne les bloquait. Deux modèles sur treize s'en sont servis :
+ * qwen3-coder-30b a corrigé le bug dans src/validateTodo.js, relancé les
+ * tests et rendu un rapport de correction au lieu du JSON attendu (run
+ * perdu) ; gpt-oss-120b a lancé npm install puis npm test. Aucun dégât — la
+ * revue ne pousse rien et le workspace est détruit — mais /repo est un bind
+ * mount depuis le /tmp de l'hôte, et une revue qui édite le code qu'elle
+ * relit n'est plus une revue.
+ *
+ * En mode implement, edit et bash sont au contraire indispensables (écrire
+ * les tests, lancer la suite). La vraie barrière y reste en aval, inchangée :
+ * collectChanges + checkHeadIntegrity (tasks/implement.ts, tasks/guard.ts)
+ * vérifient ce que l'agent a RÉELLEMENT modifié, jamais ce qu'il déclare.
+ *
+ * webfetch est refusé dans les deux modes : le conteneur a déjà un réseau
+ * bridge (nécessaire pour joindre le proxy d'inférence), inutile d'y ajouter
+ * un outil de récupération de contenu distant qui n'a aucun usage légitime
+ * ici — voir tools/proxy.ts pour ce que ce réseau laisse ouvert par ailleurs.
+ *
+ * Exportée pour être testée unitairement (voir sandbox.test.ts) : c'est une
+ * fonction pure, et c'est le seul endroit qui décide de cette question.
+ */
+export function permissionsFor(mode: AgentMode): Record<string, string> {
+  if (mode === "review") {
+    // read/glob/grep ne sont pas nommés : ils restent autorisés par défaut,
+    // et ce sont eux qui portent toute l'exploration attendue d'une revue.
+    return { edit: "deny", bash: "deny", webfetch: "deny" };
+  }
+  return { edit: "allow", bash: "allow", webfetch: "deny" };
+}
+
 export async function runAgentInSandbox(
   repo: string,
   meta: string,
   _projectPath: string,
   options: {
+    /**
+     * Nature de la tâche, qui décide des permissions d'outils (voir
+     * permissionsFor). Défaut "review", le mode le plus restrictif : un
+     * appelant qui oublie de le passer se voit refuser l'écriture — un échec
+     * visible et sans conséquence, là où le défaut inverse rendrait
+     * silencieusement à l'agent les outils que ce correctif lui retire.
+     */
+    mode?: AgentMode;
     /** Uniquement pour l'injection d'un faux docker en test (voir sandbox.test.ts). */
     dockerBin?: string;
     /**
@@ -397,6 +447,7 @@ export async function runAgentInSandbox(
     // INFERENCE_API_KEY) sans devoir mentir sur son nom.
     const opencodeConfig = JSON.stringify({
       $schema: "https://opencode.ai/config.json",
+      permission: permissionsFor(options.mode ?? "review"),
       provider: {
         [providerId]: {
           npm: "@ai-sdk/openai-compatible",

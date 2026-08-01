@@ -715,6 +715,14 @@ commentaires du code cité :
   `seccomp=` attend un chemin de fichier de profil, pas un mot-clé),
   `--pids-limit`, `--ulimit nofile`, réseau `none` par défaut (`bridge`
   uniquement pour l'exécution de l'agent, via le proxy d'inférence).
+- **Revue réellement en lecture seule** (`permissionsFor`, même fichier) : la
+  configuration opencode générée refuse `edit`, `bash` et `webfetch` pour une
+  revue comme pour le planificateur ; seule une tâche d'implémentation reçoit
+  les outils d'écriture. `read`/`glob`/`grep` restent ouverts dans tous les
+  cas — c'est l'exploration qui fait la valeur d'une revue. Mesuré avant ce
+  correctif : sur 13 runs de campagne, un modèle a corrigé lui-même le bug
+  qu'il devait signaler (et rendu un rapport au lieu du JSON attendu), un
+  autre a lancé `npm install && npm test`.
 - **Hooks git neutralisés** et **empreinte de `.git/config`/`.git/hooks`**
   avant/après l'exécution de l'agent (`src/agent/workspace.ts`,
   `fingerprintGitMeta`) : toute altération interrompt le flux avant la

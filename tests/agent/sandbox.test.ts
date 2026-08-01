@@ -47,6 +47,7 @@ let runInSandbox: (
   output: string;
   timedOut: boolean;
 }>;
+let permissionsFor: (mode: "review" | "implement") => Record<string, string>;
 let currentContainer: () => string | undefined;
 let killContainer: (name: string, dockerBin?: string) => Promise<void>;
 let hostUser: () => string | undefined;
@@ -69,6 +70,7 @@ before(async () => {
   ({
     buildDockerRunArgs,
     runInSandbox,
+    permissionsFor,
     currentContainer,
     killContainer,
     hostUser,
@@ -418,6 +420,39 @@ describe("runInSandbox", () => {
   });
 });
 
+// Campagne de mesure du 1er août 2026 : le §1.8 annonçait une revue « en
+// lecture seule (outils d'écriture bloqués) » alors que rien ne les
+// bloquait. Deux modèles sur treize s'en sont servis (un Edit sur le code
+// relu, un npm install + npm test).
+describe("permissionsFor (la revue doit être réellement en lecture seule)", () => {
+  test("mode review : edit, bash et webfetch sont refusés", () => {
+    const permissions = permissionsFor("review");
+    assert.equal(permissions.edit, "deny");
+    assert.equal(permissions.bash, "deny");
+    assert.equal(permissions.webfetch, "deny");
+  });
+
+  test("mode review : read/glob/grep ne sont jamais refusés — l'exploration reste la valeur d'une revue", () => {
+    const permissions = permissionsFor("review");
+    for (const tool of ["read", "glob", "grep", "list"]) {
+      assert.notEqual(
+        permissions[tool],
+        "deny",
+        `${tool} doit rester autorisé (non nommé = autorisé par défaut côté opencode)`,
+      );
+    }
+  });
+
+  test("mode implement : edit et bash sont accordés (écrire les tests, lancer la suite)", () => {
+    const permissions = permissionsFor("implement");
+    assert.equal(permissions.edit, "allow");
+    assert.equal(permissions.bash, "allow");
+    // Le réseau bridge existe déjà pour joindre le proxy d'inférence ; y
+    // ajouter un outil de récupération distante n'a aucun usage légitime.
+    assert.equal(permissions.webfetch, "deny");
+  });
+});
+
 // §1.7 — le conteneur agent ne doit connaître qu'un seul endpoint réseau
 // utile (l'inférence), pas une route ouverte vers host.docker.internal (donc
 // vers tous les ports de l'hôte). runAgentInSandbox démarre désormais un
@@ -493,6 +528,15 @@ describe("runAgentInSandbox (§1.7 : réseau restreint à l'inférence)", () => 
         !baseURL.includes(":1234/"),
         "pas le port par défaut de l'upstream réel (CONTAINER_INFERENCE_URL n'est pas défini dans ce test)",
       );
+
+      // Défaut sans `mode` explicite : le mode le plus restrictif. Un
+      // appelant qui oublie de le passer ne doit jamais récupérer
+      // silencieusement les outils d'écriture.
+      assert.deepEqual(opencodeConfig.permission, {
+        edit: "deny",
+        bash: "deny",
+        webfetch: "deny",
+      });
 
       // --add-host reste nécessaire : le conteneur doit joindre l'hôte pour
       // atteindre CE proxy (qui, lui, tourne sur l'hôte) — voir

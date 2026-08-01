@@ -236,6 +236,10 @@ export async function runPlanner(
     if (config.useDocker) {
       writeFileSync(join(workspace.meta, "prompt.txt"), prompt, "utf8");
       result = await runAgentInSandbox(workspace.repo, workspace.meta, context.projectPath, {
+        // Le planificateur ne fait que rédiger un plan JSON : il n'a aucune
+        // raison d'écrire ni de lancer une commande. Lecture seule, comme la
+        // revue (voir permissionsFor dans agent/sandbox.ts).
+        mode: "review",
         timeoutMs: config.plannerTimeoutMs,
       });
     } else {

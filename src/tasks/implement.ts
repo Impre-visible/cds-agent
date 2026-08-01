@@ -518,7 +518,13 @@ export async function runImplement(
         buildPrompt(context, testCommand, capabilities),
         "utf8",
       );
-      await runAgentInSandbox(repo, workspace.meta, context.projectPath);
+      // Seul mode où l'agent a besoin d'écrire et de lancer les tests. Ce que
+      // ces droits laissent réellement passer est vérifié après coup par
+      // checkHeadIntegrity et collectChanges plus bas — c'est là qu'est la
+      // vraie barrière, pas dans cette permission (voir permissionsFor).
+      await runAgentInSandbox(repo, workspace.meta, context.projectPath, {
+        mode: "implement",
+      });
     } else {
       await runAgent(repo, buildPrompt(context, testCommand, capabilities));
     }
