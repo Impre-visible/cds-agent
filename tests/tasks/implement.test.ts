@@ -600,6 +600,66 @@ describe("buildPrompt — capacités (chantier « capacités »)", () => {
       assert.match(prompt, /conservé et transmis à un humain/);
     });
 
+    // Phénomène distinct de l'accommodation ci-dessus : plusieurs modèles ont
+    // construit le jeu de données discriminant sans jamais poser la question
+    // discriminante. Aucune incitation ne corrige ça — le modèle ignore
+    // qu'il y a une frontière. Seule une technique nommée le fait.
+    describe("conventions de test nommées (l'omission ne se corrige pas par la motivation)", () => {
+      test("muter le retour d'un accesseur : distingue une copie d'une référence partagée", () => {
+        const prompt = buildPrompt(context());
+        assert.match(prompt, /MODIFIE ce qu'elle a rendu/);
+        assert.match(prompt, /état d'origine est intact/);
+      });
+
+      test("les trois valeurs d'une limite, jamais deux", () => {
+        const prompt = buildPrompt(context());
+        assert.match(prompt, /N-1, N et N\+1/);
+        assert.match(prompt, /Deux des trois ne suffisent jamais/);
+      });
+
+      test("la casse se teste dans les deux sens", () => {
+        const prompt = buildPrompt(context());
+        assert.match(prompt, /DES DEUX CÔTÉS/);
+        assert.match(prompt, /qu'un seul sens/);
+      });
+
+      test("« vide » a deux sens : sans clé, et sans clé reconnue", () => {
+        const prompt = buildPrompt(context());
+        assert.match(prompt, /sans aucune clé/);
+        assert.match(prompt, /aucune clé n'est reconnue/);
+      });
+
+      test("les quatre conventions sont présentes quelles que soient les capacités", () => {
+        // Ce sont des consignes de RÉDACTION de tests : elles ne dépendent
+        // pas du périmètre d'écriture accordé au dépôt.
+        for (const capabilities of [
+          { writablePaths: "all" as const, publishMode: "source-branch" as const },
+          { writablePaths: "none" as const, publishMode: "dedicated-mr" as const },
+          {
+            writablePaths: ["src/generated/**"],
+            publishMode: "source-branch" as const,
+          },
+        ]) {
+          const prompt = buildPrompt(context(), "npm test", capabilities);
+          assert.match(prompt, /## Conventions de test à appliquer/);
+          assert.equal(
+            (prompt.match(/^- /gm) ?? []).length >= 4,
+            true,
+            "les quatre conventions doivent être listées",
+          );
+        }
+      });
+
+      test("elles arrivent avant la consigne de faire passer la suite", () => {
+        const prompt = buildPrompt(context());
+        assert.ok(
+          prompt.indexOf("## Conventions de test") <
+            prompt.indexOf("corrige tes tests jusqu'à ce que tout passe"),
+          "des consignes de rédaction lues après coup ne servent à rien",
+        );
+      });
+    });
+
     test('writablePaths="all" : consigne inchangée, l\'agent corrige le bug lui-même', () => {
       const prompt = buildPrompt(context(), "npm test", {
         writablePaths: "all",

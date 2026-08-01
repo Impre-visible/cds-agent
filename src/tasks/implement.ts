@@ -463,6 +463,37 @@ function writeScopeInstructions(
 }
 
 /**
+ * Conventions de test nommées explicitement dans le prompt.
+ *
+ * Elles répondent à un phénomène mesuré le 1er août 2026, distinct de
+ * l'accommodation que `bugInstruction` traite plus bas : sur quatre modèles,
+ * plusieurs ont construit le jeu de données discriminant puis n'ont jamais
+ * posé la question discriminante. Ce n'est pas un défaut de motivation — le
+ * modèle ne sait pas qu'il y a une frontière à franchir — donc aucune
+ * incitation ne le corrige. Seule une technique nommée le fait.
+ *
+ * Chacune est STRUCTURELLE : elle se dérive de la forme de ce qu'on teste
+ * (un accesseur, une limite, une comparaison de texte, une entrée
+ * structurée), jamais de la connaissance d'un défaut particulier. C'est la
+ * condition pour qu'elles généralisent au-delà des cas qui les ont
+ * suggérées.
+ *
+ * Limite assumée, à garder en tête avant toute mesure : ces quatre
+ * conventions ont été dérivées d'un jeu de cinq défauts connus. Les
+ * remesurer sur ce même jeu ne prouverait rien — on aurait appris le
+ * corrigé. Établir qu'elles apportent quelque chose demande un second jeu,
+ * écrit sans cette liste sous les yeux, et deux campagnes sur ce jeu (avec
+ * et sans ce bloc) : sans bras témoin, un score absolu ne dit pas d'où il
+ * vient.
+ */
+const TEST_CONVENTIONS: readonly string[] = [
+  "Si une fonction rend un objet ou un tableau issu d'un état interne, MODIFIE ce qu'elle a rendu puis vérifie que l'état d'origine est intact. Comparer le retour à la valeur attendue ne distingue pas une copie d'une référence partagée.",
+  "Pour toute limite numérique N (longueur, taille, borne), teste les TROIS valeurs N-1, N et N+1. Deux des trois ne suffisent jamais : c'est exactement en N que se logent les confusions entre « strictement supérieur » et « supérieur ou égal ».",
+  "Pour toute comparaison de texte censée ignorer la casse, fais varier la casse DES DEUX CÔTÉS : donnée en majuscules interrogée en minuscules, puis l'inverse. Une donnée capitalisée interrogée en minuscules ne teste qu'un seul sens.",
+  "« Vide » a deux sens pour une entrée structurée : un objet sans aucune clé, et un objet dont aucune clé n'est reconnue. Teste les deux — une garde qui regarde l'entrée brute là où elle devrait regarder le résultat filtré ne se distingue qu'ainsi.",
+];
+
+/**
  * Exportée pour être testée unitairement (voir implement.test.ts) : mêmes
  * garanties recherchées que côté review.ts — délimiteurs présents,
  * troncature visible, contenu hostile neutralisé.
@@ -512,6 +543,10 @@ export function buildPrompt(
     `## Demande de @${context.requester}\n${wrapUntrusted("demande utilisateur", context.requestText)}`,
     linked,
     scope.write,
+    // Placées AVANT l'instruction de lancement de la suite : ce sont des
+    // consignes de rédaction, elles doivent être lues pendant que l'agent
+    // écrit, pas après qu'il a commencé à faire passer ses tests.
+    `## Conventions de test à appliquer\n${TEST_CONVENTIONS.map((rule) => `- ${rule}`).join("\n")}`,
     `Lance \`${testCommand}\` et corrige tes tests jusqu'à ce que tout passe.`,
     scope.forbidden,
     bugInstruction,
