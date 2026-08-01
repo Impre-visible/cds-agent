@@ -58,6 +58,14 @@ function makeRepoWithOrigin(): {
 
   const repo = join(root, "repo");
   execFileSync("git", ["clone", "--quiet", "--branch", "main", origin, repo]);
+  // Identité git posée sur le CLONE, pas seulement sur le seed : sans elle,
+  // tout `git commit` dans ce dépôt dépend de la configuration GLOBALE de la
+  // machine. Ça passe sur un poste de développement, ça échoue dans un runner
+  // CI vierge — mesuré, c'est ce qui a fait rougir le premier passage du
+  // workflow GitHub. Les tests qui reposent cette configuration eux-mêmes
+  // restent corrects, ils sont simplement devenus redondants.
+  execFileSync("git", ["-C", repo, "config", "user.email", "clone@test.local"]);
+  execFileSync("git", ["-C", repo, "config", "user.name", "clone"]);
 
   return { root, repo, origin };
 }

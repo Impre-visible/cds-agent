@@ -1,8 +1,22 @@
-import { test, describe } from "node:test";
+import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { startInferenceProxy } from "../../src/tools/proxy.ts";
+
+// proxy.ts importe (transitivement) src/config.ts, qui jette au chargement du
+// module si GITLAB_TOKEN ou BOT_USERNAME sont absents. Un import STATIQUE le
+// déclenche avant que le corps du fichier ne tourne : ce test ne passait donc
+// que sur une machine ayant un .env local, et échouait sur un runner CI
+// vierge — mesuré au premier passage du workflow GitHub. Même parade que les
+// autres tests du projet (review.test.ts, config.test.ts...) : variables
+// renseignées AVANT un import dynamique.
+let startInferenceProxy: typeof import("../../src/tools/proxy.ts").startInferenceProxy;
+
+before(async () => {
+  process.env.GITLAB_TOKEN ??= "test-token";
+  process.env.BOT_USERNAME ??= "test-bot";
+  ({ startInferenceProxy } = await import("../../src/tools/proxy.ts"));
+});
 
 /** Petit serveur HTTP jetable qui joue le rôle du "vrai" LM Studio. */
 function startFakeUpstream(): Promise<{
