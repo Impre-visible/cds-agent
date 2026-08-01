@@ -76,8 +76,7 @@ export interface ImplementResult {
    * Republié dans le rapport pour que le demandeur juge sans avoir à rejouer
    * quoi que ce soit — le workspace, lui, est détruit immédiatement après.
    */
-  artifacts?: WrittenFile[];
-  /**
+  artifacts?: WrittenFile[];  /**
    * URL de la merge request ouverte par le bot. Renseigné pour "mr-opened"
    * (capacité publishMode="dedicated-mr") et pour "tests-failing" — où la MR
    * est en Draft et porte des tests rouges, seul moyen de ne pas détruire un
@@ -134,6 +133,33 @@ export interface DedicatedMergeRequestOptions {
   extraDescription?: string;
 }
 
+/**
+ * Description d'une MR ouverte par le bot. Extraite d'openDedicatedMergeRequest
+ * pour que le rafraîchissement d'une MR dédupliquée (preserveFailingTests)
+ * produise exactement le même texte que la création.
+ *
+ * requestText vient d'un commentaire GitLab et extra contient de la sortie de
+ * commande : deux textes non maîtrisés qui atterrissent dans une description
+ * de MR, où une mention notifie réellement les gens et une quick action
+ * s'exécute. Même traitement qu'ailleurs (§5.6) — c'était un trou avant ce
+ * correctif, la description reprenait requestText brut.
+ */
+function dedicatedMrDescription(
+  targetBranch: string,
+  requestText: string,
+  extra?: string,
+): string {
+  return [
+    `Merge request ouverte automatiquement par cds-agent (capacité ` +
+      `"dedicated-mr" : le résultat n'est jamais poussé directement sur ` +
+      `\`${targetBranch}\`, à relire avant fusion).`,
+    `Demande d'origine : ${defuseMentions(requestText)}`,
+    extra ? defuseMentions(extra) : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 export async function openDedicatedMergeRequest(
   repo: string,
   projectId: number,
@@ -152,24 +178,109 @@ export async function openDedicatedMergeRequest(
     source_branch: branchName,
     target_branch: targetBranch,
     title: options.draft ? `Draft: ${title}` : title,
-    description: [
-      `Merge request ouverte automatiquement par cds-agent (capacité ` +
-        `"dedicated-mr" : le résultat n'est jamais poussé directement sur ` +
-        `\`${targetBranch}\`, à relire avant fusion).`,
-      // requestText vient d'un commentaire GitLab et extraDescription
-      // contient de la sortie de commande : deux textes non maîtrisés qui
-      // atterrissent dans une description de MR, où une mention notifie
-      // réellement les gens et une quick action s'exécute. Même traitement
-      // qu'ailleurs (§5.6) — c'était un trou avant ce correctif, la
-      // description reprenait requestText brut.
-      `Demande d'origine : ${defuseMentions(requestText)}`,
-      options.extraDescription ? defuseMentions(options.extraDescription) : "",
-    ]
-      .filter(Boolean)
-      .join("\n\n"),
+    description: dedicatedMrDescription(
+      targetBranch,
+      requestText,
+      options.extraDescription,
+    ),
   });
 
   return { branchName, mrUrl: mr.web_url };
+}
+
+/**
+ * Description complète d'une MR "tests rouges" — partagée entre la création
+ * (openDedicatedMergeRequest) et le rafraîchissement d'une MR dédupliquée
+ * (preserveFailingTests) : les deux chemins doivent produire exactement le
+ * même texte, sinon la MR raconte une histoire différente selon qu'elle est
+ * neuve ou réutilisée.
+ */
+export function testsFailingMrExtras(output: string, targetBranch: string): string {
+  return [
+    `⚠️ **Ces tests échouent volontairement.** La suite de référence était VERTE avant intervention et seuls des fichiers autorisés ont été modifiés : l'agent a donc écrit une assertion que le code ne satisfait pas.`,
+    `Deux lectures possibles, que rien ne permet de départager automatiquement : soit l'assertion est fausse, soit elle a mis au jour un défaut du code. Comparez le diff au code testé avant de fusionner ou de fermer.`,
+    // Conséquence à annoncer AVANT le clic, pas à découvrir après : ces
+    // tests rouges atterrissent sur la branche source à la fusion, et la
+    // pipeline de la MR d'origine reste bloquée tant que le défaut n'est
+    // pas corrigé. C'est le comportement voulu quand le défaut est réel —
+    // un bug confirmé DOIT bloquer — mais le demandeur doit le savoir.
+    `⚙️ Fusionner cette MR fait atterrir ces tests rouges sur \`${targetBranch}\` : la pipeline de la merge request d'origine restera en échec jusqu'à ce que le défaut soit corrigé. C'est voulu si le défaut est réel — fusionnez pour bloquer, fermez si l'assertion est fausse.`,
+    `<details><summary>Sortie de la suite</summary>\n\n\`\`\`\n${output}\n\`\`\`\n\n</details>`,
+  ].join("\n\n");
+}
+
+/**
+ * Commite les tests rouges et les préserve dans une MR dédiée en Draft — en
+ * RÉUTILISANT une MR Draft du bot encore ouverte sur la même cible s'il y en
+ * a une, plutôt que d'en empiler une nouvelle à chaque relance.
+ *
+ * Le non-déterminisme mesuré (deux runs identiques, 5 remarques puis 1)
+ * garantit que les utilisateurs relanceront ; sans déduplication, trois
+ * demandes identiques laissaient trois MR ouvertes dont deux que personne ne
+ * fermerait. Le suffixe aléatoire de buildBotBranchName reste justifié pour
+ * les implémentations RÉUSSIES (deux itérations légitimes peuvent coexister) ;
+ * pour des tests rouges à trancher, une seule question ouverte à la fois par
+ * MR cible suffit — la tentative la plus récente remplace la précédente.
+ *
+ * Le push est forcé (+HEAD:...), et c'est assumé : la branche appartient à
+ * l'espace de noms du bot (cds-agent/...), ne porte que la tentative
+ * précédente — désormais périmée — et n'est jamais une branche humaine. La
+ * règle « jamais de force push » de la charte vise l'agent sur les branches
+ * des utilisateurs, pas le daemon sur les siennes.
+ *
+ * Exportée pour être testée contre un vrai dépôt jetable et le faux serveur
+ * GitLab (voir implement.test.ts), comme openDedicatedMergeRequest.
+ */
+export async function preserveFailingTests(
+  repo: string,
+  projectId: number,
+  targetIid: number,
+  branch: string,
+  requester: string,
+  requestText: string,
+  output: string,
+): Promise<string> {
+  await git(repo, ["add", "--all"]);
+  await git(repo, [
+    "commit",
+    "-m",
+    `test: assertions non satisfaites, à trancher (demande de @${requester})`,
+  ]);
+
+  const title = `cds-agent : tests rouges à trancher (@${requester})`;
+  const extras = testsFailingMrExtras(output, branch);
+
+  // Une MR du bot est reconnue par sa branche source (espace de noms
+  // cds-agent/implement-<iid>-, que seul le daemon crée) ET par son état
+  // Draft — jamais par son titre seul, qu'un humain peut avoir édité.
+  const existing = (await gitlab.openMergeRequests(projectId, branch)).find(
+    (mr) =>
+      mr.source_branch.startsWith(`cds-agent/implement-${targetIid}-`) &&
+      mr.title.startsWith("Draft:"),
+  );
+
+  if (existing) {
+    await git(repo, ["push", "origin", `+HEAD:${existing.source_branch}`], true);
+    await gitlab.updateMergeRequest(projectId, existing.iid, {
+      title: `Draft: ${title}`,
+      description: dedicatedMrDescription(branch, requestText, extras),
+    });
+    log.info(
+      `[implement] MR Draft existante réutilisée (!${existing.iid}) au lieu d'en créer une nouvelle`,
+    );
+    return existing.web_url;
+  }
+
+  const { mrUrl } = await openDedicatedMergeRequest(
+    repo,
+    projectId,
+    targetIid,
+    branch,
+    requester,
+    requestText,
+    { draft: true, title, extraDescription: extras },
+  );
+  return mrUrl;
 }
 
 export interface HeadIntegrityViolation {
@@ -821,35 +932,19 @@ export async function runImplement(
       // On passe donc par la MR dédiée, quelles que soient les capacités du
       // dépôt : ces tests sont ROUGES, ils ne doivent jamais atteindre la
       // branche source, même quand pushToSourceBranch est accordé — mais ils
-      // valent bien mieux que rien. En Draft : la MR est faite pour être lue
-      // et tranchée, pas fusionnée depuis une liste. Le diff de la MR EST le
-      // rapport (les tests écrits), la description porte ce que le diff ne
-      // peut pas montrer (la sortie d'échec).
+      // valent bien mieux que rien. Voir preserveFailingTests pour le Draft,
+      // la déduplication entre relances et l'avertissement pipeline.
       let mrUrl: string | undefined;
       try {
-        await git(repo, ["add", "--all"]);
-        await git(repo, [
-          "commit",
-          "-m",
-          `test: assertions non satisfaites, à trancher (demande de @${context.requester})`,
-        ]);
-        ({ mrUrl } = await openDedicatedMergeRequest(
+        mrUrl = await preserveFailingTests(
           repo,
           context.projectId,
           context.targetIid,
           branch,
           context.requester,
           context.requestText,
-          {
-            draft: true,
-            title: `cds-agent : tests rouges à trancher (@${context.requester})`,
-            extraDescription: [
-              `⚠️ **Ces tests échouent volontairement.** La suite de référence était VERTE avant intervention et seuls des fichiers autorisés ont été modifiés : l'agent a donc écrit une assertion que le code ne satisfait pas.`,
-              `Deux lectures possibles, que rien ne permet de départager automatiquement : soit l'assertion est fausse, soit elle a mis au jour un défaut du code. Comparez le diff au code testé avant de fusionner ou de fermer.`,
-              `<details><summary>Sortie de la suite</summary>\n\n\`\`\`\n${output}\n\`\`\`\n\n</details>`,
-            ].join("\n\n"),
-          },
-        ));
+          output,
+        );
         log.info(`[implement] tests rouges préservés en MR dédiée : ${mrUrl}`);
       } catch (error) {
         // Repli sur le comportement d'avant ce correctif, en pire cas

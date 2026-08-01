@@ -26,6 +26,15 @@ let buildPrompt: (
 ) => string;
 let buildInstallCommand: (installCommand: string, ignoreScripts: boolean) => string;
 let rollbackAgentChanges: (repo: string) => Promise<void>;
+let preserveFailingTests: (
+  repo: string,
+  projectId: number,
+  targetIid: number,
+  branch: string,
+  requester: string,
+  requestText: string,
+  output: string,
+) => Promise<string>;
 let readWrittenFiles: (
   repo: string,
   paths: string[],
@@ -55,6 +64,15 @@ interface ReceivedMergeRequest {
   description: string;
 }
 let receivedMergeRequests: ReceivedMergeRequest[] = [];
+/** MR "déjà ouvertes" que le faux GitLab rend sur GET /merge_requests (déduplication). */
+let openMergeRequestsFixture: {
+  iid: number;
+  web_url: string;
+  source_branch: string;
+  title: string;
+}[] = [];
+/** Corps des PUT /merge_requests/<iid> reçus (rafraîchissement d'une MR dédupliquée). */
+let updatedMergeRequests: { iid: number; body: Record<string, unknown> }[] = [];
 let mergeRequestServer: Server;
 let mergeRequestServerUrl: string;
 
@@ -64,7 +82,8 @@ before(async () => {
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
       const raw = Buffer.concat(chunks).toString("utf8");
-      if (req.method === "POST" && /\/merge_requests$/.test(req.url ?? "")) {
+      const path = (req.url ?? "").split("?")[0] ?? "";
+      if (req.method === "POST" && /\/merge_requests$/.test(path)) {
         const form = new URLSearchParams(raw);
         receivedMergeRequests.push({
           source_branch: form.get("source_branch") ?? "",
@@ -74,6 +93,26 @@ before(async () => {
         });
         res.writeHead(201, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ iid: 99, web_url: `${mergeRequestServerUrl}/mr/99` }));
+        return;
+      }
+      if (req.method === "GET" && /\/merge_requests$/.test(path)) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(openMergeRequestsFixture));
+        return;
+      }
+      const updated = /\/merge_requests\/(\d+)$/.exec(path);
+      if (req.method === "PUT" && updated) {
+        updatedMergeRequests.push({
+          iid: Number(updated[1]),
+          body: JSON.parse(raw) as Record<string, unknown>,
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            iid: Number(updated[1]),
+            web_url: `${mergeRequestServerUrl}/mr/${updated[1]}`,
+          }),
+        );
         return;
       }
       res.writeHead(404, { "Content-Type": "text/plain" });
@@ -93,6 +132,7 @@ before(async () => {
     buildPrompt,
     buildInstallCommand,
     rollbackAgentChanges,
+    preserveFailingTests,
     readWrittenFiles,
     buildBotBranchName,
     openDedicatedMergeRequest,
@@ -964,6 +1004,101 @@ describe("openDedicatedMergeRequest (§A.3 : mode publishMode=\"dedicated-mr\")"
         assert.match(receivedMergeRequests[0]?.description ?? "", /Demande d'origine : demande/);
       } finally {
         rmSync(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // Dédup + avertissement pipeline : le non-déterminisme mesuré garantit les
+  // relances, et trois relances laissaient trois MR Draft ouvertes dont deux
+  // que personne ne fermerait.
+  describe("preserveFailingTests (déduplication des MR Draft entre relances)", () => {
+    test("aucune MR Draft ouverte : création, en Draft, avec l'avertissement pipeline", async () => {
+      const { root, repo } = makeRepoWithOrigin();
+      try {
+        mkdirSync(join(repo, "tests"), { recursive: true });
+        writeFileSync(join(repo, "tests", "rouge.test.js"), "// assertion\n");
+
+        receivedMergeRequests = [];
+        openMergeRequestsFixture = [];
+        updatedMergeRequests = [];
+        await preserveFailingTests(repo, 42, 7, "main", "alice", "écris des tests", "1 failed");
+
+        assert.equal(receivedMergeRequests.length, 1);
+        const mr = receivedMergeRequests[0];
+        assert.match(mr?.title ?? "", /^Draft: cds-agent : tests rouges/);
+        // L'avertissement doit précéder le clic, pas le suivre : fusionner
+        // bloque la pipeline de la MR d'origine.
+        assert.match(mr?.description ?? "", /pipeline de la merge request d'origine restera en échec/);
+        assert.match(mr?.description ?? "", /fusionnez pour bloquer, fermez si l'assertion est fausse/);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("une MR Draft du bot déjà ouverte sur la même cible : réutilisée, jamais empilée", async () => {
+      const { root, repo, origin } = makeRepoWithOrigin();
+      try {
+        // La branche de la tentative précédente existe côté origin, avec un
+        // contenu périmé que le nouveau push force doit remplacer.
+        execFileSync("git", ["-C", repo, "push", "--quiet", "origin", "HEAD:cds-agent/implement-7-aabbccdd"]);
+
+        mkdirSync(join(repo, "tests"), { recursive: true });
+        writeFileSync(join(repo, "tests", "rouge2.test.js"), "// nouvelle tentative\n");
+
+        receivedMergeRequests = [];
+        updatedMergeRequests = [];
+        openMergeRequestsFixture = [
+          {
+            iid: 31,
+            web_url: `${mergeRequestServerUrl}/mr/31`,
+            source_branch: "cds-agent/implement-7-aabbccdd",
+            title: "Draft: cds-agent : tests rouges à trancher (@alice)",
+          },
+        ];
+
+        const mrUrl = await preserveFailingTests(repo, 42, 7, "main", "alice", "relance", "2 failed");
+
+        assert.equal(mrUrl, `${mergeRequestServerUrl}/mr/31`, "l'URL rendue est celle de la MR existante");
+        assert.equal(receivedMergeRequests.length, 0, "aucune nouvelle MR ne doit être créée");
+        assert.equal(updatedMergeRequests.length, 1, "la MR existante doit être rafraîchie");
+        assert.equal(updatedMergeRequests[0]?.iid, 31);
+        assert.match(String(updatedMergeRequests[0]?.body.description ?? ""), /2 failed/);
+
+        // Le push a bien remplacé la branche périmée par le HEAD courant.
+        const headSha = (await git(repo, ["rev-parse", "HEAD"])).trim();
+        const branchSha = execFileSync("git", ["--git-dir", origin, "rev-parse", "cds-agent/implement-7-aabbccdd"]).toString().trim();
+        assert.equal(branchSha, headSha);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        openMergeRequestsFixture = [];
+      }
+    });
+
+    test("une MR ouverte d'un AUTRE iid ou hors espace de noms du bot n'est jamais réutilisée", async () => {
+      const { root, repo } = makeRepoWithOrigin();
+      try {
+        mkdirSync(join(repo, "tests"), { recursive: true });
+        writeFileSync(join(repo, "tests", "rouge3.test.js"), "// t\n");
+
+        receivedMergeRequests = [];
+        updatedMergeRequests = [];
+        openMergeRequestsFixture = [
+          // Autre MR cible (iid 8), même dépôt : à laisser tranquille.
+          { iid: 40, web_url: "http://x/mr/40", source_branch: "cds-agent/implement-8-ffee0011", title: "Draft: cds-agent : tests rouges à trancher (@bob)" },
+          // Branche humaine qui imite le titre : le filtre est la branche, pas le titre.
+          { iid: 41, web_url: "http://x/mr/41", source_branch: "feature/piege", title: "Draft: cds-agent : tests rouges à trancher (@eve)" },
+          // Branche du bot pour le bon iid mais MR sortie de Draft : un humain
+          // se l'est appropriée, on n'écrase pas son travail.
+          { iid: 42, web_url: "http://x/mr/42", source_branch: "cds-agent/implement-7-99887766", title: "cds-agent : tests rouges à trancher (@alice)" },
+        ];
+
+        await preserveFailingTests(repo, 42, 7, "main", "alice", "demande", "1 failed");
+
+        assert.equal(updatedMergeRequests.length, 0, "aucune des trois ne devait être touchée");
+        assert.equal(receivedMergeRequests.length, 1, "une MR neuve devait être créée");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        openMergeRequestsFixture = [];
       }
     });
   });

@@ -468,4 +468,33 @@ export const gitlab = {
       `/projects/${projectId}/merge_requests`,
       form,
     ),
+
+  /**
+   * MR ouvertes ciblant une branche donnée — utilisé par tasks/implement.ts
+   * pour retrouver une MR Draft "tests rouges" encore ouverte avant d'en
+   * empiler une nouvelle (déduplication). Le filtre fin (préfixe de branche
+   * du bot, titre) reste côté appelant : l'API ne sait filtrer que par état
+   * et branche cible, et c'est suffisant pour borner la liste.
+   */
+  openMergeRequests: (projectId: number, targetBranch: string) =>
+    paginate<{
+      iid: number;
+      web_url: string;
+      source_branch: string;
+      title: string;
+    }>(
+      `/projects/${projectId}/merge_requests?state=opened&target_branch=${encodeURIComponent(targetBranch)}&per_page=100`,
+      MAX_LIST_PAGES,
+    ),
+
+  /** Met à jour titre/description d'une MR existante (rafraîchissement d'une MR Draft dédupliquée). */
+  updateMergeRequest: (
+    projectId: number,
+    iid: number,
+    form: { title?: string; description?: string },
+  ) =>
+    api<{ iid: number; web_url: string }>(
+      `/projects/${projectId}/merge_requests/${iid}`,
+      { method: "PUT", body: JSON.stringify(form) },
+    ),
 };
