@@ -12,3 +12,6 @@ context-dump.json
 # Conséquence à connaître : les changements de permissions ne laissent
 # aucune trace révisable, et deux machines peuvent diverger en silence.
 projects.json
+
+# Poussière macOS — apparaît dès qu'on ouvre un dossier dans le Finder.
+.DS_Store
