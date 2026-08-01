@@ -461,6 +461,9 @@ function buildTestsFailingReport(
  * `[]` = elle a tourné et n'a rien trouvé, ce qui se dit explicitement.
  */
 function chainedReviewNote(result: ImplementResult): string {
+  // Les constats d'un "review-flagged" vivent dans SON rapport (voir
+  // buildReviewFlaggedReport) : les rajouter ici les dupliquerait.
+  if (result.status === "review-flagged") return "";
   const findings = result.chainedFindings;
   if (findings === undefined) return "";
   if (findings.length === 0) {
@@ -474,6 +477,45 @@ function chainedReviewNote(result: ImplementResult): string {
     "\n\n🔎 **Relecture croisée** — la suite est verte, mais ces points méritent un œil humain avant de faire confiance aux tests :\n" +
     lines.join("\n")
   );
+}
+
+/**
+ * Compte rendu du statut "review-flagged" : la suite est VERTE mais la
+ * relecture croisée a relevé des constats sur les assertions elles-mêmes —
+ * rien n'est poussé. Symétrique de buildTestsFailingReport, pour l'autre
+ * moitié du problème mesuré : là-bas une assertion juste échouait, ici une
+ * assertion suspecte passe.
+ */
+function buildReviewFlaggedReport(result: ImplementResult, seconds: number): string {
+  const findings = (result.chainedFindings ?? [])
+    .map(
+      (finding) =>
+        `- \`${defuseMentions(finding.file)}\` : ${defuseMentions(finding.message)}`,
+    )
+    .join("\n");
+
+  const preamble = [
+    `⚠️ **À trancher** — en ${seconds} s, ${defuseMentions(result.detail)}.`,
+    `La suite de tests passe, mais la relecture croisée (second passage du modèle, en lecture seule) a relevé ces constats sur les assertions :`,
+    findings,
+  ];
+
+  if (result.mrUrl) {
+    return [
+      ...preamble,
+      `📝 Les tests sont préservés dans une merge request **Draft** : ${result.mrUrl}`,
+      `Pour chaque constat : comparez l'assertion citée au code source. Fusionnez si le constat est un faux positif (les tests sont sains) ; fermez si l'assertion épouse un défaut — le constat décrit alors un vrai bug à corriger.`,
+    ].join("\n\n");
+  }
+
+  // Repli : la MR n'a pas pu être ouverte, le contenu ne survit qu'ici.
+  const artifacts = (result.artifacts ?? [])
+    .map(
+      (artifact) =>
+        `<details><summary>${defuseMentions(artifact.path)}</summary>\n\n\`\`\`\n${defuseMentions(artifact.content)}\n\`\`\`\n\n</details>`,
+    )
+    .join("\n");
+  return [...preamble, artifacts].filter(Boolean).join("\n\n");
 }
 
 export async function runTask(request: AgentRequest): Promise<void> {
@@ -595,6 +637,7 @@ export async function runTask(request: AgentRequest): Promise<void> {
         rejected: `⛔ Modifications refusées après ${seconds} s — ${defuseMentions(result.detail)}`,
         "tests-red": `❌ Les tests ne passent pas après ${seconds} s, rien n'a été poussé.\n\n<details><summary>Sortie</summary>\n\n\`\`\`\n${defuseMentions(result.detail.slice(-TESTS_RED_REPORT_TAIL_CHARS))}\n\`\`\`\n\n</details>`,
         "tests-failing": buildTestsFailingReport(result, seconds),
+        "review-flagged": buildReviewFlaggedReport(result, seconds),
         "tests-broken": `❌ Les tests écrits n'ont même pas pu être exécutés en ${seconds} s — ${defuseMentions(result.detail)}.\n\n<details><summary>Sortie du lanceur</summary>\n\n\`\`\`\n${defuseMentions((result.output ?? "").slice(-TESTS_RED_REPORT_TAIL_CHARS))}\n\`\`\`\n\n</details>`,
         "no-change": `🤷 L'agent n'a produit aucune modification en ${seconds} s.`,
       };
@@ -627,6 +670,9 @@ export async function runTask(request: AgentRequest): Promise<void> {
         // implement.ts). Le ranger avec ❌ était précisément l'erreur que la
         // campagne du 1er août 2026 a rendue visible.
         "tests-failing": "to-triage",
+        // Suite verte mais assertions suspectes : même nature de décision
+        // humaine que tests-failing — ni livré, ni en panne.
+        "review-flagged": "to-triage",
         // Un fichier que le lanceur ne peut pas exécuter n'a rien à trancher :
         // c'est une panne de production de l'agent, pas une découverte.
         "tests-broken": "failed",

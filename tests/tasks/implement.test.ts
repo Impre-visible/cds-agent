@@ -149,6 +149,8 @@ before(async () => {
     buildInstallCommand,
     rollbackAgentChanges,
     classifyRedSuite,
+    deliveryGate,
+    preserveFlaggedTests,
     preserveFailingTests,
     readWrittenFiles,
     buildBotBranchName,
@@ -1084,6 +1086,27 @@ describe("openDedicatedMergeRequest (§A.3 : mode publishMode=\"dedicated-mr\")"
     });
   });
 
+  // MR !5 : la relecture croisée rapportait précisément l'accommodation
+  // (« documente le bug dans le commentaire mais l'endorse dans
+  // l'assertion ») et le push avait lieu quand même. Le détecteur
+  // fonctionnait, il ne débranchait rien.
+  describe("deliveryGate (des constats non vides interdisent le push)", () => {
+    test("pas de relecture (undefined) : publier — best-effort, l'indisponibilité ne bloque pas", () => {
+      assert.equal(deliveryGate(undefined), "publish");
+    });
+
+    test("relecture propre ([]) : publier", () => {
+      assert.equal(deliveryGate([]), "publish");
+    });
+
+    test("au moins un constat : quarantaine, quel que soit son contenu", () => {
+      assert.equal(
+        deliveryGate([{ file: "tests/x.test.js", message: "endorse le bug" }]),
+        "quarantine",
+      );
+    });
+  });
+
   // Dédup + avertissement pipeline : le non-déterminisme mesuré garantit les
   // relances, et trois relances laissaient trois MR Draft ouvertes dont deux
   // que personne ne fermerait.
@@ -1144,6 +1167,63 @@ describe("openDedicatedMergeRequest (§A.3 : mode publishMode=\"dedicated-mr\")"
         const headSha = (await git(repo, ["rev-parse", "HEAD"])).trim();
         const branchSha = execFileSync("git", ["--git-dir", origin, "rev-parse", "cds-agent/implement-7-aabbccdd"]).toString().trim();
         assert.equal(branchSha, headSha);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        openMergeRequestsFixture = [];
+      }
+    });
+
+    test("preserveFlaggedTests : Draft, constats en description, consignes fusionner/fermer", async () => {
+      const { root, repo } = makeRepoWithOrigin();
+      try {
+        mkdirSync(join(repo, "tests"), { recursive: true });
+        writeFileSync(join(repo, "tests", "vert.test.js"), "// suite verte\n");
+
+        receivedMergeRequests = [];
+        openMergeRequestsFixture = [];
+        updatedMergeRequests = [];
+        await preserveFlaggedTests(repo, 42, 7, "main", "alice", "écris des tests", [
+          { file: "tests/vert.test.js", message: "endorse le bug dans l'assertion (2 au lieu de 3)" },
+        ]);
+
+        assert.equal(receivedMergeRequests.length, 1);
+        const mr = receivedMergeRequests[0];
+        assert.match(mr?.title ?? "", /^Draft: cds-agent : assertions suspectes/);
+        assert.match(mr?.description ?? "", /endorse le bug dans l'assertion/);
+        assert.match(mr?.description ?? "", /Fusionnez.*faux positif/s);
+        assert.match(mr?.description ?? "", /Fermez.*épouse un défaut/s);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("les deux natures partagent le pool de dédup : une MR tests-rouges est reprise par un run flagged", async () => {
+      const { root, repo } = makeRepoWithOrigin();
+      try {
+        execFileSync("git", ["-C", repo, "push", "--quiet", "origin", "HEAD:cds-agent/implement-7-cafe0123"]);
+        mkdirSync(join(repo, "tests"), { recursive: true });
+        writeFileSync(join(repo, "tests", "vert2.test.js"), "// t\n");
+
+        receivedMergeRequests = [];
+        updatedMergeRequests = [];
+        openMergeRequestsFixture = [
+          {
+            iid: 51,
+            web_url: `${mergeRequestServerUrl}/mr/51`,
+            source_branch: "cds-agent/implement-7-cafe0123",
+            title: "Draft: cds-agent : tests rouges à trancher (@alice)",
+          },
+        ];
+
+        const mrUrl = await preserveFlaggedTests(repo, 42, 7, "main", "alice", "relance", [
+          { file: "tests/vert2.test.js", message: "évitement de frontière" },
+        ]);
+
+        assert.equal(mrUrl, `${mergeRequestServerUrl}/mr/51`);
+        assert.equal(receivedMergeRequests.length, 0, "jamais deux questions ouvertes pour la même cible");
+        // La MR raconte la DERNIÈRE tentative : titre et description réécrits.
+        assert.match(String(updatedMergeRequests[0]?.body.title ?? ""), /assertions suspectes/);
+        assert.match(String(updatedMergeRequests[0]?.body.description ?? ""), /évitement de frontière/);
       } finally {
         rmSync(root, { recursive: true, force: true });
         openMergeRequestsFixture = [];

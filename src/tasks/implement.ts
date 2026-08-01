@@ -72,6 +72,21 @@ export interface ImplementResult {
      * un travail que personne ne pouvait juger.
      */
     | "tests-broken"
+    /**
+     * La suite est VERTE, mais la relecture croisée a relevé des constats
+     * sur les assertions elles-mêmes : rien n'est poussé, le travail part en
+     * MR dédiée Draft avec les constats en description.
+     *
+     * Mesuré sur la MR !5 (campagne du 1er août 2026) : les deux meilleurs
+     * modèles ont écrit des tests qui gravaient un bug, la relecture croisée
+     * l'a détecté et rapporté avec précision (« documente le bug dans le
+     * commentaire mais l'endorse dans l'assertion ») — et le push a eu lieu
+     * quand même. Même erreur de conception que tests-failing avant son
+     * correctif, un cran plus loin : le détecteur fonctionnait, il ne
+     * débranchait rien. À distinguer de tests-failing (suite ROUGE) : ici ce
+     * sont les assertions vertes qui sont suspectes.
+     */
+    | "review-flagged"
     | "mr-opened";
   detail: string;
   files: string[];
@@ -207,6 +222,20 @@ export async function openDedicatedMergeRequest(
   return { branchName, mrUrl: mr.web_url };
 }
 
+/**
+ * Porte de livraison : une relecture croisée NON VIDE interdit le push —
+ * quarantaine en MR Draft (voir le statut "review-flagged"). `undefined`
+ * (relecture coupée ou en échec) publie : la relecture est best-effort, son
+ * indisponibilité ne doit pas bloquer les livraisons — mais sa PAROLE, quand
+ * elle existe, doit être suivie d'effet. Fonction pure, exportée pour être
+ * testée seule (voir implement.test.ts).
+ */
+export function deliveryGate(
+  findings: ChainedFinding[] | undefined,
+): "publish" | "quarantine" {
+  return findings !== undefined && findings.length > 0 ? "quarantine" : "publish";
+}
+
 /** Séquences de couleur ANSI — voir classifyRedSuite pour pourquoi on les retire. */
 const ANSI_ESCAPES_RE = /\x1b\[[0-9;]*m/g;
 
@@ -318,24 +347,31 @@ export function testsFailingMrExtras(output: string, targetBranch: string): stri
  * Exportée pour être testée contre un vrai dépôt jetable et le faux serveur
  * GitLab (voir implement.test.ts), comme openDedicatedMergeRequest.
  */
-export async function preserveFailingTests(
+interface DraftPreservation {
+  title: string;
+  extras: string;
+  commitMessage: string;
+}
+
+/**
+ * Cœur commun des deux préservations en MR Draft (tests rouges, assertions
+ * suspectes) : commit, déduplication, push, création ou rafraîchissement.
+ * Un seul pool de déduplication pour les deux natures — une seule question
+ * ouverte à la fois par MR cible, la tentative la plus récente remplace la
+ * précédente, quel que soit son motif (titre et description sont réécrits
+ * au rafraîchissement, la MR raconte toujours la dernière tentative).
+ */
+async function preserveInDraftMr(
   repo: string,
   projectId: number,
   targetIid: number,
   branch: string,
   requester: string,
   requestText: string,
-  output: string,
+  preservation: DraftPreservation,
 ): Promise<string> {
   await git(repo, ["add", "--all"]);
-  await git(repo, [
-    "commit",
-    "-m",
-    `test: assertions non satisfaites, à trancher (demande de @${requester})`,
-  ]);
-
-  const title = `cds-agent : tests rouges à trancher (@${requester})`;
-  const extras = testsFailingMrExtras(output, branch);
+  await git(repo, ["commit", "-m", preservation.commitMessage]);
 
   // Une MR du bot est reconnue par sa branche source (espace de noms
   // cds-agent/implement-<iid>-, que seul le daemon crée) ET par son état
@@ -349,8 +385,8 @@ export async function preserveFailingTests(
   if (existing) {
     await git(repo, ["push", "origin", `+HEAD:${existing.source_branch}`], true);
     await gitlab.updateMergeRequest(projectId, existing.iid, {
-      title: `Draft: ${title}`,
-      description: dedicatedMrDescription(branch, requestText, extras),
+      title: `Draft: ${preservation.title}`,
+      description: dedicatedMrDescription(branch, requestText, preservation.extras),
     });
     log.info(
       `[implement] MR Draft existante réutilisée (!${existing.iid}) au lieu d'en créer une nouvelle`,
@@ -365,9 +401,59 @@ export async function preserveFailingTests(
     branch,
     requester,
     requestText,
-    { draft: true, title, extraDescription: extras },
+    { draft: true, title: preservation.title, extraDescription: preservation.extras },
   );
   return mrUrl;
+}
+
+export async function preserveFailingTests(
+  repo: string,
+  projectId: number,
+  targetIid: number,
+  branch: string,
+  requester: string,
+  requestText: string,
+  output: string,
+): Promise<string> {
+  return preserveInDraftMr(repo, projectId, targetIid, branch, requester, requestText, {
+    title: `cds-agent : tests rouges à trancher (@${requester})`,
+    extras: testsFailingMrExtras(output, branch),
+    commitMessage: `test: assertions non satisfaites, à trancher (demande de @${requester})`,
+  });
+}
+
+/**
+ * Constats de relecture croisée en description de MR — même exigence de
+ * symétrie création/rafraîchissement que testsFailingMrExtras.
+ */
+export function reviewFlaggedMrExtras(
+  findings: ChainedFinding[],
+  targetBranch: string,
+): string {
+  const list = findings
+    .map((finding) => `- \`${finding.file}\` : ${finding.message}`)
+    .join("\n");
+  return [
+    `⚠️ **La suite passe, mais les assertions elles-mêmes sont suspectes.** La relecture croisée (second passage du modèle, en lecture seule, sur les tests et le code qu'ils importent) a relevé ${findings.length} constat(s) :`,
+    list,
+    `Pour chaque constat, comparez l'assertion citée au code testé. **Fusionnez** si le constat est un faux positif — les tests sont sains, la suite restera verte sur \`${targetBranch}\`. **Fermez** si l'assertion épouse un défaut du code au lieu de le révéler : le constat décrit alors un vrai bug, à corriger avant d'écrire le test juste.`,
+  ].join("\n\n");
+}
+
+export async function preserveFlaggedTests(
+  repo: string,
+  projectId: number,
+  targetIid: number,
+  branch: string,
+  requester: string,
+  requestText: string,
+  findings: ChainedFinding[],
+): Promise<string> {
+  return preserveInDraftMr(repo, projectId, targetIid, branch, requester, requestText, {
+    title: `cds-agent : assertions suspectes, à trancher (@${requester})`,
+    extras: reviewFlaggedMrExtras(findings, branch),
+    commitMessage: `test: suite verte mais assertions signalées par la relecture croisée (demande de @${requester})`,
+  });
 }
 
 export interface HeadIntegrityViolation {
@@ -1086,6 +1172,47 @@ export async function runImplement(
       context.projectPath,
       paths,
     );
+
+    // Une relecture croisée non vide DÉBRANCHE la publication : mesuré sur
+    // la MR !5, le détecteur rapportait précisément l'accommodation et le
+    // push avait lieu quand même. Les tests partent en MR Draft, les
+    // constats en description — un humain fusionne (faux positif) ou ferme
+    // (l'assertion épouse un défaut). Quarantaine commune aux deux
+    // publishMode : un dedicated-mr normal non-Draft inviterait autant à la
+    // fusion qu'un push direct.
+    if (deliveryGate(chainedFindings) === "quarantine") {
+      const findings = chainedFindings ?? [];
+      let mrUrl: string | undefined;
+      try {
+        mrUrl = await preserveFlaggedTests(
+          repo,
+          context.projectId,
+          context.targetIid,
+          branch,
+          context.requester,
+          context.requestText,
+          findings,
+        );
+        log.info(`[implement] assertions suspectes préservées en MR dédiée : ${mrUrl}`);
+      } catch (error) {
+        log.warn(
+          `[implement] MR dédiée impossible pour des assertions suspectes (${(error as Error).message}) — ` +
+            `repli sur la republication du contenu dans le rapport`,
+        );
+      }
+      return {
+        status: "review-flagged",
+        detail:
+          `la suite est verte, mais la relecture croisée a relevé ${findings.length} constat(s) ` +
+          `sur les assertions elles-mêmes — rien n'est poussé, à trancher humainement`,
+        files: paths,
+        durationMs: Date.now() - started,
+        chainedFindings: findings,
+        mrUrl,
+        // Repli : sans MR, le contenu ne survit que dans le rapport.
+        ...(mrUrl === undefined ? { artifacts: readWrittenFiles(repo, paths) } : {}),
+      };
+    }
 
     // Le refus de pousser sur une branche protégée reste inconditionnel,
     // MAIS ne s'applique qu'au mode "source-branch" : en mode "dedicated-mr"
