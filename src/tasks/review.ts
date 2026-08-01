@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { config } from "../config.ts";
+import { config, type ReviewPassMode } from "../config.ts";
 import { runAgent, type AgentResult } from "../agent/runner.ts";
 import { createWorkspace } from "../agent/workspace.ts";
 import type { DiffFile, MergeRequestContext } from "../types.ts";
@@ -192,6 +192,71 @@ export function buildDiffSection(files: DiffFile[]): DiffSection {
   return { text: blocks.join("\n\n"), truncatedFiles, omittedFiles, generatedFiles };
 }
 
+/**
+ * Plafond de longueur d'une remarque reprise dans le bloc des passes ≥ 2, et
+ * nombre maximal de remarques listées. Ce bloc grossit en N² (chaque passe
+ * reçoit tout ce que les précédentes ont dit) : sans plafond, sept passes à
+ * cinquante remarques rendraient le prompt de la dernière plus long que le
+ * diff qu'elle est censée relire. Coupe VISIBLE dans les deux cas, jamais
+ * silencieuse — même politique que visibleTruncate ci-dessus.
+ */
+const MAX_PREVIOUS_REMARK_CHARS = 300;
+const MAX_PREVIOUS_REMARKS_LISTED = 40;
+
+/**
+ * Bloc ajouté au prompt des passes ≥ 2, selon REVIEW_PASS_MODE. Renvoie ""
+ * pour `independent` ou quand aucune remarque ne précède — c'est ce qui
+ * garantit que la passe 1, et toute exécution à REVIEW_PASSES=1, reçoit
+ * exactement le prompt d'avant ce chantier.
+ *
+ * Les messages repris viennent du modèle, qui a lui-même lu un diff non
+ * fiable : ils passent donc par escapeDelimiters, comme toute donnée qui
+ * pourrait forger une fausse frontière de bloc. Ils ne sont en revanche PAS
+ * enveloppés dans un bloc « DONNEES NON FIABLES » — ce bloc dit au modèle de
+ * n'y obéir en rien, ce qui viderait de son sens une consigne dont tout
+ * l'objet est justement d'orienter la passe suivante.
+ *
+ * Exportée pour être testée unitairement (voir review.test.ts) : c'est la
+ * seule chose qui change d'un mode à l'autre, donc la seule chose que la
+ * comparaison des trois modes met réellement à l'épreuve.
+ */
+export function buildPassAddendum(
+  mode: ReviewPassMode,
+  previous: ValidatedRemark[],
+): string {
+  if (mode === "independent" || previous.length === 0) return "";
+
+  const listed = previous.slice(0, MAX_PREVIOUS_REMARKS_LISTED);
+  const lines = listed.map((remark) => {
+    const where = `${remark.file.new_path}:${remark.position?.newLine ?? "fichier"}`;
+    const message = escapeDelimiters(
+      visibleTruncate(remark.message, MAX_PREVIOUS_REMARK_CHARS),
+    );
+    return `- ${where} — [${remark.severity}] ${message}`;
+  });
+  if (previous.length > listed.length) {
+    lines.push(
+      `- [... ${previous.length - listed.length} remarque(s) supplémentaire(s) non listée(s) ...]`,
+    );
+  }
+
+  // Formulation d'`exclusion` : reprise mot pour mot du cahier des charges de
+  // ce chantier. Elle ne nomme AUCUN défaut ni aucun fichier du jeu de bugs —
+  // si elle en nommait un, la mesure apprendrait le corrigé au lieu de mesurer
+  // la stratégie (même piège que les conventions de test dérivées de la MR !2,
+  // voir TEST_CONVENTIONS dans implement.ts).
+  const instruction =
+    mode === "exclusion"
+      ? "Une revue précédente a déjà signalé les points ci-dessous. Ne les répète pas, " +
+        "et ne te contente pas de les vérifier : cherche des défauts d'une autre nature, " +
+        "dans des fichiers ou des comportements que cette liste ne couvre pas."
+      : "Une revue précédente a produit les remarques ci-dessous. Reprends-les : confirme " +
+        "celles qui tiennent, corrige celles qui visent la mauvaise ligne ou décrivent mal " +
+        "le défaut, approfondis celles qui restent vagues — et ajoute ce qu'elles ont manqué.";
+
+  return `## Revue précédente\n${instruction}\n\n${lines.join("\n")}`;
+}
+
 export interface BuiltPrompt {
   prompt: string;
   truncatedFiles: string[];
@@ -210,8 +275,18 @@ export interface BuiltPrompt {
  * du prompt, présence des délimiteurs, troncature effective, numérotation —
  * tout ce qu'un test automatisé peut vérifier sans modèle disponible (voir
  * le rapport de ce chantier pour ce qui reste non validé faute de modèle).
+ *
+ * `previous`/`mode` ne servent qu'aux passes ≥ 2 (voir buildPassAddendum) :
+ * appelée sans eux — le cas de la passe 1 et de toute exécution à
+ * REVIEW_PASSES=1 — elle rend exactement le prompt d'avant ce chantier, au
+ * caractère près hormis le budget de remarques demandé. C'est la condition
+ * pour que les mesures déjà faites restent comparables.
  */
-export function buildPrompt(context: MergeRequestContext): BuiltPrompt {
+export function buildPrompt(
+  context: MergeRequestContext,
+  previous: ValidatedRemark[] = [],
+  mode: ReviewPassMode = "independent",
+): BuiltPrompt {
   const paths = context.files.map((file) => file.new_path);
   const diffSection = buildDiffSection(context.files);
 
@@ -252,6 +327,11 @@ export function buildPrompt(context: MergeRequestContext): BuiltPrompt {
     truncationNotice,
     `## Méthode\nLe dépôt complet est cloné dans le répertoire de travail : tu peux lire n'importe quel fichier. Lis en entier chaque fichier modifié avant de conclure. Le diff seul cache une partie des défauts — certains n'apparaissent qu'en comparant des fonctions voisines du même fichier, ou en croisant une condition avec le texte qui l'accompagne.`,
     `## Diff à relire\nChaque ligne ajoutée ou de contexte est préfixée par son numéro dans le fichier après modification (ex. "   142 | + const x = ...") ; les lignes supprimées, préfixées par "—", n'ont pas de numéro dans le nouveau fichier.\n${wrapUntrusted("diff", diffSection.text)}`,
+    // Placé APRÈS le diff : la consigne porte sur des remarques qui désignent
+    // des lignes précises, elle n'est lisible qu'une fois ces lignes sous les
+    // yeux. Vide en mode `independent` et à la passe 1, donc retiré par le
+    // .filter(Boolean) plus bas.
+    buildPassAddendum(mode, previous),
     `Quand ton analyse est terminée, termine ta réponse par ce JSON et rien après :`,
     `{"remarks":[{"file":"${paths[0] ?? "chemin"}","line":42,"severity":"warning","message":"..."}]}`,
     `Le champ line doit être EXACTEMENT le numéro affiché en préfixe de la ligne visée dans le diff numéroté ci-dessus (jamais un numéro de l'ancien fichier, jamais la position dans le bloc affiché).`,
@@ -261,7 +341,11 @@ export function buildPrompt(context: MergeRequestContext): BuiltPrompt {
     // signifiaient. C'est ce qui a fait classer le bug #4 en "bug" par
     // qwen3.6-35b, donc publier en "info" (voir normalizeSeverity).
     `Le champ severity vaut EXACTEMENT l'une de ces trois valeurs : "error" (un défaut qui produit un comportement faux), "warning" (un risque réel mais conditionnel), "info" (remarque mineure). N'invente aucune autre valeur.`,
-    `Maximum ${config.maxRemarks} remarques.`,
+    // reviewBudget, PAS maxRemarks : ce qu'on demande au modèle n'est plus ce
+    // qu'on publie (voir buildConfig). Le plafond de publication s'applique en
+    // bout de chaîne, après agrégation et tri — la promesse « 5 remarques max »
+    // porte sur la MR, pas sur la recherche.
+    `Maximum ${config.reviewBudget} remarques.`,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -521,7 +605,48 @@ function majorityThreshold(passes: number): number {
  * Exportée pour être testée unitairement (voir review.test.ts).
  */
 export function voteRemarks(passes: ValidatedRemark[][]): ValidatedRemark[] {
-  const threshold = majorityThreshold(passes.length);
+  return aggregateRemarks(passes, "vote");
+}
+
+/**
+ * Deux façons de réunir les passes, partageant la MÊME déduplication et le
+ * MÊME tri final : seul le seuil change.
+ *
+ * - `vote` : majorité stricte (voir voteRemarks ci-dessus).
+ * - `union` : seuil à 1 — toute remarque validée par au moins une passe est
+ *   retenue. Le tri (votes, puis gravité, puis ordre d'apparition) reste
+ *   intégralement appliqué : une remarque corroborée par deux passes passe
+ *   toujours devant une remarque isolée, même quand aucune n'est éliminée.
+ *   C'est ce qui rend le plafond de publication juste sous union comme sous
+ *   vote.
+ */
+export type ReviewAggregation = "vote" | "union";
+
+/**
+ * L'union n'est pas un choix libre pour `chained` et `exclusion` : ces deux
+ * modes demandent à la passe N de ne pas répéter les précédentes, donc
+ * garantissent qu'aucune remarque n'obtient plus d'une voix. Un vote à la
+ * majorité stricte y publierait zéro remarque à tous les coups — ce n'est pas
+ * une préférence, c'est une incompatibilité. On la résout ici, explicitement
+ * et de façon testable, plutôt que de laisser le banc d'essai rendre trois
+ * fois « aucune remarque » sans que personne ne comprenne pourquoi.
+ *
+ * Exportée pour être testée unitairement (voir review.test.ts).
+ */
+export function resolveAggregation(
+  mode: ReviewPassMode,
+  voteEnabled: boolean,
+): ReviewAggregation {
+  if (mode !== "independent") return "union";
+  return voteEnabled ? "vote" : "union";
+}
+
+export function aggregateRemarks(
+  passes: ValidatedRemark[][],
+  aggregation: ReviewAggregation,
+): ValidatedRemark[] {
+  const threshold =
+    aggregation === "vote" ? majorityThreshold(passes.length) : 1;
 
   interface Tally {
     remark: ValidatedRemark;
@@ -570,8 +695,102 @@ export function voteRemarks(passes: ValidatedRemark[][]): ValidatedRemark[] {
     .map((tally) => tally.remark);
 }
 
+/**
+ * Ce que chaque passe a réellement APPORTÉ, par opposition à ce qu'elle a
+ * rendu. Sans cette distinction, comparer trois stratégies de passes multiples
+ * ne veut rien dire : une passe qui reformule cinq fois les mêmes lignes et
+ * une passe qui en trouve cinq nouvelles rendent le même compte.
+ *
+ * `fresh` est la métrique centrale du banc d'essai. Si la passe 3 n'apporte
+ * jamais rien, le protocole est à deux passes, pas trois — et c'est ce chiffre,
+ * pas une impression, qui le dira.
+ */
+export interface PassTally {
+  /** 1-indexé, tel qu'affiché dans les logs. */
+  pass: number;
+  /** Remarques validées rendues par cette passe. */
+  total: number;
+  /** Dont la clé fichier:ligne n'était apparue dans AUCUNE passe précédente. */
+  fresh: number;
+  /** Déjà vues dans une passe précédente (total - fresh). */
+  duplicates: number;
+  durationMs: number;
+}
+
+/**
+ * `durations[i]` est la durée de `passes[i]` ; une durée manquante compte 0
+ * plutôt que de faire échouer le comptage — l'instrumentation ne doit jamais
+ * casser une revue par ailleurs réussie.
+ *
+ * Exportée pour être testée unitairement (voir review.test.ts).
+ */
+export function tallyPasses(
+  passes: ValidatedRemark[][],
+  durations: number[],
+): PassTally[] {
+  const seen = new Set<string>();
+  return passes.map((pass, index) => {
+    // Comme dans aggregateRemarks : une passe qui vise deux fois la même ligne
+    // ne compte qu'une fois, sinon un modèle bavard gonflerait `total` sans
+    // rien apporter.
+    const keys = new Set(pass.map((remark) => remarkKey(remark)));
+    let fresh = 0;
+    for (const key of keys) {
+      if (!seen.has(key)) fresh++;
+      seen.add(key);
+    }
+    return {
+      pass: index + 1,
+      total: keys.size,
+      fresh,
+      duplicates: keys.size - fresh,
+      durationMs: durations[index] ?? 0,
+    };
+  });
+}
+
+/**
+ * Ligne récapitulative de fin de revue. Sans elle, la comparaison des trois
+ * modes se ferait à l'œil sur trois logs de passes séparés.
+ *
+ * Exportée pour être testée unitairement (voir review.test.ts).
+ */
+export function formatPassSummary(
+  mode: ReviewPassMode,
+  aggregation: ReviewAggregation,
+  tallies: PassTally[],
+  retained: number,
+  published: number,
+): string {
+  const fresh = tallies.map((tally) => tally.fresh).join(" + ");
+  const duplicates = tallies.reduce((sum, tally) => sum + tally.duplicates, 0);
+  const distinct = tallies.reduce((sum, tally) => sum + tally.fresh, 0);
+  const seconds = Math.round(
+    tallies.reduce((sum, tally) => sum + tally.durationMs, 0) / 1000,
+  );
+  return (
+    `${tallies.length} passe(s) (mode=${mode}, agrégation=${aggregation}) : ` +
+    `${fresh} remarque(s) nouvelle(s), ${duplicates} doublon(s), ${seconds} s ` +
+    `→ ${distinct} distincte(s), ${retained} retenue(s), ${published} publiée(s)`
+  );
+}
+
 export interface ReviewResult {
+  /** Ce qui est publié dans la MR : `retained` coupé à MAX_REMARKS. */
   remarks: ValidatedRemark[];
+  /**
+   * Tout ce que l'agrégation a retenu, AVANT le plafond de publication —
+   * trié, donc `remarks` en est le préfixe.
+   *
+   * Séparé de `remarks` pour une raison de mesure, pas de confort : une
+   * campagne qui compte les défauts trouvés à travers le plafond de
+   * publication mesure le plafond, pas le modèle. C'est exactement ce qui
+   * s'est produit sur la MR !5, où la seule détection du défaut D4 de toute
+   * la campagne a été coupée avant d'être vue. `publishReview` n'utilise que
+   * `remarks` — ce champ ne sert qu'à l'outillage de mesure (voir
+   * tools/dry-review.ts).
+   */
+  retained: ValidatedRemark[];
   durationMs: number;
   /** §5.7 : le diff envoyé au modèle a dû être coupé ou amputé de fichiers. */
   truncated: boolean;
@@ -627,17 +846,49 @@ export async function runReview(
     // dans agent/sandbox.ts), donc l'agent d'une passe ne peut pas laisser
     // derrière lui un dépôt modifié qui fausserait la suivante. Sans cette
     // garantie, il faudrait payer un clone par passe.
+    const mode = config.reviewPassMode;
+    const aggregation = resolveAggregation(mode, config.reviewVote);
+    if (config.reviewPasses > 1 && aggregation !== "vote" && config.reviewVote) {
+      // Dit à voix haute plutôt que subi : l'utilisateur a laissé REVIEW_VOTE
+      // à 1 et n'obtiendra pourtant pas de vote. Voir resolveAggregation.
+      log.info(
+        `[revue] mode=${mode} : le vote majoritaire est sans objet (chaque remarque ` +
+          `n'a qu'une voix par construction) — agrégation forcée à "union"`,
+      );
+    }
+
     const passResults: ValidatedRemark[][] = [];
+    const passDurations: number[] = [];
     const passFailures: Error[] = [];
     let totalDurationMs = 0;
 
     for (let pass = 1; pass <= config.reviewPasses; pass++) {
       if (config.reviewPasses > 1)
-        log.info(`[revue] passe ${pass}/${config.reviewPasses}`);
+        log.info(`[revue] passe ${pass}/${config.reviewPasses} (mode=${mode})`);
       try {
-        const outcome = await runReviewPass(workspace, built.prompt, context);
+        // En mode `independent` (le défaut), buildPassAddendum rend "" et ce
+        // prompt est rigoureusement `built.prompt` — on reconstruit quand même
+        // plutôt que de brancher, pour qu'il n'existe qu'un seul chemin de
+        // construction du prompt à maintenir.
+        const previous = aggregateRemarks(passResults, "union");
+        const prompt =
+          pass === 1
+            ? built.prompt
+            : buildPrompt(context, previous, mode).prompt;
+
+        const outcome = await runReviewPass(workspace, prompt, context);
         passResults.push(outcome.remarks);
+        passDurations.push(outcome.durationMs);
         totalDurationMs += outcome.durationMs;
+
+        if (config.reviewPasses > 1) {
+          const tally = tallyPasses(passResults, passDurations).at(-1)!;
+          log.info(
+            `[revue] passe ${pass}/${config.reviewPasses} : ${tally.total} remarque(s) ` +
+              `(${tally.fresh} nouvelle(s), ${tally.duplicates} doublon(s)), ` +
+              `${Math.round(tally.durationMs / 1000)} s`,
+          );
+        }
       } catch (error) {
         // Une passe qui échoue (timeout, JSON illisible) ne condamne pas les
         // autres : elle sort du dénominateur du vote. Le rejet ne devient
@@ -656,20 +907,35 @@ export async function runReview(
         new Error("aucune passe de revue n'a produit de résultat");
     }
 
-    const remarks = voteRemarks(passResults);
+    const remarks = aggregateRemarks(passResults, aggregation);
+    const published = remarks.slice(0, config.maxRemarks);
     if (config.reviewPasses > 1) {
-      const total = new Set(
-        passResults.flat().map((remark) => remarkKey(remark)),
-      ).size;
       log.info(
-        `[revue] vote sur ${passResults.length} passe(s) réussie(s) : ` +
-          `${remarks.length}/${total} remarque(s) distincte(s) retenue(s) ` +
-          `(seuil : ${majorityThreshold(passResults.length)} passe(s))`,
+        `[revue] ${formatPassSummary(
+          mode,
+          aggregation,
+          tallyPasses(passResults, passDurations),
+          remarks.length,
+          published.length,
+        )}` +
+          (aggregation === "vote"
+            ? ` (seuil du vote : ${majorityThreshold(passResults.length)} passe(s) sur ${passResults.length} réussie(s))`
+            : ""),
+      );
+    }
+    // Le plafond de publication n'est PAS un détail de journalisation : sur la
+    // MR !5, c'est lui qui a supprimé la seule trouvaille du défaut D4 de toute
+    // la campagne. Tant qu'il coupe, on le dit.
+    if (remarks.length > published.length) {
+      log.info(
+        `[revue] plafond de publication atteint : ${remarks.length - published.length} ` +
+          `remarque(s) retenue(s) non publiée(s) (MAX_REMARKS=${config.maxRemarks})`,
       );
     }
 
     return {
-      remarks: remarks.slice(0, config.maxRemarks),
+      remarks: published,
+      retained: remarks,
       durationMs: totalDurationMs,
       truncated: built.truncatedFiles.length > 0 || built.omittedFiles.length > 0,
       omittedFiles: built.omittedFiles,

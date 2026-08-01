@@ -245,6 +245,25 @@ Quelques variables méritent une lecture attentive avant de démarrer :
   avoir besoin de plus que les défauts (512 processus, 4096:8192
   descripteurs, 1 Go de `/tmp`).
 
+- **`REVIEW_BUDGET`** / **`MAX_REMARKS`** — deux plafonds distincts, là où une
+  seule variable servait aux deux : ce qu'on **demande** au modèle dans le
+  prompt (12 par défaut) et ce qu'on **publie** dans la MR après validation,
+  agrégation et tri (5). Mesuré sur la MR !5 : à `MAX_REMARKS=5`, les trois
+  modèles testés ont rendu *exactement* 5 remarques — le plafond était donc
+  contraignant à chaque fois ; à 12, `gpt-oss-120b` en a rendu 6, dont
+  `sortTodos` appliqué après le découpage en pages, le seul modèle de toute la
+  campagne à avoir trouvé ce défaut. Ce que le plafond retranchait n'était pas
+  du bruit. `MAX_REMARKS` est ramené à `REVIEW_BUDGET` s'il le dépasse (avec
+  un avertissement au démarrage) : on ne publie pas plus qu'on n'a demandé.
+- **`REVIEW_PASSES`** / **`REVIEW_PASS_MODE`** / **`REVIEW_VOTE`** — banc
+  d'essai des passes multiples, désactivé par défaut (`REVIEW_PASSES=1`
+  reproduit le comportement d'avant, au caractère près dans le prompt). Le
+  mode ne change que le prompt des passes ≥ 2 : `independent` (défaut, chaque
+  passe ignore les précédentes), `chained` (les remarques précédentes sont un
+  contexte à confirmer ou approfondir), `exclusion` (elles sont une liste de
+  ce qui est déjà couvert, avec consigne de chercher ailleurs). Voir
+  [Comparer les stratégies de passes](#comparer-les-stratégies-de-passes)
+  ci-dessous pour le protocole et la lecture des logs.
 - **`HEALTH_ENABLED`** / **`HEALTH_PORT`** / **`HEALTH_HOST`** (§6.5) —
   serveur HTTP minimal d'observabilité (`/healthz`, `/metrics`, voir
   `src/daemon/health.ts`). Activé par défaut sur `127.0.0.1:8090` ;
@@ -273,8 +292,75 @@ Quelques variables méritent une lecture attentive avant de démarrer :
 Le fichier réel `.env` de ce dépôt (non versionné, voir `.gitignore`) ne
 renseigne aujourd'hui qu'une poignée de ces variables — tout le reste
 tourne sur les valeurs par défaut de `src/config.ts`. `.env.example` liste
-les quarante-trois variables lues par `buildConfig()`, plus `LOG_LEVEL`/
+les cinquante-trois variables lues par `buildConfig()`, plus `LOG_LEVEL`/
 `LOG_PRETTY`/`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` lues indépendamment.
+
+### Comparer les stratégies de passes
+
+Une passe de revue unique laisse passer des défauts qu'une autre passe, même
+prompt, aurait trouvés. Mesuré sur la MR !2 : trois tirages **indépendants**
+de `qwen3.6-35b-a3b` ont rendu 3, 4 puis 4 défauts sur 5 — mais des ensembles
+**différents**, dont l'union couvrait 4/5. Aucune passe seule n'a dépassé 4.
+
+Trois façons de construire le prompt des passes ≥ 2 sont donc disponibles, et
+le choix entre elles n'est **pas tranché** : ce dépôt fournit le banc d'essai,
+pas la conclusion. Le risque à ne pas ignorer est symétrique — montrer du
+travail déjà fait à un modèle tend à le faire *vérifier* au lieu de chercher
+(déjà observé ici : `qwen3.5-397b` a lu le dépôt, constaté que les tests
+demandés existaient, et rendu `no-change`). `chained` et `exclusion` peuvent
+donc réduire l'exploration au lieu de l'étendre.
+
+```bash
+for mode in independent chained exclusion; do
+  REVIEW_PASSES=3 REVIEW_PASS_MODE=$mode REVIEW_VOTE=0 REVIEW_BUDGET=12 \
+  LOG_PRETTY=1 AGENT_MODEL=scaleway/qwen3.6-35b-a3b \
+  npm run review -- 5 2>&1 | tee "revue-$mode.log"
+done
+```
+
+`REVIEW_VOTE=0` n'est pas décoratif : `chained` et `exclusion` **forcent**
+l'union (ils demandent à la passe N de ne pas répéter les précédentes, donc
+aucune remarque n'y obtient deux voix et un vote majoritaire y publierait zéro
+remarque). Sans ce `REVIEW_VOTE=0`, le bras `independent` serait le seul à
+voter et la comparaison mélangerait deux variables.
+
+Chaque passe émet une ligne, puis la revue en émet une récapitulative :
+
+```
+[revue] passe 2/3 (mode=exclusion)
+[revue] passe 2/3 : 6 remarque(s) (2 nouvelle(s), 4 doublon(s)), 15 s
+[revue] 3 passe(s) (mode=exclusion, agrégation=union) : 5 + 2 + 0 remarque(s)
+        nouvelle(s), 4 doublon(s), 41 s → 7 distincte(s), 7 retenue(s), 5 publiée(s)
+[revue] plafond de publication atteint : 2 remarque(s) retenue(s) non publiée(s) (MAX_REMARKS=5)
+```
+
+- **`N nouvelle(s)`** — remarques dont la clé `fichier:ligne` n'était apparue
+  dans **aucune** passe précédente. C'est la métrique centrale : si la passe 3
+  n'apporte jamais rien, le protocole est à deux passes, pas trois.
+- **`N doublon(s)`** — remarques déjà vues dans une passe antérieure. Élevé en
+  `chained` (attendu, le mode invite à confirmer), il indique en `exclusion`
+  que la consigne n'a pas été suivie.
+- **`N distincte(s)`** — l'union des clés sur toutes les passes ; **`retenue(s)`**
+  ce qui survit à l'agrégation (identique à `distincte` sous union, inférieur
+  sous vote) ; **`publiée(s)`** ce qui atteint réellement la MR.
+- La **dernière ligne** n'apparaît que si le plafond a coupé. C'est elle qu'il
+  faut surveiller : sur la MR !5, c'est ce plafond qui a supprimé la seule
+  détection du défaut D4 de toute la campagne.
+
+`npm run review` (`src/tools/dry-review.ts`) affiche à la fin les remarques
+publiées **puis**, séparément, celles que le plafond a coupées : compter les
+défauts trouvés à travers `MAX_REMARKS` reviendrait à mesurer le plafond, pas
+le modèle.
+
+Ce qui se compare d'un mode à l'autre : le nombre de **défauts distincts
+réellement trouvés** (à recouper à la main avec le jeu de bugs, sur la liste
+complète — publiées *et* coupées) et le nombre de **faux positifs** — pas le
+nombre brut de remarques, qu'un mode bavard gonfle sans rien apporter.
+
+Une réserve de méthode, la même que pour les autres campagnes de ce projet :
+un run par mode est un tirage unique, et le non-déterminisme mesuré ici est
+précisément ce que ces passes cherchent à corriger. Trois runs par mode
+donnent une comparaison ; un seul donne une anecdote.
 
 ## Capacités de l'agent
 

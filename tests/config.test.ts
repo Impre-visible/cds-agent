@@ -181,6 +181,104 @@ describe("buildConfig — autres valeurs numériques", () => {
   });
 });
 
+/**
+ * Chantier « passes multiples » §1 : le plafond demandé au modèle et le
+ * plafond publié dans la MR étaient la même variable. Mesuré sur la MR !5 —
+ * à MAX_REMARKS=5, les trois modèles ont rendu exactement 5 remarques (donc
+ * plafond contraignant) ; à 12, gpt-oss-120b en a rendu 6, dont la seule
+ * détection du défaut D4 de toute la campagne. Le plafond ne coupait pas du
+ * bruit.
+ */
+describe("buildConfig — REVIEW_BUDGET vs MAX_REMARKS (chantier « passes multiples »)", () => {
+  /** Capture console.warn : l'avertissement de plafonnement est du contenu testé, pas du bruit. */
+  function captureWarnings<T>(run: () => T): { result: T; warnings: string[] } {
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.join(" "));
+    };
+    try {
+      return { result: run(), warnings };
+    } finally {
+      console.warn = original;
+    }
+  }
+
+  test("les deux plafonds ont des défauts DISTINCTS : on cherche large, on publie court", () => {
+    const config = buildConfig(baseEnv());
+    assert.equal(config.reviewBudget, 12);
+    assert.equal(config.maxRemarks, 5);
+  });
+
+  test("les deux se règlent indépendamment", () => {
+    const config = buildConfig(
+      baseEnv({ REVIEW_BUDGET: "20", MAX_REMARKS: "3" }),
+    );
+    assert.equal(config.reviewBudget, 20);
+    assert.equal(config.maxRemarks, 3);
+  });
+
+  test("publier plus que ce qu'on demande est impossible : MAX_REMARKS est plafonné, et l'utilisateur prévenu", () => {
+    const { result, warnings } = captureWarnings(() =>
+      buildConfig(baseEnv({ REVIEW_BUDGET: "4", MAX_REMARKS: "10" })),
+    );
+    assert.equal(result.maxRemarks, 4);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? "", /MAX_REMARKS=10/);
+    assert.match(warnings[0] ?? "", /REVIEW_BUDGET=4/);
+  });
+
+  test("aucun avertissement quand les deux plafonds sont cohérents", () => {
+    const { warnings } = captureWarnings(() =>
+      buildConfig(baseEnv({ REVIEW_BUDGET: "12", MAX_REMARKS: "12" })),
+    );
+    assert.deepEqual(warnings, []);
+  });
+
+  test("REVIEW_BUDGET=0 est rejeté (un budget nul demanderait zéro remarque)", () => {
+    assert.throws(
+      () => buildConfig(baseEnv({ REVIEW_BUDGET: "0" })),
+      /REVIEW_BUDGET/,
+    );
+  });
+});
+
+describe("buildConfig — REVIEW_PASS_MODE / REVIEW_VOTE (banc d'essai des passes)", () => {
+  test("le défaut reproduit le comportement d'avant le chantier", () => {
+    const config = buildConfig(baseEnv());
+    assert.equal(config.reviewPassMode, "independent");
+    assert.equal(config.reviewVote, true);
+    assert.equal(config.reviewPasses, 1);
+  });
+
+  test("les trois modes du banc d'essai sont acceptés", () => {
+    for (const mode of ["independent", "chained", "exclusion"]) {
+      assert.equal(
+        buildConfig(baseEnv({ REVIEW_PASS_MODE: mode })).reviewPassMode,
+        mode,
+      );
+    }
+  });
+
+  test("un mode inconnu est refusé AU DÉMARRAGE, en nommant les valeurs acceptées", () => {
+    assert.throws(
+      () => buildConfig(baseEnv({ REVIEW_PASS_MODE: "indépendant" })),
+      (error: Error) => {
+        assert.match(error.message, /REVIEW_PASS_MODE/);
+        // Sans cette liste, une faute de frappe ferait tourner neuf runs de
+        // campagne dans un mode qu'on croit être un autre.
+        assert.match(error.message, /independent, chained, exclusion/);
+        return true;
+      },
+    );
+  });
+
+  test("REVIEW_VOTE=0 bascule sur l'union ; toute autre valeur laisse le vote", () => {
+    assert.equal(buildConfig(baseEnv({ REVIEW_VOTE: "0" })).reviewVote, false);
+    assert.equal(buildConfig(baseEnv({ REVIEW_VOTE: "1" })).reviewVote, true);
+  });
+});
+
 describe("buildConfig — configuration valide complète", () => {
   test("une configuration entièrement renseignée et valide est lue telle quelle", () => {
     const config = buildConfig(

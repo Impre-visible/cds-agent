@@ -200,6 +200,43 @@ function matchingFormat(
 }
 
 /**
+ * Stratégie de construction du prompt des passes ≥ 2 quand REVIEW_PASSES > 1
+ * (voir tasks/review.ts::buildPassAddendum). Ce n'est PAS un réglage
+ * d'exploitation : c'est un banc d'essai, destiné à rendre les trois
+ * stratégies comparables sur un même jeu de bugs. Le défaut reproduit le
+ * comportement d'avant ce chantier.
+ *
+ * - `independent` : chaque passe part du même prompt, sans rien savoir des
+ *   précédentes. C'est ce qui a produit les meilleurs résultats mesurés sur
+ *   la MR !2 (trois tirages indépendants de qwen3.6-35b-a3b : 3, 4 puis 4
+ *   défauts sur 5, mais des ensembles DIFFÉRENTS dont l'union couvrait 4/5).
+ * - `chained` : la passe N reçoit les remarques précédentes comme un
+ *   contexte à confirmer, corriger ou approfondir.
+ * - `exclusion` : la passe N reçoit les remarques précédentes comme une
+ *   liste de ce qui est DÉJÀ couvert, avec la consigne de chercher ailleurs.
+ *
+ * Le risque que la mesure doit trancher : montrer du travail déjà fait à un
+ * modèle tend à le faire vérifier au lieu de chercher — comportement déjà
+ * observé sur ce projet (qwen3.5-397b a lu le dépôt, constaté que les tests
+ * demandés existaient, et rendu `no-change`). `chained` et `exclusion`
+ * peuvent donc RÉDUIRE l'exploration au lieu de l'étendre. Rien ici ne
+ * préjuge du résultat.
+ */
+export const REVIEW_PASS_MODES = ["independent", "chained", "exclusion"] as const;
+export type ReviewPassMode = (typeof REVIEW_PASS_MODES)[number];
+
+function validateReviewPassMode(env: NodeJS.ProcessEnv): ReviewPassMode {
+  const raw = env.REVIEW_PASS_MODE;
+  if (raw === undefined || raw === "") return "independent";
+  if ((REVIEW_PASS_MODES as readonly string[]).includes(raw))
+    return raw as ReviewPassMode;
+  throw new Error(
+    `Variable d'environnement invalide : REVIEW_PASS_MODE="${raw}" — valeurs acceptées : ` +
+      `${REVIEW_PASS_MODES.join(", ")} — voir .env`,
+  );
+}
+
+/**
  * Construit la configuration à partir d'un environnement donné. Fonction
  * pure exportée séparément de `config` afin d'être testable en isolation
  * (sans dépendre de process.env ni du cache des modules ESM) : voir
@@ -209,6 +246,42 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
   // Chantier "projects.json" : en tout premier, avant toute autre lecture —
   // voir LEGACY_ENV_MIGRATIONS ci-dessus.
   assertNoLegacyEnvVars(env);
+
+  /**
+   * Deux plafonds distincts, là où `maxRemarks` servait auparavant aux deux :
+   * ce qu'on DEMANDE au modèle (reviewBudget, dans le prompt) et ce qu'on
+   * PUBLIE dans la MR (maxRemarks, après validation, agrégation et tri).
+   *
+   * Mesuré sur la MR !5 le 1er août 2026 : à MAX_REMARKS=5, les trois modèles
+   * testés ont rendu EXACTEMENT 5 remarques — le plafond était atteint à
+   * chaque fois, donc contraignant. À 12, gpt-oss-120b en a rendu 6, dont
+   * `sortTodos` appliqué après le découpage en pages (défaut D4, classé « non
+   * attrapable par une convention mécanique », et le seul modèle de toute la
+   * campagne à l'avoir trouvé). Ce que le plafond coupait n'était donc pas du
+   * bruit : c'étaient des trouvailles réelles, supprimées avant même d'être
+   * triées. Le modèle doit chercher large ; c'est la publication qui reste
+   * courte.
+   */
+  const reviewBudget = finiteNumber(env, "REVIEW_BUDGET", 12, {
+    min: 1,
+    max: 50,
+  });
+  // maxRemarks=0 viderait silencieusement toute review (slice(0, 0)).
+  const requestedMaxRemarks = finiteNumber(env, "MAX_REMARKS", 5, {
+    min: 1,
+    max: 50,
+  });
+  // Publier plus que ce qu'on demande est impossible par construction ; on
+  // plafonne plutôt que de laisser croire à un réglage qui n'a aucun effet.
+  const maxRemarks = Math.min(requestedMaxRemarks, reviewBudget);
+  if (maxRemarks < requestedMaxRemarks) {
+    console.warn(
+      `⚠ MAX_REMARKS=${requestedMaxRemarks} dépasse REVIEW_BUDGET=${reviewBudget} : ` +
+        `le modèle ne peut pas rendre plus de remarques qu'on ne lui en demande. ` +
+        `Plafond de publication ramené à ${maxRemarks} — augmentez REVIEW_BUDGET ` +
+        `si vous vouliez réellement publier davantage.`,
+    );
+  }
 
   return {
     gitlabUrl: (env.GITLAB_URL ?? "https://gitlab.com").replace(/\/+$/, ""),
@@ -265,8 +338,9 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     plannerTimeoutMs:
       finiteNumber(env, "PLANNER_TIMEOUT_MINUTES", 3, { min: 1, max: 60 }) *
       60_000,
-    // maxRemarks=0 viderait silencieusement toute review (slice(0, 0)).
-    maxRemarks: finiteNumber(env, "MAX_REMARKS", 5, { min: 1, max: 50 }),
+    // Voir le calcul de reviewBudget/maxRemarks en tête de buildConfig.
+    reviewBudget,
+    maxRemarks,
     /**
      * Nombre de passes de revue sur le même diff, dont on ne garde que les
      * remarques apparues dans une MAJORITÉ (voir tasks/review.ts::voteRemarks).
@@ -286,6 +360,27 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
      * ne gagne quoi que ce soit.
      */
     reviewPasses: finiteNumber(env, "REVIEW_PASSES", 1, { min: 1, max: 7 }),
+    /** Voir REVIEW_PASS_MODES / validateReviewPassMode ci-dessus. */
+    reviewPassMode: validateReviewPassMode(env),
+    /**
+     * Agrégation des passes : vote majoritaire (défaut, comportement d'avant
+     * ce chantier) ou simple union dédupliquée. REVIEW_VOTE=0 bascule sur
+     * l'union.
+     *
+     * Ce réglage existe pour une raison précise, et il faut la nommer : le
+     * vote et les modes `chained`/`exclusion` sont INCOMPATIBLES. Un mode qui
+     * demande explicitement à la passe N de ne pas répéter les précédentes
+     * garantit qu'aucune remarque n'obtient deux voix — un vote à la majorité
+     * stricte y publierait donc systématiquement zéro remarque. Ces deux
+     * modes forcent l'union quoi qu'il arrive (voir resolveAggregation dans
+     * tasks/review.ts) ; ce drapeau ne décide réellement que du mode
+     * `independent`.
+     *
+     * Conséquence pour la mesure : comparer `independent` AVEC vote aux deux
+     * autres SANS vote mélangerait deux variables. Pour une comparaison
+     * honnête des trois modes, mettre REVIEW_VOTE=0 partout.
+     */
+    reviewVote: env.REVIEW_VOTE !== "0",
     /**
      * Relecture croisée après une implémentation livrée (voir
      * tasks/chained-review.ts) : un second passage du modèle, en lecture

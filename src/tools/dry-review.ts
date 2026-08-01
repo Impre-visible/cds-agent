@@ -34,10 +34,8 @@ const context = await buildContext(request);
 if (context.targetKind !== "merge_requests")
   throw new Error("contexte MR attendu");
 
-const { remarks, durationMs, truncated, omittedFiles } = await runReview(
-  context,
-  context.sourceBranch,
-);
+const { remarks, retained, durationMs, truncated, omittedFiles } =
+  await runReview(context, context.sourceBranch);
 
 if (truncated) {
   console.log(
@@ -45,13 +43,28 @@ if (truncated) {
   );
 }
 
-console.log(
-  `\n${remarks.length} remarque(s) en ${Math.round(durationMs / 1000)} s :\n`,
-);
-for (const remark of remarks) {
+function describe(remark: (typeof retained)[number]): string {
   const where =
     remark.position === null
       ? `${remark.file.new_path} (fichier)`
       : `${remark.file.new_path}:${remark.position.newLine}`;
-  console.log(`  ${where} [${remark.severity}] ${remark.message}`);
+  return `  ${where} [${remark.severity}] ${remark.message}`;
+}
+
+console.log(
+  `\n${remarks.length} remarque(s) publiée(s) en ${Math.round(durationMs / 1000)} s :\n`,
+);
+for (const remark of remarks) console.log(describe(remark));
+
+// Compter les défauts trouvés à travers le plafond de publication reviendrait
+// à mesurer le plafond, pas le modèle : sur la MR !5, c'est exactement ce qui
+// a fait disparaître la seule détection du défaut D4 de toute la campagne.
+// Cet outil de mesure montre donc AUSSI ce que le plafond a coupé.
+const overflow = retained.slice(remarks.length);
+if (overflow.length > 0) {
+  console.log(
+    `\n${overflow.length} remarque(s) retenue(s) mais NON publiée(s) ` +
+      `(plafond MAX_REMARKS=${config.maxRemarks}) :\n`,
+  );
+  for (const remark of overflow) console.log(describe(remark));
 }
