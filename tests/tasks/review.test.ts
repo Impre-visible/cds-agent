@@ -39,13 +39,32 @@ let buildPrompt: (
 };
 let escapeDelimiters: (text: string) => string;
 let normalizeSeverity: (raw: unknown) => { severity: string; unknown?: string };
-let voteRemarks: (passes: ValidatedRemark[][]) => ValidatedRemark[];
+interface AggregatedRemark extends ValidatedRemark {
+  passes: number;
+}
+let voteRemarks: (passes: ValidatedRemark[][]) => AggregatedRemark[];
+let mergeMessages: (existing: string, incoming: string) => string;
+let partitionForPublication: (
+  retained: AggregatedRemark[],
+  minSeverity: string,
+  maxRemarks: number,
+) => {
+  published: AggregatedRemark[];
+  belowSeverity: AggregatedRemark[];
+  overCap: AggregatedRemark[];
+};
+let formatExclusionSummary: (
+  belowSeverity: number,
+  overCap: number,
+  minSeverity: string,
+  maxRemarks: number,
+) => string;
 let buildPassAddendum: (mode: PassMode, previous: ValidatedRemark[]) => string;
 let resolveAggregation: (mode: PassMode, voteEnabled: boolean) => Aggregation;
 let aggregateRemarks: (
   passes: ValidatedRemark[][],
   aggregation: Aggregation,
-) => ValidatedRemark[];
+) => AggregatedRemark[];
 let tallyPasses: (
   passes: ValidatedRemark[][],
   durations: number[],
@@ -83,6 +102,9 @@ before(async () => {
     salvageRemarks,
     selectRemarkSource,
     formatChannelSummary,
+    mergeMessages,
+    partitionForPublication,
+    formatExclusionSummary,
   } = await import("../../src/tasks/review.ts"));
 });
 
@@ -429,7 +451,11 @@ describe("voteRemarks (vote majoritaire entre passes)", () => {
 
   test("une seule passe : tout est conservé, comportement par défaut inchangé", () => {
     const pass = [remark("a.js", 1), remark("b.js", 2)];
-    assert.deepEqual(voteRemarks([pass]), pass);
+    assert.deepEqual(
+      voteRemarks([pass]),
+      pass.map((r) => ({ ...r, passes: 1 })),
+      "seul le compte d'occurrences est ajouté ; rien n'est retiré ni réordonné",
+    );
   });
 
   test("deux passes : seule la remarque vue par les deux survit", () => {
@@ -457,12 +483,16 @@ describe("voteRemarks (vote majoritaire entre passes)", () => {
     );
   });
 
-  test("le message retenu est celui de la première passe, la sévérité la PLUS grave observée", () => {
+  test("les DEUX formulations sont conservées, la sévérité est la PLUS grave observée", () => {
     const result = voteRemarks([
       [remark("a.js", 1, "info", "formulation de la passe 1")],
       [remark("a.js", 1, "error", "formulation de la passe 2")],
     ]);
-    assert.equal(result[0]?.message, "formulation de la passe 1");
+    // Garder la première et jeter la seconde a effacé, sur la campagne du
+    // 1er août 2026, le seul diagnostic juste de tout un run (voir
+    // mergeMessages).
+    assert.match(String(result[0]?.message), /formulation de la passe 1/);
+    assert.match(String(result[0]?.message), /formulation de la passe 2/);
     assert.equal(
       result[0]?.severity,
       "error",
@@ -1231,5 +1261,312 @@ describe("formatChannelSummary — mesurer la fréquence au lieu de la subir", (
 
   test("toutes les passes perdues : la ligne le dit sans mentir sur un canal", () => {
     assert.match(formatChannelSummary([]), /canaux : aucun/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Filtrer par NATURE plutôt que par quantité.
+//
+// Mesuré le 1er août 2026 (MR !5, 3 passes en mode `exclusion`, 15 remarques
+// distinctes) : les cinq "error" étaient tous justes, les trois faux positifs
+// identifiables étaient tous des "info". Le plafond à 5 coupait deux défauts
+// réels et difficiles, et publiait un faux positif "info" en tête.
+// ---------------------------------------------------------------------------
+
+function aggregated(
+  path: string,
+  line: number,
+  severity: string,
+  passes = 1,
+  message = "m",
+): AggregatedRemark {
+  return {
+    file: file(path),
+    position: { newLine: line, oldLine: null },
+    severity,
+    message,
+    passes,
+  };
+}
+
+describe("partitionForPublication — la gravité sélectionne, le plafond borne", () => {
+  const retained = [
+    aggregated("a.js", 1, "error"),
+    aggregated("b.js", 2, "error"),
+    aggregated("c.js", 3, "warning"),
+    aggregated("d.js", 4, "warning"),
+    aggregated("e.js", 5, "info"),
+    aggregated("f.js", 6, "info"),
+  ];
+
+  test("seuil « warning » : error + warning publiés, info écartés — sans arbitrage sur un nombre", () => {
+    const { published, belowSeverity, overCap } = partitionForPublication(
+      retained,
+      "warning",
+      15,
+    );
+    assert.deepEqual(
+      published.map((r) => r.file.new_path),
+      ["a.js", "b.js", "c.js", "d.js"],
+    );
+    assert.deepEqual(
+      belowSeverity.map((r) => r.file.new_path),
+      ["e.js", "f.js"],
+    );
+    assert.deepEqual(overCap, []);
+  });
+
+  test("seuil « info » : rien n'est filtré", () => {
+    const { published, belowSeverity } = partitionForPublication(retained, "info", 15);
+    assert.equal(published.length, 6);
+    assert.deepEqual(belowSeverity, []);
+  });
+
+  test("seuil « error » : seuls les défauts affirmés", () => {
+    const { published, belowSeverity } = partitionForPublication(retained, "error", 15);
+    assert.deepEqual(
+      published.map((r) => r.file.new_path),
+      ["a.js", "b.js"],
+    );
+    assert.equal(belowSeverity.length, 4);
+  });
+
+  test("la gravité filtre AVANT le plafond : un info ne consomme jamais une place", () => {
+    // Avec l'ordre inverse, les deux info en fin de liste seraient comptés dans
+    // les 4 places et évinceraient deux warning recevables.
+    const desordonne = [
+      aggregated("info-1.js", 1, "info"),
+      aggregated("info-2.js", 2, "info"),
+      aggregated("err.js", 3, "error"),
+      aggregated("warn-1.js", 4, "warning"),
+      aggregated("warn-2.js", 5, "warning"),
+    ];
+    const { published, overCap } = partitionForPublication(desordonne, "warning", 3);
+    assert.deepEqual(
+      published.map((r) => r.file.new_path),
+      ["err.js", "warn-1.js", "warn-2.js"],
+    );
+    assert.deepEqual(overCap, []);
+  });
+
+  test("le plafond ne coupe que ce qui a passé le seuil, et le range dans overCap", () => {
+    const { published, belowSeverity, overCap } = partitionForPublication(
+      retained,
+      "warning",
+      2,
+    );
+    assert.deepEqual(
+      published.map((r) => r.file.new_path),
+      ["a.js", "b.js"],
+    );
+    assert.deepEqual(
+      overCap.map((r) => r.file.new_path),
+      ["c.js", "d.js"],
+      "recevables, mais au-delà de la borne de volume — cause DIFFÉRENTE du seuil",
+    );
+    assert.equal(belowSeverity.length, 2);
+  });
+
+  test("TOUT est info : la revue est vide, mais rien n'est perdu ni silencieux", () => {
+    const queDesInfos = [
+      aggregated("a.js", 1, "info"),
+      aggregated("b.js", 2, "info"),
+      aggregated("c.js", 3, "info"),
+    ];
+    const { published, belowSeverity, overCap } = partitionForPublication(
+      queDesInfos,
+      "warning",
+      15,
+    );
+    assert.deepEqual(published, [], "aucune remarque publiable");
+    assert.equal(
+      belowSeverity.length,
+      3,
+      "les trois restent visibles côté mesure — une revue vide DOIT être distinguable d'un dépôt sain",
+    );
+    assert.deepEqual(overCap, []);
+  });
+
+  test("partition EXACTE : rien ne disparaît entre les trois listes", () => {
+    for (const [seuil, plafond] of [
+      ["info", 15],
+      ["warning", 2],
+      ["error", 1],
+    ] as const) {
+      const { published, belowSeverity, overCap } = partitionForPublication(
+        retained,
+        seuil,
+        plafond,
+      );
+      assert.equal(
+        published.length + belowSeverity.length + overCap.length,
+        retained.length,
+        `seuil=${seuil} plafond=${plafond}`,
+      );
+    }
+  });
+
+  test("aucune remarque retenue : trois listes vides, aucun cas particulier", () => {
+    const vide = partitionForPublication([], "warning", 15);
+    assert.deepEqual(vide.published, []);
+    assert.deepEqual(vide.belowSeverity, []);
+    assert.deepEqual(vide.overCap, []);
+  });
+});
+
+describe("formatExclusionSummary — deux causes, jamais confondues", () => {
+  test("les deux compteurs sont nommés séparément, même à zéro", () => {
+    const line = formatExclusionSummary(3, 0, "warning", 15);
+    assert.match(line, /3 sous le seuil de sévérité \(MIN_SEVERITY=warning\)/);
+    assert.match(line, /0 au-delà du plafond \(MAX_REMARKS=15\)/);
+  });
+
+  test("rien d'écarté : aucune ligne, plutôt qu'une ligne à deux zéros", () => {
+    assert.equal(formatExclusionSummary(0, 0, "warning", 15), "");
+  });
+});
+
+describe("mergeMessages — deux passes sur la même ligne peuvent voir DEUX défauts", () => {
+  test("les deux formulations sont conservées, avec une couture explicite", () => {
+    const merged = mergeMessages("needle est du code mort", "q n'est pas mis en minuscules");
+    assert.match(merged, /needle est du code mort/);
+    assert.match(merged, /q n'est pas mis en minuscules/);
+    assert.match(
+      merged,
+      /aussi relevé sur cette ligne/,
+      "un lecteur doit voir deux observations, pas une phrase mal recollée",
+    );
+  });
+
+  test("une reformulation identique n'est pas dupliquée (casse indifférente)", () => {
+    assert.equal(mergeMessages("Borne mal calculée", "borne mal calculée"), "Borne mal calculée");
+    assert.equal(mergeMessages("m", "m"), "m");
+  });
+
+  test("une formulation vide est ignorée", () => {
+    assert.equal(mergeMessages("m", "   "), "m");
+  });
+
+  test("au-delà de trois formulations, on n'empile plus", () => {
+    let merged = "un";
+    for (const suite of ["deux", "trois", "quatre", "cinq"]) {
+      merged = mergeMessages(merged, suite);
+    }
+    assert.match(merged, /trois/);
+    assert.doesNotMatch(merged, /quatre/);
+  });
+
+  test("une formulation interminable est coupée VISIBLEMENT", () => {
+    const merged = mergeMessages("court", "x".repeat(2_000));
+    assert.match(merged, /\[\.\.\. tronqué, \d+ caractère\(s\) non montré\(s\) \.\.\.\]/);
+    assert.ok(merged.length < 800);
+  });
+});
+
+describe("tri : la gravité prime sur la corroboration", () => {
+  test("un info vu par deux passes NE passe PLUS devant un error vu une fois", () => {
+    // Le classement mesuré le 1er août 2026 : `todoStore.js:28 [info]`, vu
+    // deux fois, s'est classé devant deux `error` réels — et c'est ce
+    // quintet-là qui a été publié.
+    const result = aggregateRemarks(
+      [
+        [aggregated("bruit.js", 1, "info"), aggregated("vrai.js", 2, "error")],
+        [aggregated("bruit.js", 1, "info")],
+      ],
+      "union",
+    );
+    assert.deepEqual(
+      result.map((r) => r.file.new_path),
+      ["vrai.js", "bruit.js"],
+    );
+  });
+
+  test("à gravité ÉGALE, la corroboration départage toujours", () => {
+    const result = aggregateRemarks(
+      [
+        [aggregated("isolee.js", 1, "error")],
+        [aggregated("commune.js", 2, "error")],
+        [aggregated("commune.js", 2, "error")],
+      ],
+      "union",
+    );
+    assert.deepEqual(
+      result.map((r) => r.file.new_path),
+      ["commune.js", "isolee.js"],
+    );
+  });
+
+  test("le compte d'occurrences SURVIT à l'abandon du vote", () => {
+    // Réponse au point ouvert : `exclusion` force l'union, donc plus aucun
+    // FILTRE sur la corroboration — mais le compte, lui, est conservé et
+    // affiché (voir dry-review.ts, « ×N »).
+    const result = aggregateRemarks(
+      [
+        [aggregated("a.js", 1, "warning")],
+        [aggregated("a.js", 1, "warning")],
+        [aggregated("a.js", 1, "warning"), aggregated("b.js", 2, "warning")],
+      ],
+      "union",
+    );
+    assert.equal(result.find((r) => r.file.new_path === "a.js")?.passes, 3);
+    assert.equal(result.find((r) => r.file.new_path === "b.js")?.passes, 1);
+  });
+});
+
+describe("le cas mesuré de bout en bout : src/todoStore.js:28", () => {
+  // Passe 1 : « needle est assignée mais jamais utilisée — code mort » (FAUX).
+  // Passe 3 : « q n'est pas mis en minuscules » (le VRAI défaut), même ligne.
+  // Avant ce correctif : la passe 3 était comptée en doublon, son message
+  // écrasé par celui de la passe 1, et le tout publié en tête sous "info".
+  const passe1 = aggregated(
+    "src/todoStore.js",
+    28,
+    "info",
+    1,
+    "La variable needle est assignée mais jamais utilisée. Code mort.",
+  );
+  const passe3 = aggregated(
+    "src/todoStore.js",
+    28,
+    "warning",
+    1,
+    "The search query q is not lowercased before comparison.",
+  );
+
+  test("le diagnostic juste de la passe 3 n'est plus effacé par celui de la passe 1", () => {
+    const [merged] = aggregateRemarks([[passe1], [passe3]], "union");
+    assert.match(String(merged?.message), /needle est assignée/);
+    assert.match(
+      String(merged?.message),
+      /not lowercased/,
+      "le seul diagnostic juste de tout un run ne doit pas disparaître en doublon",
+    );
+  });
+
+  test("la gravité la plus haute des deux passes fait passer la ligne au-dessus du seuil", () => {
+    const aggregatedRemarks = aggregateRemarks([[passe1], [passe3]], "union");
+    const { published, belowSeverity } = partitionForPublication(
+      aggregatedRemarks,
+      "warning",
+      15,
+    );
+    assert.equal(published.length, 1);
+    assert.deepEqual(belowSeverity, []);
+  });
+
+  test("si les DEUX passes classent en info, la ligne tombe sous le seuil — mais reste visible", () => {
+    // Le cas réellement mesuré (la passe 3 est passée par l'extracteur de
+    // secours, qui n'a trouvé aucun mot de gravité, donc "info" par défaut).
+    // Le seuil l'écarte de la publication : c'est le comportement demandé, et
+    // c'est précisément pourquoi belowSeverity doit rester lisible.
+    const enInfo = { ...passe3, severity: "info" };
+    const { published, belowSeverity } = partitionForPublication(
+      aggregateRemarks([[passe1], [enInfo]], "union"),
+      "warning",
+      15,
+    );
+    assert.deepEqual(published, []);
+    assert.equal(belowSeverity.length, 1);
+    assert.match(String(belowSeverity[0]?.message), /not lowercased/);
   });
 });

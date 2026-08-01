@@ -790,7 +790,7 @@ function majorityThreshold(passes: number): number {
  *
  * Exportée pour être testée unitairement (voir review.test.ts).
  */
-export function voteRemarks(passes: ValidatedRemark[][]): ValidatedRemark[] {
+export function voteRemarks(passes: ValidatedRemark[][]): AggregatedRemark[] {
   return aggregateRemarks(passes, "vote");
 }
 
@@ -827,10 +827,71 @@ export function resolveAggregation(
   return voteEnabled ? "vote" : "union";
 }
 
+/**
+ * Une remarque après agrégation, augmentée du nombre de passes qui l'ont
+ * signalée. Ce compte n'est pas décoratif : sous `union` (donc sous
+ * `exclusion`, qui la force), plus rien ne FILTRE sur la corroboration, mais
+ * le fait qu'une remarque ait été vue trois fois reste le meilleur signal de
+ * certitude disponible. Le conserver et l'afficher est ce qui permet de ne
+ * pas perdre cette information en abandonnant le vote.
+ */
+export interface AggregatedRemark extends ValidatedRemark {
+  /** Nombre de passes distinctes ayant signalé cette ligne. */
+  passes: number;
+}
+
+/**
+ * Nombre maximal de formulations distinctes conservées pour une même ligne,
+ * et longueur au-delà de laquelle une formulation ajoutée est coupée. Trois
+ * passes bavardes sur la même ligne produiraient sinon un commentaire GitLab
+ * illisible.
+ */
+const MAX_MERGED_MESSAGES = 3;
+const MAX_MERGED_MESSAGE_CHARS = 400;
+
+/**
+ * Fusionne la formulation d'une nouvelle passe dans celle déjà retenue pour
+ * la même ligne.
+ *
+ * Ce que ça corrige, mesuré le 1er août 2026 (MR !5, mode `exclusion`) : la
+ * passe 1 a écrit sur `src/todoStore.js:28` « la variable needle est assignée
+ * mais jamais utilisée — code mort », ce qui est FAUX. La passe 3 a écrit sur
+ * la MÊME ligne « the search query q is not lowercased before comparison »,
+ * ce qui est le vrai défaut. La règle d'alors — garder le message de la
+ * première passe — a effacé le diagnostic juste et publié le faux.
+ *
+ * L'hypothèse qui justifiait cette règle (deux passes de même clé décrivent
+ * le même défaut, autrement formulé) tient sous `independent`, où toutes les
+ * passes reçoivent le même prompt. Elle tombe sous `chained`/`exclusion` :
+ * une passe explicitement invitée à chercher AILLEURS qui revient sur une
+ * ligne déjà citée y a le plus souvent vu autre chose. On garde donc les deux
+ * formulations plutôt que d'arbitrer entre elles — c'est un humain qui lira.
+ *
+ * Exportée pour être testée unitairement (voir review.test.ts).
+ */
+export function mergeMessages(existing: string, incoming: string): string {
+  const already = existing
+    .split(MERGED_SEPARATOR)
+    .map((part) => part.trim().toLowerCase());
+  const candidate = incoming.trim();
+  if (candidate === "" || already.includes(candidate.toLowerCase()))
+    return existing;
+  if (already.length >= MAX_MERGED_MESSAGES) return existing;
+
+  return `${existing}${MERGED_SEPARATOR}${visibleTruncate(candidate, MAX_MERGED_MESSAGE_CHARS)}`;
+}
+
+/**
+ * Marque la couture entre deux formulations d'une même ligne. Explicite dans
+ * le commentaire publié : un lecteur doit voir qu'il s'agit de deux
+ * observations distinctes, pas d'une phrase mal recollée.
+ */
+const MERGED_SEPARATOR = "\n\n— aussi relevé sur cette ligne : ";
+
 export function aggregateRemarks(
   passes: ValidatedRemark[][],
   aggregation: ReviewAggregation,
-): ValidatedRemark[] {
+): AggregatedRemark[] {
   const threshold =
     aggregation === "vote" ? majorityThreshold(passes.length) : 1;
 
@@ -860,25 +921,39 @@ export function aggregateRemarks(
         continue;
       }
       existing.votes++;
-      // Sévérité la plus grave observée, message de la première passe qui a
-      // vu la remarque : un défaut classé "error" par une passe et "info" par
-      // une autre est un "error" — le repli inverse enterrerait exactement ce
-      // que le vote est censé faire remonter.
-      if (severityRank(remark.severity) > severityRank(existing.remark.severity)) {
-        existing.remark = { ...existing.remark, severity: remark.severity };
-      }
+      // Sévérité la plus grave observée : un défaut classé "error" par une
+      // passe et "info" par une autre est un "error" — le repli inverse
+      // enterrerait exactement ce que l'agrégation doit faire remonter, et
+      // le ferait désormais tomber sous MIN_SEVERITY.
+      existing.remark = {
+        ...existing.remark,
+        severity:
+          severityRank(remark.severity) > severityRank(existing.remark.severity)
+            ? remark.severity
+            : existing.remark.severity,
+        // Les DEUX formulations, pas seulement la première : voir mergeMessages
+        // pour le cas mesuré où garder la première effaçait le seul diagnostic
+        // juste de la campagne.
+        message: mergeMessages(existing.remark.message, remark.message),
+      };
     }
   }
 
   return [...tallies.values()]
     .filter((tally) => tally.votes >= threshold)
+    // Gravité D'ABORD, corroboration ensuite. L'ordre inverse a été mesuré le
+    // 1er août 2026 (MR !5, mode `exclusion`) : un "info" vu par deux passes
+    // s'est classé devant deux "error" réels vus une fois chacun, et c'est ce
+    // quintet-là qui a été publié. La corroboration reste le départage à
+    // gravité égale — sous `vote` elle décide déjà de la survie, c'est là son
+    // rôle ; ici elle n'a pas à primer sur la nature du défaut.
     .sort(
       (a, b) =>
-        b.votes - a.votes ||
         severityRank(b.remark.severity) - severityRank(a.remark.severity) ||
+        b.votes - a.votes ||
         a.firstSeen - b.firstSeen,
     )
-    .map((tally) => tally.remark);
+    .map((tally) => ({ ...tally.remark, passes: tally.votes }));
 }
 
 /**
@@ -1002,22 +1077,93 @@ export function formatChannelSummary(channels: ReviewChannel[]): string {
   );
 }
 
+/**
+ * Ce qui atteint la MR, et ce qui en est écarté, avec la CAUSE de chaque
+ * écartement.
+ *
+ * Le filtre par NATURE (MIN_SEVERITY) remplace le filtre par QUANTITÉ comme
+ * mécanisme de sélection. Mesuré le 1er août 2026 (MR !5, 3 passes en mode
+ * `exclusion`, 15 remarques distinctes) : les cinq "error" étaient tous
+ * justes, et les trois faux positifs identifiables étaient tous des "info".
+ * Trancher sur un nombre coupait deux défauts réels et difficiles ; trancher
+ * sur la gravité publie dix remarques dont ces deux-là, et écarte les trois
+ * faux positifs — sans arbitrage sur un nombre.
+ *
+ * MAX_REMARKS survit, mais change de rôle : ce n'est plus le sélecteur, c'est
+ * une borne contre un emballement (un modèle qui rendrait cinquante
+ * remarques). Les deux causes sont séparées parce qu'elles ne se lisent pas
+ * pareil : « écartée parce que mineure » est un choix de politique, « écartée
+ * parce qu'il y en avait trop » est un symptôme à regarder.
+ *
+ * Exportée pour être testée unitairement (voir review.test.ts).
+ */
+export function partitionForPublication(
+  retained: AggregatedRemark[],
+  minSeverity: string,
+  maxRemarks: number,
+): {
+  published: AggregatedRemark[];
+  belowSeverity: AggregatedRemark[];
+  overCap: AggregatedRemark[];
+} {
+  const floor = severityRank(minSeverity);
+  const belowSeverity: AggregatedRemark[] = [];
+  const eligible: AggregatedRemark[] = [];
+
+  // La gravité filtre AVANT le plafond : l'inverse laisserait des "info"
+  // consommer des places au détriment de remarques recevables.
+  for (const remark of retained) {
+    if (severityRank(remark.severity) < floor) belowSeverity.push(remark);
+    else eligible.push(remark);
+  }
+
+  return {
+    published: eligible.slice(0, maxRemarks),
+    belowSeverity,
+    overCap: eligible.slice(maxRemarks),
+  };
+}
+
+/**
+ * Ligne de journal des remarques retenues mais non publiées, une cause à la
+ * fois. Rend "" quand tout a été publié — il n'y a alors rien à signaler.
+ *
+ * Exportée pour être testée unitairement (voir review.test.ts).
+ */
+export function formatExclusionSummary(
+  belowSeverity: number,
+  overCap: number,
+  minSeverity: string,
+  maxRemarks: number,
+): string {
+  if (belowSeverity === 0 && overCap === 0) return "";
+  return (
+    `non publiées : ${belowSeverity} sous le seuil de sévérité ` +
+    `(MIN_SEVERITY=${minSeverity}), ${overCap} au-delà du plafond ` +
+    `(MAX_REMARKS=${maxRemarks})`
+  );
+}
+
 export interface ReviewResult {
-  /** Ce qui est publié dans la MR : `retained` coupé à MAX_REMARKS. */
-  remarks: ValidatedRemark[];
+  /** Ce qui est publié dans la MR. */
+  remarks: AggregatedRemark[];
+  /** Écartées parce que sous MIN_SEVERITY — jamais silencieusement. */
+  belowSeverity: AggregatedRemark[];
+  /** Écartées parce qu'au-delà de MAX_REMARKS, à gravité pourtant suffisante. */
+  overCap: AggregatedRemark[];
   /**
-   * Tout ce que l'agrégation a retenu, AVANT le plafond de publication —
-   * trié, donc `remarks` en est le préfixe.
+   * Tout ce que l'agrégation a retenu, avant tout filtrage — trié.
+   * `remarks ∪ belowSeverity ∪ overCap` en est une partition exacte.
    *
    * Séparé de `remarks` pour une raison de mesure, pas de confort : une
-   * campagne qui compte les défauts trouvés à travers le plafond de
-   * publication mesure le plafond, pas le modèle. C'est exactement ce qui
+   * campagne qui compte les défauts trouvés à travers les filtres de
+   * publication mesure les filtres, pas le modèle. C'est exactement ce qui
    * s'est produit sur la MR !5, où la seule détection du défaut D4 de toute
    * la campagne a été coupée avant d'être vue. `publishReview` n'utilise que
    * `remarks` — ce champ ne sert qu'à l'outillage de mesure (voir
    * tools/dry-review.ts).
    */
-  retained: ValidatedRemark[];
+  retained: AggregatedRemark[];
   durationMs: number;
   /** §5.7 : le diff envoyé au modèle a dû être coupé ou amputé de fichiers. */
   truncated: boolean;
@@ -1137,7 +1283,11 @@ export async function runReview(
     }
 
     const remarks = aggregateRemarks(passResults, aggregation);
-    const published = remarks.slice(0, config.maxRemarks);
+    const { published, belowSeverity, overCap } = partitionForPublication(
+      remarks,
+      config.minSeverity,
+      config.maxRemarks,
+    );
     // Toujours journalisé, même à une seule passe : c'est ce comptage qui
     // permettra de mesurer la fréquence du problème plutôt que de la subir.
     log.info(`[revue] ${formatChannelSummary(passChannels)}`);
@@ -1155,18 +1305,33 @@ export async function runReview(
             : ""),
       );
     }
-    // Le plafond de publication n'est PAS un détail de journalisation : sur la
-    // MR !5, c'est lui qui a supprimé la seule trouvaille du défaut D4 de toute
-    // la campagne. Tant qu'il coupe, on le dit.
-    if (remarks.length > published.length) {
-      log.info(
-        `[revue] plafond de publication atteint : ${remarks.length - published.length} ` +
-          `remarque(s) retenue(s) non publiée(s) (MAX_REMARKS=${config.maxRemarks})`,
+
+    // Ce qui est écarté n'est PAS un détail de journalisation : sur la MR !5,
+    // le plafond a supprimé la seule trouvaille du défaut D4 de toute la
+    // campagne. Les deux causes sont dites séparément — elles n'appellent pas
+    // la même réaction.
+    const exclusions = formatExclusionSummary(
+      belowSeverity.length,
+      overCap.length,
+      config.minSeverity,
+      config.maxRemarks,
+    );
+    if (exclusions) log.info(`[revue] ${exclusions}`);
+
+    // Une revue vide alors que le modèle a trouvé quelque chose ne doit jamais
+    // ressembler à une revue vide parce qu'il n'a rien trouvé.
+    if (published.length === 0 && remarks.length > 0) {
+      log.warn(
+        `[revue] AUCUNE remarque publiable : les ${remarks.length} remarque(s) ` +
+          `retenue(s) sont toutes sous le seuil MIN_SEVERITY=${config.minSeverity} — ` +
+          `abaisser le seuil pour les voir`,
       );
     }
 
     return {
       remarks: published,
+      belowSeverity,
+      overCap,
       retained: remarks,
       durationMs: totalDurationMs,
       truncated: built.truncatedFiles.length > 0 || built.omittedFiles.length > 0,

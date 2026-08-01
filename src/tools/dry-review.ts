@@ -34,7 +34,7 @@ const context = await buildContext(request);
 if (context.targetKind !== "merge_requests")
   throw new Error("contexte MR attendu");
 
-const { remarks, retained, durationMs, truncated, omittedFiles } =
+const { remarks, belowSeverity, overCap, durationMs, truncated, omittedFiles } =
   await runReview(context, context.sourceBranch);
 
 if (truncated) {
@@ -43,12 +43,23 @@ if (truncated) {
   );
 }
 
-function describe(remark: (typeof retained)[number]): string {
+function describe(remark: (typeof remarks)[number]): string {
   const where =
     remark.position === null
       ? `${remark.file.new_path} (fichier)`
       : `${remark.file.new_path}:${remark.position.newLine}`;
-  return `  ${where} [${remark.severity}] ${remark.message}`;
+  // ×N : le nombre de passes qui ont signalé cette ligne. Sous `union` (donc
+  // sous `exclusion`), plus rien ne filtre sur la corroboration — mais elle
+  // reste le meilleur signal de certitude disponible, et l'afficher est ce qui
+  // évite de la perdre en abandonnant le vote.
+  const corroboration = remark.passes > 1 ? ` ×${remark.passes}` : "";
+  return `  ${where} [${remark.severity}]${corroboration} ${remark.message}`;
+}
+
+function section(title: string, items: typeof remarks): void {
+  if (items.length === 0) return;
+  console.log(`\n${items.length} ${title} :\n`);
+  for (const remark of items) console.log(describe(remark));
 }
 
 console.log(
@@ -56,15 +67,22 @@ console.log(
 );
 for (const remark of remarks) console.log(describe(remark));
 
-// Compter les défauts trouvés à travers le plafond de publication reviendrait
-// à mesurer le plafond, pas le modèle : sur la MR !5, c'est exactement ce qui
-// a fait disparaître la seule détection du défaut D4 de toute la campagne.
-// Cet outil de mesure montre donc AUSSI ce que le plafond a coupé.
-const overflow = retained.slice(remarks.length);
-if (overflow.length > 0) {
+// Compter les défauts trouvés à travers les filtres de publication reviendrait
+// à mesurer les filtres, pas le modèle : sur la MR !5, c'est exactement ce qui
+// a fait disparaître la seule détection du défaut D4 de toute la campagne. Cet
+// outil de mesure montre donc AUSSI ce qui a été écarté, cause par cause.
+section(
+  `remarque(s) retenue(s) mais SOUS LE SEUIL (MIN_SEVERITY=${config.minSeverity})`,
+  belowSeverity,
+);
+section(
+  `remarque(s) recevable(s) mais AU-DELÀ DU PLAFOND (MAX_REMARKS=${config.maxRemarks})`,
+  overCap,
+);
+
+if (remarks.length === 0 && belowSeverity.length > 0) {
   console.log(
-    `\n${overflow.length} remarque(s) retenue(s) mais NON publiée(s) ` +
-      `(plafond MAX_REMARKS=${config.maxRemarks}) :\n`,
+    `\n⚠️ aucune remarque publiée alors que ${belowSeverity.length} ont été retenues : ` +
+      `toutes sont sous MIN_SEVERITY=${config.minSeverity}.`,
   );
-  for (const remark of overflow) console.log(describe(remark));
 }

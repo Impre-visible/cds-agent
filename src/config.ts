@@ -225,6 +225,26 @@ function matchingFormat(
 export const REVIEW_PASS_MODES = ["independent", "chained", "exclusion"] as const;
 export type ReviewPassMode = (typeof REVIEW_PASS_MODES)[number];
 
+/**
+ * Le barème de sévérité, du plus faible au plus fort — même vocabulaire que
+ * normalizeSeverity (tasks/review.ts), jamais une seconde liste.
+ */
+export const SEVERITY_LEVELS = ["info", "warning", "error"] as const;
+export type SeverityLevel = (typeof SEVERITY_LEVELS)[number];
+
+function validateMinSeverity(env: NodeJS.ProcessEnv): SeverityLevel {
+  const raw = env.MIN_SEVERITY;
+  if (raw === undefined || raw === "") return "warning";
+  const normalized = raw.trim().toLowerCase();
+  if ((SEVERITY_LEVELS as readonly string[]).includes(normalized))
+    return normalized as SeverityLevel;
+  throw new Error(
+    `Variable d'environnement invalide : MIN_SEVERITY="${raw}" — valeurs acceptées : ` +
+      `${SEVERITY_LEVELS.join(", ")} (les synonymes du barème, "bug"/"minor"/..., ` +
+      `sont traduits côté modèle mais pas acceptés ici) — voir .env`,
+  );
+}
+
 function validateReviewPassMode(env: NodeJS.ProcessEnv): ReviewPassMode {
   const raw = env.REVIEW_PASS_MODE;
   if (raw === undefined || raw === "") return "independent";
@@ -266,23 +286,6 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     min: 1,
     max: 50,
   });
-  // maxRemarks=0 viderait silencieusement toute review (slice(0, 0)).
-  const requestedMaxRemarks = finiteNumber(env, "MAX_REMARKS", 5, {
-    min: 1,
-    max: 50,
-  });
-  // Publier plus que ce qu'on demande est impossible par construction ; on
-  // plafonne plutôt que de laisser croire à un réglage qui n'a aucun effet.
-  const maxRemarks = Math.min(requestedMaxRemarks, reviewBudget);
-  if (maxRemarks < requestedMaxRemarks) {
-    console.warn(
-      `⚠ MAX_REMARKS=${requestedMaxRemarks} dépasse REVIEW_BUDGET=${reviewBudget} : ` +
-        `le modèle ne peut pas rendre plus de remarques qu'on ne lui en demande. ` +
-        `Plafond de publication ramené à ${maxRemarks} — augmentez REVIEW_BUDGET ` +
-        `si vous vouliez réellement publier davantage.`,
-    );
-  }
-
   return {
     gitlabUrl: (env.GITLAB_URL ?? "https://gitlab.com").replace(/\/+$/, ""),
     token: required(env, "GITLAB_TOKEN"),
@@ -338,9 +341,35 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     plannerTimeoutMs:
       finiteNumber(env, "PLANNER_TIMEOUT_MINUTES", 3, { min: 1, max: 60 }) *
       60_000,
-    // Voir le calcul de reviewBudget/maxRemarks en tête de buildConfig.
+    // Voir le calcul de reviewBudget en tête de buildConfig.
     reviewBudget,
-    maxRemarks,
+    /**
+     * Sévérité MINIMALE publiée dans la MR. C'est désormais le mécanisme de
+     * sélection ; maxRemarks n'est plus qu'une borne de volume (voir plus bas).
+     *
+     * Mesuré le 1er août 2026 (MR !5, 3 passes en mode `exclusion`, 15
+     * remarques distinctes) : les cinq "error" étaient tous justes, et les
+     * trois faux positifs identifiables étaient tous des "info". Le signal est
+     * net, et il porte sur la NATURE des remarques, pas sur leur nombre —
+     * trancher sur un nombre coupait deux défauts réels et difficiles.
+     *
+     * Défaut "warning" : publie error + warning, écarte info. "info" publie
+     * tout (aucun filtre), "error" ne publie que les défauts affirmés. Ce que
+     * ce seuil écarte n'est jamais perdu : voir ReviewResult.belowSeverity et
+     * la sortie de `npm run review`.
+     */
+    minSeverity: validateMinSeverity(env),
+    /**
+     * Borne de volume, PLUS le sélecteur. Défaut nettement au-dessus de ce
+     * qu'une revue produit en pratique (15, contre 15 remarques distinctes
+     * mesurées sur le pire run) : il ne doit se déclencher que sur un
+     * emballement, jamais pour arbitrer entre deux remarques recevables.
+     *
+     * Volontairement NON plafonné par reviewBudget : avec N passes, l'union
+     * peut légitimement dépasser ce qu'une seule passe pouvait rendre — 15
+     * distinctes mesurées pour un budget de 12 par passe.
+     */
+    maxRemarks: finiteNumber(env, "MAX_REMARKS", 15, { min: 1, max: 50 }),
     /**
      * Nombre de passes de revue sur le même diff, dont on ne garde que les
      * remarques apparues dans une MAJORITÉ (voir tasks/review.ts::voteRemarks).

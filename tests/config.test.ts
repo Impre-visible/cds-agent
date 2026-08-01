@@ -190,24 +190,14 @@ describe("buildConfig — autres valeurs numériques", () => {
  * bruit.
  */
 describe("buildConfig — REVIEW_BUDGET vs MAX_REMARKS (chantier « passes multiples »)", () => {
-  /** Capture console.warn : l'avertissement de plafonnement est du contenu testé, pas du bruit. */
-  function captureWarnings<T>(run: () => T): { result: T; warnings: string[] } {
-    const warnings: string[] = [];
-    const original = console.warn;
-    console.warn = (...args: unknown[]) => {
-      warnings.push(args.join(" "));
-    };
-    try {
-      return { result: run(), warnings };
-    } finally {
-      console.warn = original;
-    }
-  }
-
-  test("les deux plafonds ont des défauts DISTINCTS : on cherche large, on publie court", () => {
+  test("les deux plafonds ont des défauts DISTINCTS, et le second est une simple borne", () => {
     const config = buildConfig(baseEnv());
     assert.equal(config.reviewBudget, 12);
-    assert.equal(config.maxRemarks, 5);
+    assert.equal(
+      config.maxRemarks,
+      15,
+      "au-dessus de ce qu'une revue produit en pratique : une borne, pas un sélecteur",
+    );
   });
 
   test("les deux se règlent indépendamment", () => {
@@ -218,27 +208,59 @@ describe("buildConfig — REVIEW_BUDGET vs MAX_REMARKS (chantier « passes multi
     assert.equal(config.maxRemarks, 3);
   });
 
-  test("publier plus que ce qu'on demande est impossible : MAX_REMARKS est plafonné, et l'utilisateur prévenu", () => {
-    const { result, warnings } = captureWarnings(() =>
-      buildConfig(baseEnv({ REVIEW_BUDGET: "4", MAX_REMARKS: "10" })),
-    );
-    assert.equal(result.maxRemarks, 4);
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0] ?? "", /MAX_REMARKS=10/);
-    assert.match(warnings[0] ?? "", /REVIEW_BUDGET=4/);
-  });
-
-  test("aucun avertissement quand les deux plafonds sont cohérents", () => {
-    const { warnings } = captureWarnings(() =>
-      buildConfig(baseEnv({ REVIEW_BUDGET: "12", MAX_REMARKS: "12" })),
-    );
-    assert.deepEqual(warnings, []);
+  test("MAX_REMARKS n'est PAS plafonné par REVIEW_BUDGET : l'union de N passes le dépasse légitimement", () => {
+    // Mesuré : 15 remarques distinctes pour un budget de 12 PAR PASSE, sur
+    // 3 passes en mode exclusion. Le plafonnement d'avant supposait une passe
+    // unique et aurait ramené le garde-fou sous le volume réel.
+    const config = buildConfig(baseEnv({ REVIEW_BUDGET: "12", MAX_REMARKS: "20" }));
+    assert.equal(config.maxRemarks, 20);
   });
 
   test("REVIEW_BUDGET=0 est rejeté (un budget nul demanderait zéro remarque)", () => {
     assert.throws(
       () => buildConfig(baseEnv({ REVIEW_BUDGET: "0" })),
       /REVIEW_BUDGET/,
+    );
+  });
+});
+
+/**
+ * Le filtre par NATURE remplace le filtre par QUANTITÉ. Mesuré le 1er août
+ * 2026 (MR !5, 3 passes en mode exclusion, 15 remarques distinctes) : les
+ * cinq "error" étaient tous justes, les trois faux positifs identifiables
+ * étaient tous des "info".
+ */
+describe("buildConfig — MIN_SEVERITY (filtre par nature)", () => {
+  test("défaut « warning » : publie error + warning, écarte info", () => {
+    assert.equal(buildConfig(baseEnv()).minSeverity, "warning");
+  });
+
+  test("les trois niveaux du barème sont acceptés, casse et espaces indifférents", () => {
+    assert.equal(buildConfig(baseEnv({ MIN_SEVERITY: "info" })).minSeverity, "info");
+    assert.equal(buildConfig(baseEnv({ MIN_SEVERITY: "ERROR" })).minSeverity, "error");
+    assert.equal(
+      buildConfig(baseEnv({ MIN_SEVERITY: " warning " })).minSeverity,
+      "warning",
+    );
+  });
+
+  test("un synonyme du barème est REFUSÉ ici, en le disant", () => {
+    // SEVERITY_ALIASES traduit ce que rend le MODÈLE ; un seuil de
+    // publication, lui, doit être écrit sans ambiguïté par un humain.
+    assert.throws(
+      () => buildConfig(baseEnv({ MIN_SEVERITY: "bug" })),
+      (error: Error) => {
+        assert.match(error.message, /MIN_SEVERITY/);
+        assert.match(error.message, /info, warning, error/);
+        return true;
+      },
+    );
+  });
+
+  test("une valeur inconnue est refusée AU DÉMARRAGE, pas ignorée en silence", () => {
+    assert.throws(
+      () => buildConfig(baseEnv({ MIN_SEVERITY: "critique" })),
+      /MIN_SEVERITY/,
     );
   });
 });

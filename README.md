@@ -245,16 +245,17 @@ Quelques variables méritent une lecture attentive avant de démarrer :
   avoir besoin de plus que les défauts (512 processus, 4096:8192
   descripteurs, 1 Go de `/tmp`).
 
-- **`REVIEW_BUDGET`** / **`MAX_REMARKS`** — deux plafonds distincts, là où une
-  seule variable servait aux deux : ce qu'on **demande** au modèle dans le
-  prompt (12 par défaut) et ce qu'on **publie** dans la MR après validation,
-  agrégation et tri (5). Mesuré sur la MR !5 : à `MAX_REMARKS=5`, les trois
-  modèles testés ont rendu *exactement* 5 remarques — le plafond était donc
-  contraignant à chaque fois ; à 12, `gpt-oss-120b` en a rendu 6, dont
-  `sortTodos` appliqué après le découpage en pages, le seul modèle de toute la
-  campagne à avoir trouvé ce défaut. Ce que le plafond retranchait n'était pas
-  du bruit. `MAX_REMARKS` est ramené à `REVIEW_BUDGET` s'il le dépasse (avec
-  un avertissement au démarrage) : on ne publie pas plus qu'on n'a demandé.
+- **`REVIEW_BUDGET`** / **`MIN_SEVERITY`** / **`MAX_REMARKS`** — trois rôles
+  distincts, là où une seule variable les tenait tous. `REVIEW_BUDGET` (12) est
+  ce qu'on **demande** au modèle dans le prompt ; `MIN_SEVERITY` (`warning`)
+  **sélectionne** ce qui est publié, par nature du défaut ; `MAX_REMARKS` (15)
+  n'est plus qu'une **borne de volume** contre un emballement. Mesuré sur la
+  MR !5 : à `MAX_REMARKS=5`, le plafond coupait deux défauts réels et
+  difficiles et publiait un faux positif `info` en tête — alors que les cinq
+  `error` du run étaient tous justes et les trois faux positifs identifiables
+  tous des `info`. Le signal porte sur la **nature**, pas sur le nombre. Ce que
+  `MIN_SEVERITY` écarte n'est jamais perdu : `npm run review` l'affiche dans
+  une section à part et le daemon le journalise.
 - **`REVIEW_PASSES`** / **`REVIEW_PASS_MODE`** / **`REVIEW_VOTE`** — banc
   d'essai des passes multiples, désactivé par défaut (`REVIEW_PASSES=1`
   reproduit le comportement d'avant, au caractère près dans le prompt). Le
@@ -302,13 +303,24 @@ prompt, aurait trouvés. Mesuré sur la MR !2 : trois tirages **indépendants**
 de `qwen3.6-35b-a3b` ont rendu 3, 4 puis 4 défauts sur 5 — mais des ensembles
 **différents**, dont l'union couvrait 4/5. Aucune passe seule n'a dépassé 4.
 
-Trois façons de construire le prompt des passes ≥ 2 sont donc disponibles, et
-le choix entre elles n'est **pas tranché** : ce dépôt fournit le banc d'essai,
-pas la conclusion. Le risque à ne pas ignorer est symétrique — montrer du
-travail déjà fait à un modèle tend à le faire *vérifier* au lieu de chercher
-(déjà observé ici : `qwen3.5-397b` a lu le dépôt, constaté que les tests
-demandés existaient, et rendu `no-change`). `chained` et `exclusion` peuvent
-donc réduire l'exploration au lieu de l'étendre.
+Trois façons de construire le prompt des passes ≥ 2 sont disponibles. Le banc
+d'essai a tourné le 1er août 2026 (3 revues à 3 passes sur la MR !5,
+`qwen3.6-35b-a3b`, `REVIEW_VOTE=0`) :
+
+| mode | nouvelles par passe | distinctes | doublons | durée |
+|---|---|---|---|---|
+| `independent` | 6 + 3 + 1 | 10 | 7 | 120 s |
+| `chained` | 5 + 1 + 1 | 7 | 10 | 150 s |
+| **`exclusion`** | **6 + 5 + 4** | **15** | **3** | 151 s |
+
+`exclusion` gagne sur la métrique centrale — 4 remarques nouvelles en passe 3,
+contre 1 pour les deux autres. Le risque redouté a été mesuré, mais sur
+`chained` : sa passe 3 a répondu « les 6 remarques précédentes sont
+confirmées, aucun nouveau défaut » — l'ancrage exact qu'on craignait (déjà
+observé ailleurs : `qwen3.5-397b` a lu le dépôt, constaté que les tests
+demandés existaient, et rendu `no-change`). Le défaut du dépôt reste
+`independent`, le plus conservateur ; `exclusion` est le réglage retenu pour
+une recherche exhaustive.
 
 ```bash
 for mode in independent chained exclusion; do
@@ -333,9 +345,10 @@ Chaque passe émet une ligne, puis la revue en émet une récapitulative :
 [revue] passe 2/3 : 6 remarque(s) (2 nouvelle(s), 4 doublon(s)), 15 s, canal=secours
 [revue] canaux : 2 × json-stdout, 1 × secours — 1 passe(s) récupérée(s) par
         l'extracteur de secours, perdue(s) avant ce correctif
-[revue] 3 passe(s) (mode=exclusion, agrégation=union) : 5 + 2 + 0 remarque(s)
-        nouvelle(s), 4 doublon(s), 41 s → 7 distincte(s), 7 retenue(s), 5 publiée(s)
-[revue] plafond de publication atteint : 2 remarque(s) retenue(s) non publiée(s) (MAX_REMARKS=5)
+[revue] 3 passe(s) (mode=exclusion, agrégation=union) : 6 + 5 + 4 remarque(s)
+        nouvelle(s), 3 doublon(s), 151 s → 15 distincte(s), 15 retenue(s), 10 publiée(s)
+[revue] non publiées : 5 sous le seuil de sévérité (MIN_SEVERITY=warning),
+        0 au-delà du plafond (MAX_REMARKS=15)
 ```
 
 - **`canal=`** / **`canaux :`** — par où les remarques ont été lues :
@@ -355,14 +368,24 @@ Chaque passe émet une ligne, puis la revue en émet une récapitulative :
 - **`N distincte(s)`** — l'union des clés sur toutes les passes ; **`retenue(s)`**
   ce qui survit à l'agrégation (identique à `distincte` sous union, inférieur
   sous vote) ; **`publiée(s)`** ce qui atteint réellement la MR.
-- La **dernière ligne** n'apparaît que si le plafond a coupé. C'est elle qu'il
-  faut surveiller : sur la MR !5, c'est ce plafond qui a supprimé la seule
-  détection du défaut D4 de toute la campagne.
+- La ligne **`non publiées :`** n'apparaît que si quelque chose a été écarté,
+  et sépare les **deux causes** parce qu'elles n'appellent pas la même
+  réaction : `sous le seuil de sévérité` est un choix de politique (abaisser
+  `MIN_SEVERITY` pour les voir), `au-delà du plafond` est un symptôme — des
+  remarques recevables ont été coupées pour une raison de volume, ce qui ne
+  devrait pratiquement jamais arriver aux valeurs par défaut.
+- Un **`WARN` « AUCUNE remarque publiable »** signale une revue vide alors que
+  le modèle a bien trouvé quelque chose (tout est passé sous le seuil). Une
+  revue vide parce que le code est sain et une revue vide parce que tout a été
+  filtré ne doivent jamais se ressembler.
 
-`npm run review` (`src/tools/dry-review.ts`) affiche à la fin les remarques
-publiées **puis**, séparément, celles que le plafond a coupées : compter les
-défauts trouvés à travers `MAX_REMARKS` reviendrait à mesurer le plafond, pas
-le modèle.
+`npm run review` (`src/tools/dry-review.ts`) affiche les remarques publiées,
+puis **deux sections séparées** : celles écartées par le seuil de sévérité et
+celles écartées par le plafond. Compter les défauts trouvés à travers ces
+filtres reviendrait à mesurer les filtres, pas le modèle. Le suffixe **`×N`**
+sur une remarque indique le nombre de passes qui l'ont signalée — sous `union`
+plus rien ne *filtre* sur la corroboration, mais elle reste le meilleur signal
+de certitude disponible, et l'afficher est ce qui évite de la perdre.
 
 Ce qui se compare d'un mode à l'autre : le nombre de **défauts distincts
 réellement trouvés** (à recouper à la main avec le jeu de bugs, sur la liste
