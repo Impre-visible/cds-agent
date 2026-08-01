@@ -267,6 +267,25 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
       60_000,
     // maxRemarks=0 viderait silencieusement toute review (slice(0, 0)).
     maxRemarks: finiteNumber(env, "MAX_REMARKS", 5, { min: 1, max: 50 }),
+    /**
+     * Nombre de passes de revue sur le même diff, dont on ne garde que les
+     * remarques apparues dans une MAJORITÉ (voir tasks/review.ts::voteRemarks).
+     *
+     * Défaut 1 : comportement strictement inchangé, une passe et tout ce
+     * qu'elle rend. Au-delà, c'est la seule réponse structurelle qu'on ait au
+     * non-déterminisme mesuré le 1er août 2026 — deux runs de
+     * qwen3-235b-a22b, même prompt, six secondes d'écart : 5 remarques dont
+     * le bug #2 pour l'un, 1 remarque pour l'autre. Ce n'est pas un défaut
+     * des petits modèles qui disparaîtrait en montant en taille : c'est
+     * mesuré à 235 milliards de paramètres.
+     *
+     * Ce que ça achète : un faux positif non reproductible ne survit pas au
+     * vote. Ce que ça coûte : N fois le temps et les tokens, linéairement —
+     * d'où le défaut à 1 plutôt qu'un compromis imposé à tout le monde.
+     * Plafond à 7 : au-delà, le coût devient absurde bien avant que le vote
+     * ne gagne quoi que ce soit.
+     */
+    reviewPasses: finiteNumber(env, "REVIEW_PASSES", 1, { min: 1, max: 7 }),
     gitAuthorName: env.GIT_AUTHOR_NAME ?? "cds-agent",
     gitAuthorEmail: env.GIT_AUTHOR_EMAIL ?? "cds-agent@local.invalid",
     /**

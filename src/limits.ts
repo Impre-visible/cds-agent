@@ -91,6 +91,49 @@ export const MAX_TOTAL_DIFF_CHARS = 20_000;
  */
 export const MAX_FILE_DIFF_CHARS = 4_000;
 
+/**
+ * Fichiers GÉNÉRÉS, exclus du diff montré au modèle (tasks/review.ts,
+ * buildDiffSection). Aucune revue n'a jamais rien à dire d'un lockfile ou
+ * d'un bundle minifié : les y montrer est un gaspillage pur, et ce
+ * gaspillage a un coût mesuré.
+ *
+ * Campagne du 1er août 2026, MR !2 : sur les 13 runs, sans une seule
+ * exception, le log disait
+ *   « diff tronqué — coupés : tests/todos.test.js, package-lock.json ;
+ *     non montrés : server.js »
+ * package-lock.json (106 888 octets) consommait le budget de
+ * MAX_TOTAL_DIFF_CHARS et évinçait server.js (1 107 octets), un fichier
+ * source que les modèles devaient ensuite ouvrir eux-mêmes — quand ils y
+ * pensaient. MAX_FILE_DIFF_CHARS bornait déjà sa contribution, mais 4 000
+ * caractères de lockfile restent 4 000 caractères pris à du vrai code.
+ *
+ * Ne concerne QUE la construction du prompt. Une remarque portant sur l'un de
+ * ces fichiers reste recevable (tasks/diff.ts::validateRemarks continue de
+ * les considérer comme appartenant au diff) : le modèle peut parfaitement les
+ * ouvrir lui-même s'il a une raison de le faire.
+ */
+export const GENERATED_FILE_PATTERNS: readonly RegExp[] = [
+  /(^|\/)package-lock\.json$/,
+  /(^|\/)npm-shrinkwrap\.json$/,
+  /(^|\/)yarn\.lock$/,
+  /(^|\/)pnpm-lock\.yaml$/,
+  /(^|\/)bun\.lockb$/,
+  /(^|\/)composer\.lock$/,
+  /(^|\/)Cargo\.lock$/,
+  /(^|\/)poetry\.lock$/,
+  /(^|\/)Gemfile\.lock$/,
+  /(^|\/)go\.sum$/,
+  /\.min\.(js|css)$/,
+  /\.map$/,
+  /(^|\/)dist\//,
+  /(^|\/)build\//,
+  /(^|\/)vendor\//,
+];
+
+export function isGeneratedFile(path: string): boolean {
+  return GENERATED_FILE_PATTERNS.some((pattern) => pattern.test(path));
+}
+
 // ---------------------------------------------------------------------------
 // Verbosité de ce qu'on republie — commentaires GitLab et logs console
 // ---------------------------------------------------------------------------

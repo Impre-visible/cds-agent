@@ -1,6 +1,10 @@
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
 import type { DiffFile, MergeRequestContext } from "../../src/types.ts";
+// limits.ts est volontairement sans dépendance (voir son en-tête) : il ne
+// charge pas config.ts, donc pas besoin de l'import dynamique différé.
+import { isGeneratedFile, MAX_TOTAL_DIFF_CHARS } from "../../src/limits.ts";
+import type { ValidatedRemark } from "../../src/tasks/diff.ts";
 
 // review.ts importe (transitivement) src/config.ts, qui lit .env et jette au
 // chargement du module si GITLAB_TOKEN ou BOT_USERNAME sont absents. On
@@ -17,15 +21,23 @@ let buildPrompt: (context: MergeRequestContext) => {
   prompt: string;
   truncatedFiles: string[];
   omittedFiles: string[];
+  generatedFiles: string[];
 };
 let escapeDelimiters: (text: string) => string;
+let normalizeSeverity: (raw: unknown) => { severity: string; unknown?: string };
+let voteRemarks: (passes: ValidatedRemark[][]) => ValidatedRemark[];
 
 before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
-  ({ extractJson, parseRemark, buildPrompt, escapeDelimiters } = await import(
-    "../../src/tasks/review.ts"
-  ));
+  ({
+    extractJson,
+    parseRemark,
+    buildPrompt,
+    escapeDelimiters,
+    normalizeSeverity,
+    voteRemarks,
+  } = await import("../../src/tasks/review.ts"));
 });
 
 /**
@@ -189,24 +201,277 @@ describe("parseRemark", () => {
     assert.match((result as { rejected: string }).rejected, /"file"/);
   });
 
-  test("replie une sévérité inconnue ou absente sur 'info' sans rejeter la remarque", () => {
+  test("replie une sévérité inconnue sur 'info' sans rejeter la remarque, mais la REMONTE pour journalisation", () => {
     const inconnue = parseRemark(
       { file: "a.ts", line: 1, severity: "catastrophique", message: "m" },
       0,
     );
     assert.deepEqual(inconnue, {
       remark: { file: "a.ts", line: 1, severity: "info", message: "m" },
+      // Le repli reste le même ; ce qui change, c'est qu'il n'est plus
+      // silencieux (voir normalizeSeverity et runReview).
+      unknownSeverity: "catastrophique",
     });
+  });
 
+  test("une sévérité absente reste un repli silencieux : le modèle n'a rien inventé", () => {
     const absente = parseRemark({ file: "a.ts", line: 1, message: "m" }, 0);
     assert.deepEqual(absente, {
       remark: { file: "a.ts", line: 1, severity: "info", message: "m" },
     });
   });
 
+  // Le cas réellement mesuré le 1er août 2026 : qwen3.6-35b a rendu
+  // severity:"bug" sur le bug #4, la trouvaille la plus grave du run — donc
+  // publiée en "info" avant ce correctif.
+  test("traduit 'bug' en 'error' plutôt que de l'enterrer en 'info'", () => {
+    const result = parseRemark(
+      { file: "a.ts", line: 1, severity: "bug", message: "m" },
+      0,
+    );
+    assert.deepEqual(result, {
+      remark: { file: "a.ts", line: 1, severity: "error", message: "m" },
+    });
+  });
+
   test("rejette une entrée qui n'est pas un objet", () => {
     const result = parseRemark("pas un objet", 0);
     assert.ok("rejected" in result);
+  });
+});
+
+describe("isGeneratedFile", () => {
+  test("reconnaît les lockfiles et les artefacts de build", () => {
+    for (const path of [
+      "package-lock.json",
+      "front/package-lock.json",
+      "yarn.lock",
+      "pnpm-lock.yaml",
+      "Cargo.lock",
+      "go.sum",
+      "dist/bundle.js",
+      "packages/ui/build/index.js",
+      "assets/app.min.css",
+      "app.js.map",
+    ]) {
+      assert.ok(isGeneratedFile(path), `${path} doit être reconnu comme généré`);
+    }
+  });
+
+  test("ne mord pas sur du code source dont le nom ressemble", () => {
+    for (const path of [
+      "server.js",
+      "src/todoStore.js",
+      "tests/todos.test.js",
+      // Le motif est ancré sur un début de segment : un fichier qui se
+      // TERMINE par le nom d'un lockfile sans en être un ne doit pas être
+      // écarté silencieusement du prompt.
+      "scripts/regenerate-package-lock.json.md",
+      "src/distance.ts",
+      "src/builder.ts",
+    ]) {
+      assert.ok(!isGeneratedFile(path), `${path} ne doit PAS être écarté`);
+    }
+  });
+});
+
+// Le cas mesuré, à l'identique : sur 13 runs de la MR !2, package-lock.json
+// (106 888 octets) a évincé server.js (1 107 octets) du prompt, à chaque fois.
+describe("buildDiffSection — les fichiers générés ne consomment plus le budget", () => {
+  test("un lockfile énorme n'évince plus un petit fichier source", () => {
+    const lockfile = file(
+      "package-lock.json",
+      "+x\n".repeat(MAX_TOTAL_DIFF_CHARS),
+    );
+    const source = file("server.js", "+const app = express();\n");
+
+    const built = buildPrompt(context({ files: [lockfile, source] }));
+
+    assert.deepEqual(built.generatedFiles, ["package-lock.json"]);
+    assert.deepEqual(
+      built.omittedFiles,
+      [],
+      "server.js doit tenir dans le prompt maintenant que le lockfile ne prend plus de place",
+    );
+    assert.ok(
+      built.prompt.includes("const app = express();"),
+      "le contenu de server.js doit être réellement présent dans le diff montré",
+    );
+    assert.ok(
+      !built.prompt.includes("### package-lock.json"),
+      "aucun bloc de diff ne doit être émis pour un fichier généré",
+    );
+  });
+
+  test("le prompt dit que ces fichiers ont été écartés, plutôt que de les passer sous silence", () => {
+    const built = buildPrompt(
+      context({ files: [file("yarn.lock", "+dep\n"), file("a.js", "+1\n")] }),
+    );
+    assert.match(built.prompt, /Fichier\(s\) généré\(s\)/);
+    assert.match(built.prompt, /yarn\.lock/);
+  });
+
+  test("un fichier généré reste listé comme modifié par la MR (une remarque dessus reste recevable)", () => {
+    const built = buildPrompt(
+      context({ files: [file("package-lock.json", "+dep\n")] }),
+    );
+    // La liste « Seuls ces fichiers sont modifiés » décrit la MR, pas ce qui
+    // a été montré : validateRemarks (diff.ts) continue de s'appuyer sur la
+    // même vérité, et ce correctif ne doit pas la contredire.
+    assert.match(built.prompt, /- package-lock\.json/);
+  });
+});
+
+describe("normalizeSeverity (campagne du 1er août 2026 : les modèles inventent leurs sévérités)", () => {
+  test("les trois valeurs du barème passent telles quelles", () => {
+    for (const value of ["info", "warning", "error"]) {
+      assert.deepEqual(normalizeSeverity(value), { severity: value });
+    }
+  });
+
+  test("les synonymes graves remontent vers 'error', jamais vers 'info'", () => {
+    for (const value of ["bug", "critical", "blocker", "major", "high"]) {
+      assert.equal(
+        normalizeSeverity(value).severity,
+        "error",
+        `"${value}" doit être traduit en "error"`,
+      );
+    }
+  });
+
+  test("les synonymes mineurs atterrissent où il faut", () => {
+    assert.equal(normalizeSeverity("minor").severity, "warning");
+    assert.equal(normalizeSeverity("nit").severity, "info");
+    assert.equal(normalizeSeverity("suggestion").severity, "info");
+  });
+
+  test("casse et espaces indifférents — un modèle n'est pas régulier là-dessus", () => {
+    assert.equal(normalizeSeverity("BUG").severity, "error");
+    assert.equal(normalizeSeverity("  Critical ").severity, "error");
+    assert.equal(normalizeSeverity("Warning").severity, "warning");
+  });
+
+  test("une valeur hors table retombe sur 'info' ET est signalée", () => {
+    assert.deepEqual(normalizeSeverity("wat"), {
+      severity: "info",
+      unknown: "wat",
+    });
+  });
+
+  test("une valeur non-chaîne retombe sur 'info' sans être signalée (rien d'inventé à remonter)", () => {
+    assert.deepEqual(normalizeSeverity(undefined), { severity: "info" });
+    assert.deepEqual(normalizeSeverity(3), { severity: "info" });
+  });
+});
+
+// REVIEW_PASSES — réponse au non-déterminisme mesuré : deux runs de
+// qwen3-235b-a22b, même prompt, six secondes d'écart, 5 remarques puis 1.
+describe("voteRemarks (vote majoritaire entre passes)", () => {
+  function remark(
+    path: string,
+    line: number | null,
+    severity = "warning",
+    message = "m",
+  ): ValidatedRemark {
+    return {
+      file: file(path),
+      position: line === null ? null : { newLine: line, oldLine: null },
+      severity,
+      message,
+    };
+  }
+
+  test("une seule passe : tout est conservé, comportement par défaut inchangé", () => {
+    const pass = [remark("a.js", 1), remark("b.js", 2)];
+    assert.deepEqual(voteRemarks([pass]), pass);
+  });
+
+  test("deux passes : seule la remarque vue par les deux survit", () => {
+    const partagee = remark("a.js", 10);
+    const result = voteRemarks([
+      [partagee, remark("b.js", 20, "warning", "faux positif de la passe 1")],
+      [remark("a.js", 10, "warning", "même défaut, autre formulation")],
+    ]);
+
+    assert.equal(result.length, 1);
+    assert.equal(result[0]?.file.new_path, "a.js");
+    assert.equal(result[0]?.position?.newLine, 10);
+  });
+
+  test("trois passes : deux votes suffisent (majorité stricte, floor(n/2)+1)", () => {
+    const result = voteRemarks([
+      [remark("a.js", 1), remark("b.js", 2)],
+      [remark("a.js", 1)],
+      [remark("a.js", 1), remark("c.js", 3)],
+    ]);
+    assert.deepEqual(
+      result.map((r) => r.file.new_path),
+      ["a.js"],
+      "b.js et c.js n'ont qu'une voix sur trois",
+    );
+  });
+
+  test("le message retenu est celui de la première passe, la sévérité la PLUS grave observée", () => {
+    const result = voteRemarks([
+      [remark("a.js", 1, "info", "formulation de la passe 1")],
+      [remark("a.js", 1, "error", "formulation de la passe 2")],
+    ]);
+    assert.equal(result[0]?.message, "formulation de la passe 1");
+    assert.equal(
+      result[0]?.severity,
+      "error",
+      "un défaut vu comme error par une passe ne doit pas être publié en info",
+    );
+  });
+
+  test("tri : le plafond MAX_REMARKS doit couper le moins corroboré et le moins grave", () => {
+    const result = voteRemarks([
+      [
+        remark("bruit.js", 1, "info", "remarque bavarde arrivée en premier"),
+        remark("vrai.js", 2, "error", "le défaut qui compte"),
+      ],
+      [remark("vrai.js", 2, "error", "le même défaut")],
+    ]);
+    // vrai.js a deux voix, bruit.js une seule (éliminée au seuil de 2/2).
+    assert.deepEqual(
+      result.map((r) => r.file.new_path),
+      ["vrai.js"],
+    );
+  });
+
+  test("à nombre de votes égal, la sévérité tranche avant l'ordre du modèle", () => {
+    const result = voteRemarks([
+      [
+        remark("mineur.js", 1, "info"),
+        remark("grave.js", 2, "error"),
+        remark("moyen.js", 3, "warning"),
+      ],
+    ]);
+    assert.deepEqual(
+      result.map((r) => r.file.new_path),
+      ["grave.js", "moyen.js", "mineur.js"],
+    );
+  });
+
+  test("une remarque sans position exploitable reste identifiable par son fichier", () => {
+    const result = voteRemarks([
+      [remark("a.js", null, "warning", "commentaire de fichier")],
+      [remark("a.js", null, "warning", "même chose, autre passe")],
+    ]);
+    assert.equal(result.length, 1);
+    assert.equal(result[0]?.position, null);
+  });
+
+  test("une passe qui vote deux fois pour la même ligne ne compte que pour une voix", () => {
+    const result = voteRemarks([
+      [remark("a.js", 1, "warning", "une fois"), remark("a.js", 1, "warning", "deux fois")],
+      [remark("b.js", 9)],
+    ]);
+    assert.deepEqual(
+      result.map((r) => r.file.new_path),
+      [],
+      "aucune des deux n'atteint 2 voix sur 2 passes",
+    );
   });
 });
 
