@@ -8,11 +8,11 @@
 # fin de fichier), pas de déploiement automatisé (voir docs/deployment.md).
 #
 # Ne lance jamais le daemon lui-même : `npm run dev` exigerait un GITLAB_TOKEN
-# valide, un compte bot réel et, pour toute tâche de review/implémentation,
-# un modèle d'inférence local joignable — rien de tout cela n'existe dans un
-# runner CI. `npm test` couvre le code sans dépendre d'aucun des deux (voir
-# README, section Tests) : les points de contact avec Docker et git sont
-# testés via un faux binaire injecté, jamais le vrai.
+# valide, un compte bot réel et une instance OpenHands joignable — rien de
+# tout cela n'existe dans un runner CI. `npm test` couvre le code sans
+# dépendre d'aucun des trois (voir README, section Tests) : le client
+# OpenHands est testé contre un `fetch` injecté, jamais contre une vraie
+# instance.
 
 image: node:26-bookworm-slim
 

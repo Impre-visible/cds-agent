@@ -1,5 +1,15 @@
 # ADR 0003 — opencode comme runtime d'agent, inférence locale
 
+> **Branche `openhands` — DÉCISION REMPLACÉE.** opencode, la sandbox maison et
+> le proxy d'inférence filtrant n'existent plus sur cette branche : l'agent
+> tourne dans le bac à sable d'OpenHands, qui appelle le modèle lui-même. Ce
+> qui SURVIT de cette ADR est son exigence de fond — viser un point d'accès
+> compatible OpenAI, local ou distant, sans dépendre d'un fournisseur : c'est
+> toujours le cas (`AGENT_MODEL`, `CONTAINER_INFERENCE_URL`,
+> `INFERENCE_API_KEY`, traduits en `LLM_*` par le compose). Ce qui disparaît :
+> la clé d'API ne reste plus sur l'hôte, elle descend jusqu'à OpenHands. Voir
+> `docs/openhands.md`.
+
 ## Statut
 
 Acceptée (présente depuis `feat: agent conteneurisé` (`9983716`), durcie par

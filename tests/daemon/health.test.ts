@@ -18,8 +18,7 @@ function baseDeps(overrides: Partial<HealthDeps> = {}): HealthDeps {
     counters: () => ({ processed: 0, refused: 0, abandoned: 0 }),
     startedAt: 0,
     pollIntervalMs: 30_000,
-    agentTimeoutMs: 600_000,
-    commandTimeoutMs: 300_000,
+    taskTimeoutMs: 600_000,
     now: () => 1_000_000,
     ...overrides,
   };
@@ -53,8 +52,9 @@ describe("buildHealthReport — §6.5", () => {
     assert.match(report.reasons[0]!, /polling/);
   });
 
-  test("dégradé quand la tâche en cours dépasse la durée légitime maximale (agent+3×commande)", () => {
-    // Plafond : 600_000 + 3*300_000 = 1_500_000 ms.
+  test("dégradé quand la tâche en cours dépasse la durée légitime maximale (budget + démarrage + marge)", () => {
+    // Plafond : 600_000 (taskTimeoutMs) + 300_000 (démarrage de la
+    // conversation) + 6×10_000 (marge de sondage) = 960_000 ms.
     const report = buildHealthReport(
       baseDeps({
         currentTask: () => ({

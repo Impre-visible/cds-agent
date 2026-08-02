@@ -1,5 +1,13 @@
 # ADR 0005 — Modèle de capacités de l'agent, déclaratif et par dépôt
 
+> **Branche `openhands` — LE MODÈLE SURVIT, SON APPLICATION NON.** Les
+> capacités par dépôt continuent de décider si une demande est ACCEPTÉE
+> (`daemon/authorize.ts`, plus le refus d'un dépôt sans aucune capacité sur
+> les merge requests). En revanche `RepoCapabilities`, `isWritablePath` et
+> `publishMode` ont disparu avec `src/tasks/guard.ts` : rien ne vérifie plus
+> ce que l'agent produit. Les capacités lui sont énoncées dans son prompt et
+> rien de plus. Voir `docs/openhands.md`.
+
 > **Mise à jour (chantier "projects.json")** : le modèle de capacités
 > lui-même (`RepoCapabilities` dans `src/tasks/guard.ts`, `isWritablePath`,
 > `publishMode` source-branch/dedicated-mr) décrit ci-dessous reste

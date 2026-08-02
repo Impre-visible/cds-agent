@@ -1,5 +1,5 @@
 import { dirname, join } from "node:path";
-import { config, sanitizedEnv } from "../config.ts";
+import { config } from "../config.ts";
 import { gitlab, GitLabError, resourceKind } from "../gitlab/client.ts";
 import { RequestStore, canProcess } from "./store.ts";
 import type { AckHandle, AgentRequest, GitLabUser, Todo } from "../types.ts";
@@ -8,15 +8,14 @@ import { authorize } from "./authorize.ts";
 import { ProjectsRegistry, type ProjectsBaseline } from "../projects.ts";
 import { TaskQueue } from "./queue.ts";
 import { ShutdownController, drain } from "./shutdown.ts";
-import { runTask } from "../tasks/router.ts";
-import { currentContainer, killContainer } from "../agent/sandbox.ts";
-import { currentWorkspace } from "../agent/workspace.ts";
+import { runOpenHandsTask } from "../tasks/openhands.ts";
+import { OpenHandsClient } from "../openhands/client.ts";
 import { SeenTracker } from "./seen.ts";
 import { bootstrapIfFresh } from "./bootstrap.ts";
 import { collectTodos as collectTodosWith } from "./todos.ts";
 import { InstanceLock } from "./lock.ts";
 import { log, withRequestContext } from "../log.ts";
-import { daemonStatus } from "./status.ts";
+import { daemonStatus, describeActivity } from "./status.ts";
 import { startHealthServer, stopHealthServer, type HealthDeps } from "./health.ts";
 import { warnIfGitProxyNotExported } from "./proxy-check.ts";
 import {
@@ -38,10 +37,10 @@ let bot: GitLabUser;
 let projectsRegistry: ProjectsRegistry;
 
 /**
- * Défauts globaux (TEST_COMMAND/INSTALL_COMMAND/DOCKER_DEFAULT_IMAGE, restés
- * dans l'environnement — voir config.ts) injectés dans la résolution par
- * projet : le repli ultime quand ni "projects.<chemin>" ni le bloc
- * "defaults" de projects.json ne précisent une commande ou une image.
+ * Défauts globaux injectés dans la résolution par projet. Le daemon ne lit
+ * NI ces commandes NI cette image : il n'installe rien et ne lance aucun
+ * conteneur. Ils restent résolus pour qu'un même projects.json soit valide
+ * ici et sur `hardening` — voir config.ts.
  */
 const PROJECT_BASELINE: ProjectsBaseline = {
   commands: { install: config.installCommand, test: config.testCommand },
@@ -76,8 +75,9 @@ const shutdown = new ShutdownController();
  * boucle principale dérouler la séquence de drain jusqu'à sa fin naturelle.
  * Second signal : "forced" — quelqu'un qui tape Ctrl-C deux fois veut que ça
  * s'arrête maintenant, on ne tente donc plus rien de propre et on sort tout
- * de suite (process.exit ne tue pas les processus enfants déjà lancés —
- * docker run, notamment — mais c'est le prix d'une sortie immédiate).
+ * de suite. Le daemon ne lance plus aucun processus enfant, mais une
+ * conversation OpenHands déjà démarrée continue sans personne pour en lire
+ * le résultat — c'est le prix d'une sortie immédiate.
  */
 function onSignal(signal: NodeJS.Signals): void {
   const phase = shutdown.registerSignal();
@@ -98,19 +98,19 @@ process.on("SIGTERM", () => onSignal("SIGTERM"));
 /**
  * Le worker ne connaissait jusqu'ici que sa propre exécution : ni le
  * démarrage ("running"), ni l'issue ("done"/"failed") n'étaient visibles du
- * store. On les alimente ici plutôt que dans router.ts, pour que runTask
- * reste indépendant de la persistance des statuts. runTask avale déjà ses
- * propres erreurs (elle rapporte l'échec au demandeur puis retourne
+ * store. On les alimente ici plutôt que dans le worker, pour que celui-ci
+ * reste indépendant de la persistance des statuts. runOpenHandsTask avale
+ * déjà ses propres erreurs (elle rapporte l'échec au demandeur puis retourne
  * normalement) : le chemin "failed" ci-dessous ne se déclenche donc pas en
- * pratique aujourd'hui, mais reste correct si runTask se met un jour à
- * relancer une exception.
+ * pratique aujourd'hui, mais reste correct si elle se met un jour à relancer
+ * une exception.
  *
  * §6.4/§6.5 : ouvre aussi le contexte de corrélation (key/projectPath/iid,
  * voir log.ts) et la fenêtre d'observabilité (daemonStatus, voir status.ts)
  * pour toute la durée de l'exécution réelle du worker — séparément du
- * contexte ouvert plus bas par handle() avant la mise en file, puisque
- * runTask() démarre potentiellement bien après (une fois la tâche dépilée
- * par queue.ts, voir pump()), dans une chaîne d'appels asynchrones distincte.
+ * contexte ouvert plus bas par handle() avant la mise en file, puisque le
+ * worker démarre potentiellement bien après (une fois la tâche dépilée par
+ * queue.ts, voir pump()), dans une chaîne d'appels asynchrones distincte.
  */
 async function trackedWorker(request: AgentRequest): Promise<void> {
   await withRequestContext(
@@ -124,7 +124,7 @@ async function trackedWorker(request: AgentRequest): Promise<void> {
       });
       try {
         store.record(request.key, request.todoId, "running");
-        await runTask(request);
+        await runOpenHandsTask(request);
         store.record(request.key, request.todoId, "done");
         daemonStatus.recordProcessed();
       } catch (error) {
@@ -188,7 +188,7 @@ async function finishTodo(todoId: number): Promise<void> {
  * les retrouver ensuite — l'identifiant de la note (pour l'éditer avec le
  * résultat final) et celui de la réaction (pour la remplacer par ✅/❌,
  * l'API award emoji n'ayant pas de mise à jour en place). Voir
- * tasks/router.ts::report(), seul autre endroit qui connaît ces
+ * tasks/report.ts::report(), seul autre endroit qui connaît ces
  * identifiants, via AgentRequest.ack (types.ts).
  */
 async function acknowledge(request: AgentRequest): Promise<AckHandle> {
@@ -288,7 +288,7 @@ async function handle(todo: Todo): Promise<void> {
         // connu — AVANT d'empiler la tâche dans la file, pas après (contrairement
         // à l'ordre précédent, qui poussait d'abord et acquittait ensuite) : sans
         // ça, le worker pourrait démarrer et vouloir publier son résultat
-        // (tasks/router.ts::report()) avant que l'identifiant de la note
+        // (tasks/report.ts::report()) avant que l'identifiant de la note
         // d'accusé de réception ne soit connu, une course que rien ne
         // garantissait de gagner (report() aurait alors dû se rabattre sur une
         // nouvelle note, perdant l'objectif "une seule note"). queue.depth, lu
@@ -407,7 +407,15 @@ async function poll(): Promise<void> {
   const stamp = new Date().toLocaleTimeString("fr-FR");
 
   if (todos.length === 0) {
-    log.info(`[${stamp}] rien de neuf.`);
+    // « rien de neuf » ne parle que de ce que le POLLING a trouvé. Le dire
+    // seul pendant qu'une conversation OpenHands travaille depuis dix minutes
+    // se lit comme « le daemon ne fait rien » — voir describeActivity.
+    const activity = describeActivity(
+      daemonStatus.getCurrentTask(),
+      queue.depth,
+      Date.now(),
+    );
+    log.info(`[${stamp}] rien de neuf${activity ? ` — ${activity}` : "."}`);
     return;
   }
 
@@ -482,12 +490,64 @@ const healthDeps: HealthDeps = {
   counters: () => daemonStatus.getCounters(),
   startedAt: daemonStatus.getStartedAt(),
   pollIntervalMs: config.pollIntervalMs,
-  agentTimeoutMs: config.agentTimeoutMs,
-  commandTimeoutMs: config.commandTimeoutMs,
+  taskTimeoutMs: config.openhandsTimeoutMs,
 };
 
 /** Instance du serveur d'observabilité, mise en place par main() — voir shutdownSequence() pour son arrêt. */
 let health: ReturnType<typeof startHealthServer>;
+
+/**
+ * Vérifie au démarrage que l'instance OpenHands répond, et rappelle ce que le
+ * daemon ne garantit plus.
+ *
+ * Diagnostic, pas garde-fou : une instance injoignable n'empêche PAS le
+ * daemon de démarrer. OpenHands peut très bien démarrer après lui (l'ordre de
+ * `docker compose up` ne garantit rien), et un daemon qui refuserait de vivre
+ * pour ça serait plus pénible qu'utile. Mais l'avertir maintenant vaut mieux
+ * que de le découvrir à la première demande, après avoir déjà accusé
+ * réception auprès de quelqu'un.
+ *
+ * L'avertissement sur l'absence de clé n'est pas cosmétique : une instance
+ * OpenHands sans SESSION_API_KEY n'installe aucun contrôle d'accès sur son
+ * API (vérifié dans son code, voir openhands/client.ts), et cette API sait
+ * démarrer des conteneurs avec un jeton GitLab en écriture.
+ */
+async function checkOpenHands(): Promise<void> {
+  log.info(`Exécution déléguée à OpenHands (${config.openhandsUrl}).`);
+  log.warn(
+    "⚠ Le daemon ne vérifie pas ce qui part : OpenHands publie et pousse lui-même dans GitLab. " +
+      "Les capacités de projects.json décident si une demande est acceptée, mais ne sont plus " +
+      "qu'une consigne dans le prompt une fois qu'elle l'est — voir docs/openhands.md.",
+  );
+
+  if (!config.openhandsApiKey) {
+    // Informatif, pas une alerte : c'est le réglage recommandé en local,
+    // parce que l'interface web d'OpenHands devient inutilisable dès qu'une
+    // clé est posée (voir docker/openhands/docker-compose.yml). Le dire
+    // quand même — une API qui lance des conteneurs avec un jeton GitLab en
+    // écriture ne doit pas se retrouver ouverte sans que personne l'ait
+    // décidé.
+    log.info(
+      "OPENHANDS_API_KEY vide : l'API d'OpenHands n'est pas authentifiée. " +
+        "Correct tant que son port n'est publié que sur 127.0.0.1 (c'est ce que fait le compose fourni) ; " +
+        "à corriger si l'instance est joignable depuis le réseau — au prix de son interface web.",
+    );
+  }
+
+  try {
+    const client = new OpenHandsClient({
+      baseUrl: config.openhandsUrl,
+      apiKey: config.openhandsApiKey,
+    });
+    const status = await client.health();
+    log.info(`OpenHands répond (GET /health → ${status}).`);
+  } catch (error) {
+    log.warn(
+      `⚠ OpenHands injoignable au démarrage (${(error as Error).message}) — le daemon démarre quand ` +
+        "même, mais toute demande échouera tant que l'instance ne répond pas.",
+    );
+  }
+}
 
 async function main(): Promise<void> {
   // Posé avant tout appel réseau : si une autre instance tourne déjà, autant
@@ -530,7 +590,11 @@ async function main(): Promise<void> {
   // premier appel réseau — voir proxy-check.ts pour ce qu'il couvre
   // précisément (git a un proxy configuré pour GITLAB_URL, mais ce process
   // n'a pas HTTP_PROXY/HTTPS_PROXY dans son environnement).
-  await warnIfGitProxyNotExported(config.gitlabUrl, sanitizedEnv(), (message) =>
+  // process.env directement : sanitizedEnv() n'existe plus. Sa raison d'être
+  // était de filtrer ce qu'on transmettait à un processus enfant non fiable —
+  // le daemon n'en lance plus aucun. Ici, l'environnement n'est que LU, pour
+  // constater la présence de HTTP_PROXY/HTTPS_PROXY.
+  await warnIfGitProxyNotExported(config.gitlabUrl, process.env, (message) =>
     log.warn(`⚠ ${message}`),
   );
 
@@ -580,6 +644,7 @@ async function main(): Promise<void> {
 
   log.info(`Journal : ${config.stateFile}`);
   log.info(`Polling toutes les ${config.pollIntervalMs / 1000} s.`);
+  await checkOpenHands();
 
   while (!shutdown.isStopping) {
     try {
@@ -655,39 +720,17 @@ async function shutdownSequence(): Promise<void> {
     process.exit(0);
   }
 
+  // Plus rien à nettoyer côté hôte : le daemon ne lance plus ni conteneur ni
+  // espace de travail (c'était cleanupActiveResources(), disparue avec le
+  // chemin opencode). Ce qui reste en vol vit dans le bac à sable
+  // d'OpenHands, hors de portée de ce process — et y survivra à cet arrêt,
+  // exactement comme à l'expiration du timeout d'une tâche (voir
+  // tasks/openhands.ts et docs/openhands.md).
   log.error(
-    `⚠︎ la tâche en cours n'a pas fini dans le délai de grâce (${SHUTDOWN_GRACE_MS / 1000} s) : abandon.`,
+    `⚠︎ la tâche en cours n'a pas fini dans le délai de grâce (${SHUTDOWN_GRACE_MS / 1000} s) : abandon. ` +
+      `La conversation OpenHands correspondante, elle, continue.`,
   );
-  await cleanupActiveResources();
   process.exit(1);
-}
-
-/**
- * Nettoyage best-effort de ce que la tâche abandonnée ci-dessus a pu
- * laisser ouvert. Un seul worker tourne à la fois (voir queue.ts), donc au
- * plus un conteneur et un workspace sont concernés — voir currentContainer()
- * dans sandbox.ts et currentWorkspace() dans workspace.ts. Ne prétend pas
- * couvrir tous les cas (le "second signal" ci-dessus sort avant même
- * d'appeler cette fonction) : une vraie comptabilité des ressources actives
- * demanderait de suivre chaque tâche individuellement, ce qui n'est pas
- * justifié tant qu'il n'y a jamais qu'une tâche en vol.
- */
-async function cleanupActiveResources(): Promise<void> {
-  const container = currentContainer();
-  if (container) {
-    log.warn(`conteneur ${container} encore actif : kill...`);
-    await killContainer(container);
-  }
-
-  const workspace = currentWorkspace();
-  if (workspace) {
-    log.warn(`workspace ${workspace.root} encore présent : suppression...`);
-    try {
-      workspace.dispose();
-    } catch (error) {
-      log.error(`nettoyage du workspace impossible : ${(error as Error).message}`);
-    }
-  }
 }
 
 void main();

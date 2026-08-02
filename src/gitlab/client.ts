@@ -8,8 +8,6 @@ import type {
   ResourceKind,
   Todo,
   MergeRequestDetail,
-  DiffFile,
-  IssueDetail,
 } from "../types.ts";
 
 export class GitLabError extends Error {
@@ -49,7 +47,7 @@ function isRetryableStatus(status: number): boolean {
 
 /**
  * GET/HEAD sont sans effet de bord : les réessayer ne peut pas dupliquer une
- * écriture. Un POST (createNote, createDiscussion, markTodoDone...) qui
+ * écriture. Un POST (createNote, markTodoDone...) qui
  * timeout ne dit en revanche pas si GitLab a reçu et traité la requête avant
  * de cesser de répondre — le réessayer pourrait publier deux fois le même
  * commentaire. On ne réessaie donc jamais automatiquement une écriture au
@@ -321,25 +319,6 @@ export const gitlab = {
       body: JSON.stringify({ body }),
     }),
 
-  /**
-   * Chantier « fil de discussion » : supprime une note du bot.
-   *
-   * Sert à retirer l'accusé de réception une fois la réponse publiée DANS le
-   * fil : sans ça, chaque question laisserait une note de plus au niveau de
-   * la merge request, alors que tout ce qui compte est déjà dans le fil. La
-   * réaction, elle, est posée sur la note de l'auteur (voir evolveReaction) —
-   * elle survit à cette suppression et reste le signal de fin de traitement.
-   */
-  deleteNote: (
-    projectId: number,
-    kind: ResourceKind,
-    iid: number,
-    noteId: number,
-  ) =>
-    api<void>(`/projects/${projectId}/${kind}/${iid}/notes/${noteId}`, {
-      method: "DELETE",
-    }),
-
   // Réponse typée (id de la réaction posée) : §6.10 en a besoin pour pouvoir
   // ensuite la supprimer (deleteAwardOnNote/deleteAwardOnResource ci-dessous)
   // au moment de la faire évoluer 👀 → ✅/❌, l'API award emoji ne proposant
@@ -394,56 +373,12 @@ export const gitlab = {
       { method: "DELETE" },
     ),
 
-  mergeRequest: (projectId: number, iid: number) =>
-    api<MergeRequestDetail>(`/projects/${projectId}/merge_requests/${iid}`),
-
-  mergeRequestDiffs: (projectId: number, iid: number) =>
-    paginate<DiffFile>(
-      `/projects/${projectId}/merge_requests/${iid}/diffs?per_page=100`,
-      MAX_LIST_PAGES,
-    ),
-
-  closesIssues: (projectId: number, iid: number) =>
-    api<IssueDetail[]>(
-      `/projects/${projectId}/merge_requests/${iid}/closes_issues`,
-    ),
-
-  issue: (projectId: number, iid: number) =>
-    api<IssueDetail>(`/projects/${projectId}/issues/${iid}`),
-
   /**
-   * Une page de notes, la plus ancienne ou la plus récente en tête selon
-   * `order`, avec l'indication GitLab de page suivante. Exposé en primitive
-   * page-par-page — plutôt qu'un `notes()` qui rapatrierait systématiquement
-   * tout l'historique — pour que chaque appelant décide lui-même quand
-   * s'arrêter, selon son propre besoin :
-   * - tasks/context.ts::recentHumanNotes n'a besoin que des derniers
-   *   commentaires humains et s'arrête dès qu'il en a assez (sort=desc,
-   *   arrêt anticipé — voir §3.5, un ticket de 300 commentaires n'a pas à
-   *   être rapatrié en entier pour ça) ;
-   * - tasks/publish.ts::alreadyPublished a besoin, à l'inverse, de tout
-   *   parcourir (une empreinte de déduplication peut se trouver n'importe
-   *   où dans l'historique) mais préfère le faire en ordre chronologique et
-   *   avec sa propre borne de pages, plutôt que via une méthode bulk qui
-   *   masquerait ce choix.
-   */
-  notesPage: (
-    projectId: number,
-    kind: ResourceKind,
-    iid: number,
-    page: number,
-    order: "asc" | "desc" = "asc",
-  ) =>
-    apiPage<Note>(
-      `/projects/${projectId}/${kind}/${iid}/notes?per_page=100&sort=${order}&order_by=created_at&page=${page}`,
-    ),
-
-  /**
-   * Chantier « fil de discussion » : les notes d'une cible, GROUPÉES par fil.
-   * L'API des notes (notesPage ci-dessus) ne dit PAS à quelle discussion
-   * appartient une note — c'est seulement ici que le lien existe. C'est donc
-   * le seul moyen de retrouver le fil qui contient la note d'une demande, et
-   * de savoir si le bot y a déjà parlé.
+   * Les notes d'une cible, GROUPÉES par fil. L'API des notes ne dit PAS à
+   * quelle discussion appartient une note — c'est seulement ici que le lien
+   * existe. C'est donc le seul moyen de retrouver le fil qui contient la note
+   * d'une demande, et le seul appel du daemon qui permet de dire à OpenHands
+   * « réponds DANS ce fil-là » (voir tasks/openhands.ts::findDiscussion).
    */
   discussionsPage: (
     projectId: number,
@@ -455,100 +390,12 @@ export const gitlab = {
       `/projects/${projectId}/${kind}/${iid}/discussions?per_page=100&page=${page}`,
     ),
 
-  /**
-   * Répond DANS un fil existant, plutôt que d'ouvrir un nouveau commentaire.
-   * C'est ce qui fait qu'une explication reste attachée à la remarque qu'elle
-   * explique, au lieu de repartir en bas de la merge request.
-   */
-  createDiscussionNote: (
-    projectId: number,
-    kind: ResourceKind,
-    iid: number,
-    discussionId: string,
-    body: string,
-  ) =>
-    apiForm<{ id: number }>(
-      `/projects/${projectId}/${kind}/${iid}/discussions/${encodeURIComponent(discussionId)}/notes`,
-      { body },
-    ),
+  mergeRequest: (projectId: number, iid: number) =>
+    api<MergeRequestDetail>(`/projects/${projectId}/merge_requests/${iid}`),
 
   project: (path: string) =>
     api<{ id: number; path_with_namespace: string }>(
       `/projects/${encodeURIComponent(path)}`,
     ),
 
-  mergeRequestVersions: (projectId: number, iid: number) =>
-    api<
-      {
-        base_commit_sha: string;
-        head_commit_sha: string;
-        start_commit_sha: string;
-      }[]
-    >(`/projects/${projectId}/merge_requests/${iid}/versions`),
-
-  createDiscussion: (
-    projectId: number,
-    iid: number,
-    form: Record<string, string | number | undefined>,
-  ) =>
-    apiForm<{ id: string }>(
-      `/projects/${projectId}/merge_requests/${iid}/discussions`,
-      form,
-    ),
-
-  branch: (projectId: number, name: string) =>
-    api<{ name: string; protected: boolean }>(
-      `/projects/${projectId}/repository/branches/${encodeURIComponent(name)}`,
-    ),
-
-  /**
-   * Chantier "capacités" (§A.3, publishMode "dedicated-mr") : ouvre une
-   * merge request depuis une branche déjà poussée par le bot
-   * (tasks/implement.ts::openDedicatedMergeRequest) vers la branche source
-   * d'origine, plutôt qu'un push direct dessus. `apiForm` (déjà utilisée par
-   * createDiscussion ci-dessus) suffit : aucun besoin d'un nouveau mécanisme
-   * HTTP pour cet appel.
-   */
-  createMergeRequest: (
-    projectId: number,
-    form: {
-      source_branch: string;
-      target_branch: string;
-      title: string;
-      description?: string;
-    },
-  ) =>
-    apiForm<{ iid: number; web_url: string }>(
-      `/projects/${projectId}/merge_requests`,
-      form,
-    ),
-
-  /**
-   * MR ouvertes ciblant une branche donnée — utilisé par tasks/implement.ts
-   * pour retrouver une MR Draft "tests rouges" encore ouverte avant d'en
-   * empiler une nouvelle (déduplication). Le filtre fin (préfixe de branche
-   * du bot, titre) reste côté appelant : l'API ne sait filtrer que par état
-   * et branche cible, et c'est suffisant pour borner la liste.
-   */
-  openMergeRequests: (projectId: number, targetBranch: string) =>
-    paginate<{
-      iid: number;
-      web_url: string;
-      source_branch: string;
-      title: string;
-    }>(
-      `/projects/${projectId}/merge_requests?state=opened&target_branch=${encodeURIComponent(targetBranch)}&per_page=100`,
-      MAX_LIST_PAGES,
-    ),
-
-  /** Met à jour titre/description d'une MR existante (rafraîchissement d'une MR Draft dédupliquée). */
-  updateMergeRequest: (
-    projectId: number,
-    iid: number,
-    form: { title?: string; description?: string },
-  ) =>
-    api<{ iid: number; web_url: string }>(
-      `/projects/${projectId}/merge_requests/${iid}`,
-      { method: "PUT", body: JSON.stringify(form) },
-    ),
 };

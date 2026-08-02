@@ -1,7 +1,7 @@
 {
   "name": "cds-agent",
   "version": "1.0.0",
-  "description": "POC : daemon GitLab qui délègue revue de MR et écriture de tests à un agent LLM local (opencode + LM Studio), exécuté en sandbox Docker.",
+  "description": "POC : daemon GitLab qui détecte les mentions du bot et délègue l'exécution à une instance OpenHands auto-hébergée.",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,16 +11,12 @@
     "test": "CDS_SKIP_DOTENV=1 node --test 'tests/**/*.test.ts'",
     "test:watch": "CDS_SKIP_DOTENV=1 node --test --watch 'tests/**/*.test.ts'",
     "dev": "tsx src/daemon/index.ts",
-    "check": "tsc --noEmit",
-    "context": "tsx src/tools/dump-context.ts",
-    "review": "tsx src/tools/dry-review.ts",
-    "proxy": "tsx src/tools/proxy.ts",
-    "publish": "tsx src/tools/dry-publish.ts",
-    "implement": "tsx src/tools/dry-implement.ts"
+    "check": "tsc --noEmit"
   },
   "keywords": [
     "gitlab",
     "bot",
+    "openhands",
     "llm-agent",
     "code-review",
     "poc"

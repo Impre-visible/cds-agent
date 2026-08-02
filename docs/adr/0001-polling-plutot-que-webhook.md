@@ -1,5 +1,9 @@
 # ADR 0001 — Polling plutôt que webhook
 
+> **Branche `openhands`** : toujours d'actualité, intégralement. Le polling
+> des to-dos et la fenêtre de rattrapage sont exactement ce que cette branche
+> conserve — c'est l'aval (l'exécution) qui a été délégué, pas l'amont.
+
 ## Statut
 
 Acceptée (comportement en place depuis la première version du POC,

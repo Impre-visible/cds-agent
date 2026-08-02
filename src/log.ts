@@ -5,7 +5,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
  * portée par `node:async_hooks` plutôt que par un paramètre `context` passé
  * explicitement à chaque fonction traversée entre la réception d'une demande
  * (daemon/index.ts::handle()) et la fin de son traitement par le worker
- * (tasks/router.ts::runTask(), potentiellement plusieurs minutes plus tard,
+ * (tasks/openhands.ts::runOpenHandsTask(), potentiellement plusieurs minutes plus tard,
  * une fois dépilée de la file — voir daemon/queue.ts). Le nombre de couches
  * intermédiaires (buildContext, runReview/runImplement, publishReview,
  * runAgentInSandbox...) rendrait un paramètre explicite envahissant partout

@@ -62,6 +62,9 @@ before(async () => {
   process.env.GITLAB_URL = `http://127.0.0.1:${address.port}`;
   process.env.GITLAB_TOKEN = "test-token";
   process.env.BOT_USERNAME = "test-bot";
+  // Obligatoire depuis que toute exécution est déléguée à OpenHands : sans
+  // elle, config.ts refuse de se charger (voir src/config.ts).
+  process.env.OPENHANDS_URL ??= "http://openhands.local:3000";
   // 500 et non 200 : mesuré, 200 ms ne suffit pas toujours à la PREMIÈRE
   // requête d'un runner CI froid (établissement TCP + mise en chauffe), ce qui
   // faisait réessayer une requête qui aurait dû aboutir du premier coup. On

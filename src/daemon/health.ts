@@ -5,6 +5,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { Counters, RunningTask } from "./status.ts";
+import { OPENHANDS_POLL_MS, OPENHANDS_START_TIMEOUT_MS } from "../limits.ts";
 
 /**
  * §6.5 : serveur HTTP minimal (`node:http`, zéro dépendance) répondant à
@@ -27,8 +28,13 @@ export interface HealthDeps {
   counters: () => Counters;
   startedAt: number;
   pollIntervalMs: number;
-  agentTimeoutMs: number;
-  commandTimeoutMs: number;
+  /**
+   * Budget de travail accordé à une conversation OpenHands
+   * (OPENHANDS_TIMEOUT_MINUTES). Remplace l'ancien couple
+   * agentTimeoutMs + commandTimeoutMs : le daemon ne lance plus ni install ni
+   * suite de tests, il n'y a donc plus qu'une seule durée à borner.
+   */
+  taskTimeoutMs: number;
   /** Horloge injectable pour les tests ; Date.now par défaut. */
   now?: () => number;
 }
@@ -93,14 +99,16 @@ export function buildHealthReport(deps: HealthDeps): HealthReport {
       }
     : null;
 
-  // Plafond de durée légitime d'une tâche : install + suite de référence +
-  // exécution de l'agent + suite rejouée (voir tasks/implement.ts) — au-delà,
-  // plus vraisemblablement bloqué (agent qui pend, docker qui ne répond
-  // plus...) qu'en train de travailler normalement. C'est ce qui répond à
-  // "bloqué sur un agent depuis 40 minutes ?" : avec les défauts du projet
-  // (10 min d'agent + 3×5 min), le plafond tombe à 25 min.
+  // Plafond de durée légitime d'une tâche : le budget de travail accordé à la
+  // conversation, plus le temps de la préparer (bac à sable, clone, script de
+  // setup, compétences — OPENHANDS_START_TIMEOUT_MS) et une marge pour les
+  // sondages eux-mêmes. Au-delà, la tâche est plus vraisemblablement bloquée
+  // (waitForCompletion qui ne rend jamais la main, instance qui ne répond
+  // plus) qu'en train de travailler : c'est ce qui répond à « bloqué depuis
+  // 40 minutes ? ». Avec le défaut du projet (10 min), le plafond tombe à
+  // 16 min.
   const maxLegitimateTaskMs =
-    deps.agentTimeoutMs + 3 * deps.commandTimeoutMs;
+    deps.taskTimeoutMs + OPENHANDS_START_TIMEOUT_MS + OPENHANDS_POLL_MS * 6;
   if (currentTask && currentTask.runningForMs > maxLegitimateTaskMs) {
     reasons.push(
       `tâche ${currentTask.key} en cours depuis ` +

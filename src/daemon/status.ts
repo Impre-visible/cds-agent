@@ -84,5 +84,48 @@ export class DaemonStatus {
   }
 }
 
+/**
+ * Ce qui se passe en ce moment, en une phrase, pour la ligne « rien de neuf »
+ * du polling.
+ *
+ * Sans ça, un cycle de polling qui ne trouve pas de nouveau to-do affiche
+ * « rien de neuf » toutes les 30 s — y compris pendant qu'une conversation
+ * OpenHands travaille depuis dix minutes. C'est exact et parfaitement
+ * trompeur : ça décrit ce que le POLLING a trouvé, et ça se lit comme « le
+ * daemon ne fait rien ». Sur ce backend, l'attente est longue par nature (le
+ * daemon sonde une conversation distante), donc c'est l'état le plus fréquent
+ * qu'on affichait le moins bien.
+ *
+ * Rend "" quand il n'y a effectivement rien : la ligne reste courte dans le
+ * cas où elle est vraie.
+ *
+ * Fonction pure, exportée pour être testée sans horloge réelle ni daemon
+ * (voir status.test.ts) — `now` est injecté pour la même raison.
+ */
+export function describeActivity(
+  task: RunningTask | undefined,
+  queueDepth: number,
+  now: number,
+): string {
+  const waiting = queueDepth > 0 ? `, ${queueDepth} en attente` : "";
+
+  if (!task) {
+    // Une file non vide sans tâche en cours est une fenêtre très courte
+    // (entre deux `pump()`), mais la taire ferait mentir la ligne.
+    return queueDepth > 0 ? `${queueDepth} demande(s) en attente.` : "";
+  }
+
+  // Secondes en dessous d'une minute : au démarrage d'une tâche, « 0 min »
+  // se lit comme une erreur d'affichage. Au-delà, la minute suffit — personne
+  // ne suit une revue à la seconde près.
+  const elapsedMs = Math.max(0, now - task.since);
+  const elapsed =
+    elapsedMs < 60_000
+      ? `${Math.round(elapsedMs / 1000)} s`
+      : `${Math.round(elapsedMs / 60_000)} min`;
+
+  return `${task.key} (${task.projectPath}!${task.iid}) en cours depuis ${elapsed}${waiting}.`;
+}
+
 /** Instance unique du process, comme `store`/`queue`/`seen` dans index.ts. */
 export const daemonStatus = new DaemonStatus();

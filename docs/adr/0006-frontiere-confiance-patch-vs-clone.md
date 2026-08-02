@@ -1,5 +1,11 @@
 # ADR 0006 — Frontière de confiance : patch extrait plutôt que clone manipulé, écarté pour l'instant
 
+> **Branche `openhands` — SANS OBJET ICI.** Cette ADR arbitrait entre deux
+> façons de récupérer le travail d'un agent que le daemon fait tourner
+> lui-même. Le daemon ne fait plus tourner d'agent et ne manipule plus de
+> clone : OpenHands pousse directement dans GitLab. La question ne se pose
+> donc plus sur cette branche — elle reste ouverte sur `hardening`.
+
 ## Statut
 
 Acceptée (décision par défaut : aucune implémentation, place réservée dans

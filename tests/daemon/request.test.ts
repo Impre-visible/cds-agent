@@ -11,6 +11,9 @@ let ZERO_WIDTH_SPACE: string;
 before(async () => {
   process.env.GITLAB_TOKEN ??= "test-token";
   process.env.BOT_USERNAME ??= "test-bot";
+  // Obligatoire depuis que toute exécution est déléguée à OpenHands : sans
+  // elle, config.ts refuse de se charger (voir src/config.ts).
+  process.env.OPENHANDS_URL ??= "http://openhands.local:3000";
   ({ defuseMentions, ZERO_WIDTH_SPACE } = await import("../../src/daemon/request.ts"));
 });
 

@@ -1,5 +1,11 @@
 # ADR 0004 — Contrat de fiabilité : file en mémoire, perte assumée
 
+> **Branche `openhands`** : toujours d'actualité. La file, le journal
+> d'idempotence et le non-rejeu d'une demande `running` sont inchangés. Une
+> nuance s'ajoute : une demande `running` interrompue laisse désormais une
+> conversation OpenHands VIVANTE, qui continue son travail sans le daemon —
+> « à vérifier à la main » veut donc dire « aller lire la conversation ».
+
 ## Statut
 
 Acceptée. Rendue explicite (statuts `running`/`failed`, non-rejeu de

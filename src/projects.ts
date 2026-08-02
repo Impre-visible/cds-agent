@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { isWellFormedWritablePathPattern, type RepoCapabilities } from "./tasks/guard.ts";
 
 // ---------------------------------------------------------------------------
 // Chantier "projects.json" — remplace la configuration par projet éclatée
@@ -12,16 +11,58 @@ import { isWellFormedWritablePathPattern, type RepoCapabilities } from "./tasks/
 // tâche : aucun secret n'y vit, le token reste dans l'environnement).
 //
 // Ce module est le point UNIQUE de lecture/validation/résolution de ce
-// fichier — src/daemon/authorize.ts, src/tasks/guard.ts (via
-// repoCapabilitiesFor), src/tasks/implement.ts et src/agent/sandbox.ts
-// consomment tous le même `ResolvedProject`, jamais une lecture parallèle.
+// fichier — src/daemon/authorize.ts et src/tasks/openhands.ts consomment tous
+// deux le même `ResolvedProject`, jamais une lecture parallèle.
+//
+// CE QUE CES CAPACITÉS VEULENT DIRE SUR CETTE BRANCHE. Elles décident
+// toujours si une demande est acceptée (un dépôt qui n'accorde rien est
+// refusé avant tout appel réseau, voir authorize.ts et
+// tasks/openhands.ts). En revanche elles ne sont plus APPLIQUÉES sur ce que
+// l'agent produit : le daemon ne clone plus, ne vérifie plus les fichiers
+// touchés, ne rejoue plus les tests et ne publie plus lui-même — c'est
+// OpenHands qui écrit et pousse. Elles sont énoncées à l'agent en toutes
+// lettres (tasks/openhands.ts::permissionStatement) et rien de plus. Voir
+// docs/openhands.md.
 // ---------------------------------------------------------------------------
+
+// Un composant "." ou ".." dans un motif : refusé inconditionnellement.
+// Auparavant dans tasks/guard.ts, avec le reste du garde-fou de périmètre qui
+// n'existe plus sur cette branche — seule la VALIDATION du fichier de
+// configuration subsiste, et elle vit désormais là où le fichier est lu.
+function hasUnsafeSegments(path: string): boolean {
+  return path
+    .split("/")
+    .filter(Boolean)
+    .some((segment) => segment === "." || segment === "..");
+}
+
+// Les seuls caractères qu'un motif de chemin peut contenir. Un "?" littéral,
+// par exemple, agirait comme un quantificateur s'il était un jour compilé en
+// expression régulière : mieux vaut le refuser à la lecture du fichier que
+// laisser un motif se comporter autrement qu'annoncé.
+const WRITABLE_PATH_PATTERN_CHARS = /^[A-Za-z0-9_./*-]+$/;
+
+/**
+ * Un motif bien formé pour `MergeRequestCapabilities.writablePaths` : non
+ * vide, jamais absolu (les chemins d'un dépôt sont relatifs à sa racine — un
+ * motif commençant par "/" ne désignerait jamais rien, une configuration
+ * morte plutôt qu'une erreur visible), sans composant "." ou "..", et composé
+ * uniquement des caractères ci-dessus.
+ *
+ * Appliqué au CHARGEMENT de projects.json, pour qu'un motif mal formé soit
+ * nommé plutôt que silencieusement inopérant.
+ */
+export function isWellFormedWritablePathPattern(pattern: string): boolean {
+  if (!pattern || pattern.startsWith("/")) return false;
+  if (hasUnsafeSegments(pattern)) return false;
+  return WRITABLE_PATH_PATTERN_CHARS.test(pattern);
+}
 
 /**
  * Capacités applicables quand la demande porte sur une ISSUE. Non câblées à
- * aucun comportement aujourd'hui : `src/tasks/router.ts` refuse encore toute
- * cible qui n'est pas une merge request avant même de regarder une capacité
- * (voir router.ts). Validées et résolues malgré tout, pour que le format du
+ * aucun comportement aujourd'hui : `src/tasks/openhands.ts` refuse toute
+ * cible qui n'est pas une merge request avant même de regarder une
+ * capacité. Validées et résolues malgré tout, pour que le format du
  * fichier soit stable dès maintenant et qu'une future prise en charge des
  * issues n'ait pas à changer le schéma — une entrée mal orthographiée y est
  * déjà rejetée bruyamment au démarrage, comme pour mergeRequest ci-dessous.
@@ -33,25 +74,24 @@ export interface IssueCapabilities {
   writeBusinessCode: boolean;
 }
 
-/** Capacités applicables quand la demande porte sur une MERGE REQUEST — le seul flux réellement câblé aujourd'hui (voir router.ts). */
+/** Capacités applicables quand la demande porte sur une MERGE REQUEST — le seul flux réellement câblé (voir tasks/openhands.ts). */
 export interface MergeRequestCapabilities {
   review: boolean;
   writeTests: boolean;
   writeBusinessCode: boolean;
   /**
-   * true : push direct sur la branche source une fois tous les contrôles
-   * passés (comportement historique). false (également le défaut du bloc
-   * "defaults" documenté par le propriétaire) : le bot pousse sur une
-   * branche cds-agent/... dédiée et ouvre une merge request qui cible la
-   * branche source, à faire relire par un humain avant fusion — voir
-   * tasks/implement.ts::openDedicatedMergeRequest. Sans effet si ni
-   * writeTests ni writeBusinessCode n'est accordé : aucune écriture n'a
-   * jamais lieu, il n'y a rien à publier.
+   * true : l'agent est autorisé à pousser directement sur la branche source.
+   * false (le défaut) : il lui est demandé d'ouvrir plutôt une merge request
+   * dédiée en Draft, à faire relire par un humain avant fusion. Sur cette
+   * branche c'est une CONSIGNE dans le prompt (voir
+   * tasks/openhands.ts::permissionStatement), pas un contrôle — le daemon ne
+   * voit pas ce qui est poussé. Sans effet si ni writeTests ni
+   * writeBusinessCode n'est accordé.
    */
   pushToSourceBranch: boolean;
   /**
-   * Motifs glob (voir tasks/guard.ts::globToRegExp — "**" et "*" seulement)
-   * élargissant PRÉCISÉMENT l'accès en écriture à un sous-ensemble du dépôt,
+   * Motifs glob ("**" et "*" seulement) élargissant PRÉCISÉMENT l'accès en
+   * écriture à un sous-ensemble du dépôt,
    * en plus des chemins de test — l'entre-deux entre "writeTests" seul
    * (chemins de test uniquement) et "writeBusinessCode" (dépôt entier) que
    * l'ancien AGENT_CAPABILITIES exprimait sous la forme write:<glob> et que
@@ -64,16 +104,14 @@ export interface MergeRequestCapabilities {
    * combinaison ambiguë silencieusement résolue d'une façon plutôt qu'une
    * autre) :
    *  - writeBusinessCode: true accorde déjà tout le dépôt ; des motifs non
-   *    vides à côté n'auraient AUCUN effet observable (repoCapabilitiesFor
-   *    ferait de toute façon primer "all") — configuration rejetée comme
-   *    incohérente plutôt que silencieusement ignorée : mieux vaut que
-   *    l'auteur choisisse explicitement.
-   *  - un motif élargit TOUJOURS aussi l'accès aux chemins de test (voir
-   *    tasks/guard.ts::isWritablePath, qui vérifie isTestPath avant les
-   *    motifs, quel que soit leur contenu) : writeTests: false à côté de
-   *    motifs non vides serait trompeur (l'agent écrirait des tests malgré
-   *    tout) — rejeté pour la même raison. writeTests: true est donc
-   *    obligatoire dès qu'un motif est déclaré.
+   *    vides à côté n'auraient AUCUN effet observable — configuration
+   *    rejetée comme incohérente plutôt que silencieusement ignorée : mieux
+   *    vaut que l'auteur choisisse explicitement.
+   *  - un motif élargit TOUJOURS aussi l'accès aux chemins de test :
+   *    writeTests: false à côté de motifs non vides serait trompeur (ce qui
+   *    est annoncé à l'agent l'autoriserait quand même) — rejeté pour la
+   *    même raison. writeTests: true est donc obligatoire dès qu'un motif
+   *    est déclaré.
    *  - writeTests: true seul (motifs vides) : comportement inchangé,
    *    "tests-only".
    */
@@ -92,15 +130,10 @@ export interface CommandsConfig {
    * Motif (regex, insensible à la casse) qui, présent dans la sortie du
    * lanceur de tests, atteste que des ASSERTIONS ont réellement tourné et
    * échoué — par opposition à un fichier de test que le lanceur n'a même pas
-   * pu exécuter (faute de syntaxe, import manquant). tasks/implement.ts s'en
-   * sert pour ne préserver en MR Draft "à trancher" que le premier cas : le
-   * second est du bruit pur, rapporté comme un échec. Optionnel — le défaut
-   * (classifyRedSuite, implement.ts) couvre Vitest/Jest/node:test avec un
-   * repli conservateur (sortie non reconnue ⇒ préserver) ; cette clé n'existe
-   * que pour un lanceur au format de sortie différent. Attention : un motif
-   * fourni a un contrat BINAIRE — il matche ⇒ assertions en échec, il ne
-   * matche pas ⇒ fichier cassé — le repli conservateur ne s'applique qu'au
-   * défaut. Un dépôt qui fournit son motif définit son signal, et l'assume.
+   * pu exécuter. NON LU sur cette branche : le daemon ne rejoue aucune suite
+   * de tests. Accepté pour qu'un même projects.json reste valide ici et sur
+   * `hardening`, où il sert à distinguer une assertion en échec d'un fichier
+   * cassé.
    */
   assertionPattern?: string;
 }
@@ -116,7 +149,7 @@ export interface ResolvedProject {
   capabilities: ResolvedCapabilities;
   commands: CommandsConfig;
   docker: DockerConfig;
-  /** Répertoires de test maison, en plus des conventions standard reconnues par tasks/guard.ts::isTestPath — remplace TEST_DIRECTORY_OVERRIDES. */
+  /** Répertoires de test maison. NON LUS sur cette branche (le daemon ne reconnaît plus les chemins de test lui-même) ; acceptés pour rester compatible avec `hardening`. */
   testDirectories: string[];
 }
 
@@ -297,7 +330,7 @@ function parseBooleanCapabilities<K extends string>(
  * plus "writablePaths" (motifs glob, voir MergeRequestCapabilities.
  * writablePaths) — la seule raison pour laquelle ce bloc n'utilise pas
  * directement parseBooleanCapabilities. Un motif mal formé (voir
- * tasks/guard.ts::isWellFormedWritablePathPattern) fait échouer le chargement
+ * isWellFormedWritablePathPattern ci-dessus) fait échouer le chargement
  * en le citant, comme toute autre valeur invalide de ce fichier — jamais
  * silencieusement ignoré ni laissé produire un filtre qui ne se comporte pas
  * comme annoncé.
@@ -317,7 +350,7 @@ function parseMergeRequestCapabilities(raw: unknown, path: string): ParsedMergeR
   for (const pattern of patterns) {
     if (!isWellFormedWritablePathPattern(pattern)) {
       throw new Error(
-        `projects.json invalide : "${path}.writablePaths" contient un motif mal formé (${JSON.stringify(pattern)}) — un motif doit être un chemin RELATIF (jamais commencer par "/"), sans composant "." ou "..", et n'utiliser que des lettres/chiffres/"-"/"_"/"."/"/" et les jokers "*"/"**" (voir src/tasks/guard.ts::globToRegExp)`,
+        `projects.json invalide : "${path}.writablePaths" contient un motif mal formé (${JSON.stringify(pattern)}) — un motif doit être un chemin RELATIF (jamais commencer par "/"), sans composant "." ou "..", et n'utiliser que des lettres/chiffres/"-"/"_"/"."/"/" et les jokers "*"/"**"`,
       );
     }
   }
@@ -341,7 +374,7 @@ function assertCoherentWritablePaths(capabilities: MergeRequestCapabilities, pat
   }
   if (!capabilities.writeTests && capabilities.writablePaths.length > 0) {
     throw new Error(
-      `projects.json invalide : "${path}" incohérent — "writablePaths" (${JSON.stringify(capabilities.writablePaths)}) élargit toujours aussi l'accès aux chemins de test (voir tasks/guard.ts::isWritablePath), donc "writeTests": false à côté de motifs non vides est contradictoire ; passez "writeTests" à true`,
+      `projects.json invalide : "${path}" incohérent — "writablePaths" (${JSON.stringify(capabilities.writablePaths)}) élargit toujours aussi l'accès aux chemins de test, donc "writeTests": false à côté de motifs non vides est contradictoire ; passez "writeTests" à true`,
     );
   }
 }
@@ -579,41 +612,6 @@ export function resolveProject(
       image: entry.docker.image ?? file.defaults.docker.image ?? baseline.docker.image,
     },
     testDirectories: entry.testDirectories ?? file.defaults.testDirectories ?? [],
-  };
-}
-
-/**
- * Traduit les capacités "mergeRequest" résolues en RepoCapabilities
- * (tasks/guard.ts) — le modèle plus ancien et plus général qu'isWritablePath/
- * collectChanges consomment déjà, inchangé par ce chantier (aucune raison de
- * dupliquer son garde-fou). Priorité, du plus large au plus étroit :
- * writeBusinessCode ("all", englobe déjà tout) > writablePaths non vide
- * (motifs, l'entre-deux — voir MergeRequestCapabilities.writablePaths) >
- * writeTests ("tests-only") > "none". Cette priorité ne masque jamais une
- * combinaison ambiguë en silence : assertCoherentWritablePaths (appelée au
- * chargement du fichier, avant que ce code ne tourne jamais) a déjà fait
- * échouer le démarrage si writeBusinessCode et des motifs cohabitaient, ou si
- * des motifs cohabitaient avec writeTests: false — un appelant qui construit
- * MergeRequestCapabilities à la main (hors projects.json, par exemple un
- * test) sans passer par cette validation n'a que cet ordre de priorité pour
- * seul filet.
- */
-export function repoCapabilitiesFor(
-  mergeRequest: MergeRequestCapabilities,
-): RepoCapabilities {
-  let writablePaths: RepoCapabilities["writablePaths"];
-  if (mergeRequest.writeBusinessCode) {
-    writablePaths = "all";
-  } else if (mergeRequest.writablePaths.length > 0) {
-    writablePaths = mergeRequest.writablePaths;
-  } else if (mergeRequest.writeTests) {
-    writablePaths = "tests-only";
-  } else {
-    writablePaths = "none";
-  }
-  return {
-    writablePaths,
-    publishMode: mergeRequest.pushToSourceBranch ? "source-branch" : "dedicated-mr",
   };
 }
 

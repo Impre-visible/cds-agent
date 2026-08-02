@@ -47,7 +47,9 @@ export interface Note {
    * "DiffNote" quand la note est ancrée à une ligne du diff, "DiscussionNote"
    * pour un fil sans ancrage, absent/null pour un commentaire isolé. Renseigné
    * par l'API des discussions ; sert au chantier « fil de discussion » à dire
-   * à quel endroit du code une question se rapporte (voir tasks/explain.ts).
+   * à quel endroit du code une question se rapporte. Lu par personne sur
+   * cette branche : le daemon ne construit plus de contexte de fil, il
+   * transmet l'adresse de la note et laisse OpenHands remonter le fil.
    */
   type?: string | null;
   /** Ancrage de la note dans le diff, présent pour un type "DiffNote". */
@@ -63,6 +65,10 @@ export interface Note {
  * Un fil de discussion GitLab : la note d'origine et toutes ses réponses.
  * `individual_note` vaut true pour un commentaire isolé (pas un vrai fil) —
  * on ne peut alors pas y répondre en tant que discussion.
+ *
+ * Sert à retrouver DANS QUEL FIL une demande a été posée, pour dire à
+ * OpenHands d'y répondre au lieu d'ouvrir un commentaire de plus au niveau de
+ * la merge request (voir tasks/openhands.ts::findDiscussion).
  */
 export interface Discussion {
   id: string;
@@ -74,10 +80,10 @@ export type ResourceKind = "issues" | "merge_requests";
 
 /**
  * §6.10 : ce que l'accusé de réception (posté par daemon/index.ts::acknowledge())
- * laisse circuler jusqu'à runTask()/report() (tasks/router.ts) pour éditer
- * cette même note une fois le résultat connu, plutôt que d'en poster une
- * nouvelle — les deux fonctions ne se connaissaient pas avant ce chantier,
- * AgentRequest est le véhicule qui les relie (voir AgentRequest.ack).
+ * laisse circuler jusqu'à report() (tasks/report.ts) pour éditer cette même
+ * note une fois le résultat connu, plutôt que d'en poster une nouvelle —
+ * les deux fonctions ne se connaissent pas autrement, AgentRequest est le
+ * véhicule qui les relie (voir AgentRequest.ack).
  */
 export interface AckHandle {
   /**
@@ -117,7 +123,7 @@ export interface AgentRequest {
   /**
    * Renseigné par daemon/index.ts::handle() une fois l'accusé de réception
    * posté, avant que la demande n'entre dans la file (voir queue.ts) : le
-   * worker (tasks/router.ts::report()) l'utilise pour éditer cette note au
+   * worker (tasks/report.ts::report()) l'utilise pour éditer cette note au
    * lieu d'en poster une nouvelle (§6.10). Absent pour les usages hors
    * production (outils dry-run, tests) : report() se rabat alors sur son
    * ancien comportement (poster une note neuve).
@@ -130,28 +136,13 @@ export interface AgentRequest {
    * jamais relue depuis le registre par la suite, y compris si projects.json
    * est rechargé pendant que cette demande patiente en file ou s'exécute
    * (voir src/projects.ts::ProjectsRegistry). Garanti présent pour toute
-   * demande qui atteint le worker (tasks/router.ts::runTask) : authorize()
+   * demande qui atteint le worker (tasks/openhands.ts) : authorize()
    * n'autorise jamais une demande dont le projet est absent de
    * projects.json. Absent pour les usages hors production antérieurs à
    * l'accusé de réception (dry-run, tests) — même statut optionnel que
    * `ack` ci-dessus, pour la même raison.
    */
   project?: ResolvedProject;
-}
-
-export interface DiffRefs {
-  base_sha: string;
-  start_sha: string;
-  head_sha: string;
-}
-
-export interface DiffFile {
-  old_path: string;
-  new_path: string;
-  new_file: boolean;
-  renamed_file: boolean;
-  deleted_file: boolean;
-  diff: string;
 }
 
 export interface MergeRequestDetail {
@@ -162,75 +153,5 @@ export interface MergeRequestDetail {
   source_branch: string;
   target_branch: string;
   web_url: string;
-  diff_refs: DiffRefs | null;
 }
 
-export interface IssueDetail {
-  iid: number;
-  title: string;
-  description: string | null;
-  author: GitLabUser;
-  web_url: string;
-}
-
-export interface LinkedIssue {
-  iid: number;
-  title: string;
-  description: string;
-  comments: string[];
-}
-
-/**
- * §6.8 : champs communs aux deux formes de contexte que buildContext()
- * (tasks/context.ts) peut construire, avant de se spécialiser par
- * targetKind — voir TaskContext ci-dessous.
- */
-export interface TaskContextBase {
-  instanceUrl: string;
-  projectId: number;
-  projectPath: string;
-  targetIid: number;
-  targetTitle: string;
-  targetDescription: string;
-  requester: string;
-  requestText: string;
-  linkedIssue: LinkedIssue | null;
-}
-
-/**
- * §6.8 : contexte d'une merge request — le seul chemin de production
- * aujourd'hui (voir router.ts, qui refuse tout to-do dont la cible n'est pas
- * une MR avant même d'appeler buildContext()). sourceBranch, diffRefs et
- * files n'existent que sur cette branche du contexte : plus de nullité à
- * vérifier côté appelant (review.ts, implement.ts, publish.ts, router.ts...),
- * le compilateur garantit leur présence dès que targetKind vaut
- * "merge_requests" (union discriminée sur ce champ, voir TaskContext).
- */
-export interface MergeRequestContext extends TaskContextBase {
-  targetKind: "merge_requests";
-  sourceBranch: string;
-  diffRefs: DiffRefs | null;
-  files: DiffFile[];
-}
-
-/**
- * §6.8 : contexte d'une issue — délibérément sans chemin de production
- * aujourd'hui (voir le commentaire de buildContext() dans tasks/context.ts).
- * Conservé pour tools/dump-context.ts, seul appelant réel de cette branche.
- */
-export interface IssueContext extends TaskContextBase {
-  targetKind: "issues";
-}
-
-/**
- * §6.8 : union discriminée sur targetKind. Remplace l'ancien type à champs
- * nullables (sourceBranch: string | null, diffRefs: DiffRefs | null, files
- * vide pour une issue), qui obligeait chaque appelant MR à des vérifications
- * de nullité que le compilateur peut désormais garantir à la place : un
- * `context.targetKind !== "merge_requests"` (ou un contexte typé directement
- * MergeRequestContext) suffit à donner accès à sourceBranch/diffRefs/files
- * sans nouvelle vérification — et à l'inverse, y accéder sur un IssueContext
- * est une erreur de compilation, pas une valeur `null` à découvrir à
- * l'exécution.
- */
-export type TaskContext = MergeRequestContext | IssueContext;

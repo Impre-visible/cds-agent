@@ -1,49 +1,36 @@
-# Déploiement du daemon en conteneur : `docker compose up -d --build`.
+# Déploiement du daemon en conteneur :
+#
+#   docker compose up -d --build
 #
 # Ce que ça donne : le daemon redémarre tout seul après un crash et au
 # redémarrage de la machine (restart: unless-stopped — sur macOS, il faut en
 # plus que Docker Desktop soit réglé pour se lancer à l'ouverture de session).
 #
-# ---------------------------------------------------------------------------
-# LE COMPROMIS À CONNAÎTRE AVANT DE LANCER ÇA
-# ---------------------------------------------------------------------------
+# Ce fichier ne démarre QUE le daemon. L'instance OpenHands, à qui il délègue
+# tout le travail, a son propre compose :
 #
-# Ce service monte /var/run/docker.sock. C'est un accès ÉQUIVALENT À ROOT sur
-# la machine hôte : qui peut parler à ce socket peut démarrer un conteneur
-# privilégié qui monte /. Il n'y a pas de façon de contourner ça — le daemon
-# a pour rôle de lancer des conteneurs, il lui faut un moteur Docker.
+#   docker compose --env-file .env -f docker/openhands/docker-compose.yml up -d
 #
-# Ce que ça ne dégrade PAS : le code écrit par le modèle ne tourne jamais ici.
-# Il tourne dans les conteneurs AGENT, lancés en frères avec --cap-drop ALL,
-# --read-only, --pids-limit et --network none par défaut (voir
-# src/agent/sandbox.ts). Le durcissement mesuré de ce projet est intact.
-#
-# Ce que ça dégrade : les conteneurs agent tournent désormais sous l'uid du
-# process daemon (voir hostUser() dans sandbox.ts), soit root-dans-le-conteneur
-# au lieu de l'uid de l'utilisateur. Sans capacités, en système de fichiers
-# racine en lecture seule, la portée reste faible — mais c'est une régression
-# réelle par rapport au lancement depuis un terminal, et elle est assumée ici.
+# Deux fichiers plutôt qu'un, délibérément : le daemon et OpenHands ont des
+# cycles de vie différents (on redémarre le daemon en développant, pas
+# l'instance et son volume d'état), et OpenHands doit pouvoir tourner seul le
+# temps de le régler à la main dans son interface. Le réseau `cds-agent-net`,
+# créé ici, est ce qui les relie — l'autre compose le déclare `external`.
 #
 # ---------------------------------------------------------------------------
-# LES DEUX CONTRAINTES QUI FONT ÉCHOUER UNE VERSION NAÏVE DE CE FICHIER
+# CE QUI A DISPARU DE CE FICHIER (et où c'est parti)
 # ---------------------------------------------------------------------------
 #
-# 1. IDENTITÉ DES CHEMINS. Le daemon crée ses espaces de travail sous TMPDIR
-#    (mkdtemp, voir workspace.ts) puis les monte dans les conteneurs agent
-#    (`-v <chemin>:/repo`). Ce chemin est interprété par le moteur Docker de
-#    l'HÔTE, pas par le conteneur du daemon : un /tmp interne au conteneur
-#    n'existe pas côté hôte et le montage donnerait un répertoire vide, en
-#    silence. CDS_WORK_DIR est donc monté AU MÊME CHEMIN ABSOLU des deux
-#    côtés, et TMPDIR pointe dessus.
+# Ce service ne monte PLUS /var/run/docker.sock, et n'a plus besoin de
+# CDS_WORK_DIR ni de l'identité de chemin hôte ↔ conteneur : le daemon ne
+# lance plus aucun conteneur et ne crée plus aucun espace de travail. Il n'y a
+# plus non plus de proxy d'inférence à rendre joignable, puisqu'il ne parle
+# plus à un serveur de modèle.
 #
-# 2. JOIGNABILITÉ DU PROXY D'INFÉRENCE. Le proxy filtrant tourne DANS le
-#    process daemon (voir tools/proxy.ts) ; l'agent le joignait jusqu'ici via
-#    host.docker.internal, qui désigne l'hôte — donc plus le daemon une fois
-#    celui-ci conteneurisé. On met les deux sur un réseau Docker commun et
-#    l'agent joint le daemon par son NOM (INFERENCE_PROXY_HOST +
-#    AGENT_DOCKER_NETWORK). Conséquence heureuse : aucun port à publier. Un
-#    proxy qui pose la vraie clé d'API en en-tête n'a aucune raison d'être
-#    joignable depuis le réseau de la machine.
+# Ce n'est PAS un gain net de sécurité pour le déploiement : l'accès au socket
+# docker — équivalent à root sur la machine — a simplement changé de mains. Il
+# est maintenant détenu par le conteneur OpenHands, qui crée les bacs à sable,
+# et qui détient AUSSI le jeton GitLab en écriture. Voir docs/openhands.md.
 
 name: cds-agent
 
@@ -53,8 +40,6 @@ services:
       context: .
       dockerfile: docker/daemon.Dockerfile
     image: cds-agent/daemon
-    # Nom FIXE : c'est par ce nom que les conteneurs agent joignent le proxy
-    # d'inférence sur le réseau ci-dessous (INFERENCE_PROXY_HOST).
     container_name: cds-agent-daemon
     restart: unless-stopped
 
@@ -64,14 +49,13 @@ services:
     env_file: .env
 
     environment:
-      # Contrainte 1 : même chemin des deux côtés. `:?` fait échouer `docker
-      # compose up` avec un message clair si la variable manque, plutôt que de
-      # monter un chemin vide.
-      TMPDIR: ${CDS_WORK_DIR:?CDS_WORK_DIR doit contenir le chemin ABSOLU d un repertoire de travail sur l hote (voir .env.example)}
-      # Contrainte 2 : le proxy se joint par le nom du conteneur, sur le
-      # réseau partagé — pas par host.docker.internal.
-      INFERENCE_PROXY_HOST: cds-agent-daemon
-      AGENT_DOCKER_NETWORK: cds-agent-net
+      # L'instance OpenHands se joint par son NOM de conteneur sur le réseau
+      # partagé, pas par 127.0.0.1 (qui désignerait le conteneur du daemon) ni
+      # par host.docker.internal (qui désignerait l'hôte). Écrasé ici plutôt
+      # que laissé au .env : la valeur du .env est celle d'un lancement depuis
+      # un terminal (http://127.0.0.1:3000), et les deux sont justes dans leur
+      # contexte.
+      OPENHANDS_URL: http://cds-openhands:3000
       # 127.0.0.1 (le défaut) n'écouterait que sur la boucle locale DU
       # CONTENEUR, donc /healthz serait injoignable même en publiant le port.
       # L'exposition reste bornée par le mapping ports: ci-dessous.
@@ -80,15 +64,12 @@ services:
       STATE_FILE: /app/state/processed.jsonl
 
     volumes:
-      # Le moteur de l'hôte, pour lancer les conteneurs agent en frères.
-      - /var/run/docker.sock:/var/run/docker.sock
-      # Contrainte 1 : identité de chemin hôte ↔ conteneur.
-      - ${CDS_WORK_DIR:?CDS_WORK_DIR est obligatoire}:${CDS_WORK_DIR:?CDS_WORK_DIR est obligatoire}
       # Configuration par dépôt, en lecture seule : le daemon la relit à chaud
       # à chaque cycle de polling, il n'a jamais à l'écrire.
       - ./projects.json:/app/projects.json:ro
       # Journal des demandes : doit survivre à `docker compose down`, c'est lui
-      # qui évite de rejouer une demande déjà traitée.
+      # qui évite de rejouer une demande déjà traitée. Le seul chemin dans
+      # lequel ce conteneur écrit — d'où le USER node du Dockerfile.
       - ./state:/app/state
 
     networks:
@@ -100,7 +81,7 @@ services:
 
 networks:
   cds-agent-net:
-    # Nom explicite : il est passé tel quel à `docker run --network` par le
-    # daemon (AGENT_DOCKER_NETWORK), qui ne connaît pas le préfixage de projet
-    # que compose appliquerait autrement.
+    # Nom explicite, sans le préfixage de projet que compose appliquerait
+    # autrement : c'est sous ce nom que docker/openhands/docker-compose.yml le
+    # déclare `external`.
     name: cds-agent-net

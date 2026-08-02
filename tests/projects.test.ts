@@ -6,14 +6,12 @@ import { join } from "node:path";
 import {
   parseProjectsFile,
   resolveProject,
-  repoCapabilitiesFor,
   loadProjectsFile,
   firstProjectPath,
   ProjectsRegistry,
   type ProjectsBaseline,
 } from "../src/projects.ts";
 import { authorize } from "../src/daemon/authorize.ts";
-import { DEFAULT_CAPABILITIES, isWritablePath } from "../src/tasks/guard.ts";
 import type { AgentRequest } from "../src/types.ts";
 
 const BASELINE: ProjectsBaseline = {
@@ -355,8 +353,15 @@ describe("mergeRequest.writablePaths — combinaisons incohérentes rejetées au
   });
 });
 
-describe("resolveProject / repoCapabilitiesFor — motifs bout en bout", () => {
-  test("writeTests + motifs : resolveProject reflète les motifs, repoCapabilitiesFor les traduit fidèlement", () => {
+describe("resolveProject — motifs writablePaths bout en bout", () => {
+  // Ce bloc vérifiait aussi la TRADUCTION des capacités vers le garde-fou de
+  // périmètre (repoCapabilitiesFor + isWritablePath, tasks/guard.ts). Ce
+  // garde-fou n'existe plus : le daemon ne voit plus les fichiers écrits,
+  // c'est OpenHands qui écrit et pousse. Ce qui reste vérifiable — et ce qui
+  // compte encore — est la RÉSOLUTION : ce que projects.json produit comme
+  // capacités, qui décide si une demande est acceptée et ce qui est énoncé à
+  // l'agent (voir tasks/openhands.ts::permissionStatement).
+  test("writeTests + motifs : resolveProject reflète fidèlement les motifs déclarés", () => {
     const file = parseProjectsFile({
       projects: {
         "g/p": {
@@ -368,31 +373,16 @@ describe("resolveProject / repoCapabilitiesFor — motifs bout en bout", () => {
     });
     const resolved = resolveProject(file, "g/p", BASELINE)!;
     assert.deepEqual(resolved.capabilities.mergeRequest.writablePaths, ["src/generated/**"]);
-
-    const capabilities = repoCapabilitiesFor(resolved.capabilities.mergeRequest);
-    assert.deepEqual(capabilities, {
-      writablePaths: ["src/generated/**"],
-      publishMode: "source-branch",
-    });
-
-    // Bout en bout avec isWritablePath (tasks/guard.ts) : le motif élargit
-    // précisément, les chemins de test restent accordés en plus, et le
-    // rejet des composants "."/".." reste inconditionnel — même invariant
-    // que testé isolément dans guard.test.ts, vérifié ici via la vraie
-    // capacité produite par la configuration, pas un objet fabriqué à la main.
-    assert.equal(isWritablePath("src/generated/schema.ts", capabilities), true);
-    assert.equal(isWritablePath("tests/foo.test.ts", capabilities), true);
-    assert.equal(isWritablePath("src/server.ts", capabilities), false);
-    assert.equal(isWritablePath("src/generated/../../etc/passwd", capabilities), false);
+    assert.equal(resolved.capabilities.mergeRequest.writeTests, true);
+    assert.equal(resolved.capabilities.mergeRequest.pushToSourceBranch, true);
   });
 
-  test("un projet qui ne déclare pas de motifs garde le comportement inchangé (tableau vide, tests-only)", () => {
+  test("un projet qui ne déclare pas de motifs garde le comportement inchangé (tableau vide)", () => {
     const file = parseProjectsFile({
       projects: { "g/p": { capabilities: { mergeRequest: { writeTests: true } } } },
     });
     const resolved = resolveProject(file, "g/p", BASELINE)!;
     assert.deepEqual(resolved.capabilities.mergeRequest.writablePaths, []);
-    assert.deepEqual(repoCapabilitiesFor(resolved.capabilities.mergeRequest).writablePaths, "tests-only");
   });
 
   test("projet sans capacités déclarées du tout : writablePaths résolu à [] (fail-closed), pas undefined", () => {
@@ -656,12 +646,12 @@ describe("iso-comportement avec l'ancienne configuration par variables d'environ
     };
   }
 
-  test("dépôt sans entrée AGENT_CAPABILITIES (comportement historique tests-only/source-branch) : traduit fidèlement", () => {
-    // Ancien réglage : AGENT_CAPABILITIES vide pour ce dépôt ⇒
-    // DEFAULT_CAPABILITIES (guard.ts) : { writablePaths: "tests-only", publishMode: "source-branch" }.
-    // Traduction projects.json équivalente : review/writeTests/pushToSourceBranch
-    // tous à true (l'ancien modèle autorisait toujours la review et l'écriture
-    // de tests dès qu'un dépôt/auteur était dans les listes blanches).
+  test("dépôt sans entrée AGENT_CAPABILITIES (comportement historique tests-only/source-branch)", () => {
+    // Ancien réglage : AGENT_CAPABILITIES vide pour ce dépôt ⇒ tests
+    // uniquement, push sur la branche source. Traduction projects.json
+    // équivalente : review/writeTests/pushToSourceBranch tous à true
+    // (l'ancien modèle autorisait toujours la review et l'écriture de tests
+    // dès qu'un dépôt/auteur était dans les listes blanches).
     const file = parseProjectsFile({
       projects: {
         "groupe/depot-a": {
@@ -673,10 +663,16 @@ describe("iso-comportement avec l'ancienne configuration par variables d'environ
       },
     });
     const resolved = resolveProject(file, "groupe/depot-a", BASELINE)!;
-    assert.deepEqual(repoCapabilitiesFor(resolved.capabilities.mergeRequest), DEFAULT_CAPABILITIES);
+    assert.deepEqual(resolved.capabilities.mergeRequest, {
+      review: true,
+      writeTests: true,
+      writeBusinessCode: false,
+      pushToSourceBranch: true,
+      writablePaths: [],
+    });
   });
 
-  test('ancien AGENT_CAPABILITIES="write-all;dedicated-mr" : traduit en writablePaths="all"/publishMode="dedicated-mr"', () => {
+  test('ancien AGENT_CAPABILITIES="write-all;dedicated-mr" : writeBusinessCode sans push sur la branche source', () => {
     const file = parseProjectsFile({
       projects: {
         "groupe/depot-a": {
@@ -687,10 +683,8 @@ describe("iso-comportement avec l'ancienne configuration par variables d'environ
       },
     });
     const resolved = resolveProject(file, "groupe/depot-a", BASELINE)!;
-    assert.deepEqual(repoCapabilitiesFor(resolved.capabilities.mergeRequest), {
-      writablePaths: "all",
-      publishMode: "dedicated-mr",
-    });
+    assert.equal(resolved.capabilities.mergeRequest.writeBusinessCode, true);
+    assert.equal(resolved.capabilities.mergeRequest.pushToSourceBranch, false);
   });
 
   test("ancien ALLOWED_PROJECTS/ALLOWED_USERS (liste globale unique) : dupliqués par dépôt, mêmes décisions d'autorisation", () => {

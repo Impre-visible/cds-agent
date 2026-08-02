@@ -1,5 +1,15 @@
 # ADR 0002 — Garde-fou par chemin pour l'implémentation de tests
 
+> **Branche `openhands` — CE GARDE-FOU N'EXISTE PLUS ICI.** `src/tasks/guard.ts`
+> a été supprimé avec le reste de l'exécution maison : le daemon ne voit plus
+> les fichiers écrits, c'est OpenHands qui écrit et pousse. Les capacités de
+> `projects.json` sont désormais *énoncées* à l'agent dans son prompt
+> (`permissionStatement`, `src/tasks/openhands.ts`), jamais appliquées. Cette
+> ADR reste ici comme décision datée : elle décrit ce que la branche
+> `hardening` fait, et donc précisément ce que cette branche accepte de
+> perdre. Le pendant le plus proche côté OpenHands est le hook `stop` de
+> `.openhands/hooks.json` — voir `docs/openhands.md`.
+
 ## Statut
 
 Acceptée (`src/tasks/guard.ts`, durcie ensuite par les commits

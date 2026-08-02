@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile);
  * daemon — mais rien ne les y place automatiquement. Le propriétaire de ce
  * projet configure son proxy d'entreprise dans `~/.gitconfig`
  * (`http.<url>.proxy`, scopé par hôte) : `git` (clone, push) en profite déjà
- * (sanitizedEnv() transmet HOME, voir config.ts), mais si HTTP_PROXY/
+ * (HOME est présent dans l'environnement du process), mais si HTTP_PROXY/
  * HTTPS_PROXY ne sont PAS explicitement exportées pour le process du
  * daemon, les appels API GitLab n'ont toujours rien à lire — exactement
  * l'asymétrie que ce module cherche à combler pour `fetch()` (voir
@@ -24,7 +24,7 @@ const execFileAsync = promisify(execFile);
  * `git config --get-urlmatch` renvoie la valeur la plus spécifique de
  * `http.<motif>.<clé>` qui matche l'URL donnée (exit 1, silencieux, si
  * aucune entrée ne matche) — le même mécanisme que celui déjà vérifié pour
- * `http.<url>.extraHeader` dans gitCredentialEnv (voir config.ts).
+ * `http.<url>.extraHeader`.
  */
 export async function gitProxyConfiguredFor(
   url: string,
@@ -67,7 +67,7 @@ export async function warnIfGitProxyNotExported(
   );
   if (hasEnvProxy) return;
 
-  // `env` explicitement (pas le défaut sanitizedEnv() de gitProxyConfiguredFor) :
+  // `env` explicitement (plutôt que le défaut de gitProxyConfiguredFor) :
   // c'est ce qui rend cette fonction testable avec un HOME/.gitconfig
   // fabriqués, sans dépendre du process.env réel du test — voir proxy-check.test.ts.
   const configured = await gitProxyConfiguredFor(gitlabUrl, env);

@@ -1,0 +1,205 @@
+# Instance OpenHands auto-hébergée — le backend d'exécution alternatif
+# (AGENT_BACKEND=openhands côté daemon). Voir docs/openhands.md pour le mode
+# d'emploi complet, ce qui a été vérifié et ce qui ne l'a pas été.
+#
+#   docker compose --env-file .env -f docker/openhands/docker-compose.yml up -d
+#
+# ---------------------------------------------------------------------------
+# LE PIÈGE : --env-file N'EST PAS FACULTATIF
+# ---------------------------------------------------------------------------
+#
+# `env_file:` plus bas ne sert qu'à passer des variables AU CONTENEUR. Il
+# n'alimente PAS l'interpolation `${...}` de ce fichier : compose n'interpole
+# qu'à partir du shell et du .env de son répertoire de projet — ici
+# `docker/openhands/`, pas la racine. Sans `--env-file .env`, `${AGENT_MODEL}`
+# et `${OPENHANDS_API_KEY}` sont vides, et les `:?` ci-dessous font échouer la
+# commande — mais `${INFERENCE_API_KEY:-local-key}`, lui, a un DÉFAUT : il
+# tomberait silencieusement sur `local-key` et l'inférence échouerait bien
+# plus tard sur un 401 sans rapport apparent. D'où le drapeau, toujours, et
+# la commande lancée depuis la RACINE du dépôt.
+#
+# ---------------------------------------------------------------------------
+# ORDRE DE DÉMARRAGE : LE RÉSEAU D'ABORD
+# ---------------------------------------------------------------------------
+#
+# Ce fichier joint le réseau `cds-agent-net`, déclaré `external` : il est créé
+# par le docker-compose.yml de la racine (celui du daemon), pas ici. Deux
+# fichiers compose qui déclareraient tous deux le même réseau nommé se
+# marcheraient dessus (compose refuse de reprendre un réseau portant les
+# étiquettes d'un autre projet). Démarrez donc le daemon en premier, ou créez
+# le réseau à la main :
+#
+#   docker network create cds-agent-net
+#
+# Une fois les deux sur ce réseau, le daemon joint l'instance par son NOM de
+# conteneur — OPENHANDS_URL=http://cds-openhands:3000 — et aucun port n'a
+# besoin d'être publié sur la machine. Le mapping `ports:` ci-dessous n'existe
+# que pour l'interface web, sur la boucle locale uniquement.
+#
+# ---------------------------------------------------------------------------
+# LE COMPROMIS À CONNAÎTRE AVANT DE LANCER ÇA
+# ---------------------------------------------------------------------------
+#
+# Comme le daemon, ce service monte /var/run/docker.sock, et pour la même
+# raison : OpenHands lance ses bacs à sable en conteneurs frères. C'est un
+# accès ÉQUIVALENT À ROOT sur la machine hôte.
+#
+# Ce qui CHANGE par rapport au chemin opencode, et qu'il faut avoir en tête :
+# les conteneurs de bac à sable sont créés par OpenHands, avec les réglages
+# d'OpenHands. Le durcissement mesuré de ce projet — --cap-drop ALL,
+# --read-only, --pids-limit, --network none — vient de src/agent/sandbox.ts et
+# ne s'applique PAS ici. Le bac à sable OpenHands a d'ailleurs besoin du
+# réseau (il clone le dépôt et appelle le modèle), donc --network none n'aurait
+# de toute façon pas de sens.
+#
+# Et surtout : ce conteneur détient un jeton GitLab en ÉCRITURE, qu'il confie
+# à un agent qui pousse et commente tout seul. Le daemon ne revérifie plus
+# rien de ce qui part.
+
+name: cds-openhands
+
+services:
+  openhands:
+    # Version épinglée, pas `latest` : une instance qui change de version
+    # toute seule entre deux campagnes de mesure rendrait les résultats
+    # incomparables — exactement ce que ce chantier cherche à préserver.
+    # `1.8` suit les correctifs 1.8.x, comme le fait la documentation amont.
+    image: docker.openhands.dev/openhands/openhands:1.8
+    # Nom FIXE : c'est par lui que le daemon joint l'instance sur le réseau
+    # partagé (OPENHANDS_URL), sans dépendre du préfixage de projet que
+    # compose appliquerait autrement.
+    container_name: cds-openhands
+    restart: unless-stopped
+
+    # Toute la configuration vient du même .env que le daemon : une seule
+    # source de vérité pour le modèle, sa clé, et l'instance GitLab. .env
+    # n'entre jamais dans une image (voir .dockerignore) — il est lu ici, à
+    # l'exécution.
+    env_file: ../../.env
+
+    environment:
+      # -- Bac à sable ------------------------------------------------------
+      # Image de l'agent-server, celle dans laquelle l'agent exécute
+      # réellement les commandes. Le tag DOIT rester compatible avec la
+      # version d'OpenHands ci-dessus : c'est le couple documenté en amont.
+      AGENT_SERVER_IMAGE_REPOSITORY: ghcr.io/openhands/agent-server
+      AGENT_SERVER_IMAGE_TAG: ${OPENHANDS_AGENT_SERVER_TAG:-1.26.0-python}
+
+      # Nombre de conteneurs `oh-agent-server-*` autorisés à tourner en même
+      # temps. Le défaut amont est 5 ; on le serre à 2.
+      #
+      # POURQUOI PAS 1, alors que c'est ce qu'on voudrait : le code amont
+      # appelle `pause_old_sandboxes(max_num_sandboxes - 1)` avant de démarrer
+      # un bac à sable, et cette fonction lève `ValueError` si son argument
+      # est ≤ 0 (docker_sandbox_service.py + sandbox_service.py). Avec 1,
+      # AUCUNE conversation ne peut plus démarrer. 2 est le minimum utilisable.
+      #
+      # Ce réglage n'est qu'un filet. Ce qui borne réellement les conteneurs
+      # est côté daemon : une conversation par merge request, reprise à chaque
+      # relance au lieu d'en ouvrir une nouvelle (openhands/conversations.ts).
+      # Sans ça, deux mentions sur la même MR laissaient deux conteneurs.
+      #
+      # Nom déduit de la convention visible sur les champs voisins du même
+      # modèle (`OH_SANDBOX_HOST_PORT`, `OH_SANDBOX_CONTAINER_URL_PATTERN`,
+      # documentés dans leurs descriptions) — pas d'une documentation qui
+      # nommerait celui-ci explicitement. À vérifier si les conteneurs
+      # dépassent quand même ce plafond.
+      OH_SANDBOX_MAX_NUM_SANDBOXES: ${OPENHANDS_MAX_SANDBOXES:-2}
+
+      # -- Modèle -----------------------------------------------------------
+      # OpenHands passe par LiteLLM : un point d'accès compatible OpenAI se
+      # décrit "openai/<modèle>", quel que soit le fournisseur derrière
+      # (Scaleway, vLLM, LM Studio, un serveur local). C'est la MÊME valeur
+      # qu'AGENT_MODEL côté opencode, à une condition — que sa partie
+      # "fournisseur" soit `openai` et non `lmstudio` : opencode accepte
+      # n'importe quel nom (il déclare un fournisseur custom sous ce nom, voir
+      # agent/sandbox.ts), LiteLLM non. `AGENT_MODEL=openai/<modèle>` marche
+      # donc sur LES DEUX backends, et c'est le réglage recommandé.
+      # OpenRouter fait exception : il a son propre préfixe,
+      # `openrouter/<éditeur>/<modèle>`.
+      LLM_MODEL: ${AGENT_MODEL:?AGENT_MODEL doit etre renseigne (ex. openai/qwen3.6-35b-a3b) - voir .env}
+      # CONTAINER_INFERENCE_URL est l'adresse du serveur d'inférence VUE
+      # DEPUIS UN CONTENEUR — c'est exactement ce qu'il faut ici. Le
+      # `host.docker.internal` qu'elle contient typiquement est résolu par le
+      # extra_hosts plus bas.
+      LLM_BASE_URL: ${CONTAINER_INFERENCE_URL:?CONTAINER_INFERENCE_URL doit pointer le serveur d inference tel que joignable depuis un conteneur (ex. http://host.docker.internal:1234/v1) - voir .env}
+      # Un point d'accès local n'en réclame aucune, mais LiteLLM veut une
+      # valeur non vide : d'où le repli. À la différence du chemin opencode,
+      # il n'y a PAS de proxy filtrant qui poserait l'en-tête à la place du
+      # conteneur — la vraie clé descend jusqu'ici quand il y en a une.
+      LLM_API_KEY: ${INFERENCE_API_KEY:-local-key}
+
+      # -- GitLab -----------------------------------------------------------
+      # Instance self-managed : GITLAB_HOST est un NOM D'HÔTE, pas une URL.
+      # Le code amont retire de lui-même https://, http:// et le / final,
+      # donc y coller GITLAB_URL fonctionne aussi. Défaut amont : gitlab.com.
+      GITLAB_HOST: ${GITLAB_URL:-https://gitlab.com}
+      # GITLAB_TOKEN vient du .env (celui du compte bot) via env_file. Voir
+      # docs/openhands.md : il faut EN PLUS le déclarer dans les réglages de
+      # l'instance pour qu'elle sache cloner et pousser — un curl est fourni.
+
+      # -- API : LE CHOIX À FAIRE, ET IL N'EST PAS CONFORTABLE ---------------
+      #
+      # Renseignée, cette variable protège l'API V1 : chaque requête doit
+      # porter un en-tête X-Session-API-Key qui lui corresponde (vérifié dans
+      # openhands/app_server/utils/dependencies.py). Vide ou absente, le
+      # serveur n'installe MÊME PAS le contrôle : l'API est ouverte à
+      # quiconque atteint le port.
+      #
+      # Le piège, mesuré et pas déduit : le client HTTP de l'INTERFACE WEB
+      # n'envoie aucun en-tête d'authentification (frontend/src/api/
+      # open-hands-axios.ts — un intercepteur de réponse, rien en requête, pas
+      # de withCredentials). Dès que SESSION_API_KEY est posée, l'interface se
+      # prend donc un 401 sur chacun de ses appels et devient inutilisable :
+      # plus de réglages, plus de lecture des conversations. Il n'y a pas
+      # d'écran de saisie de clé dans ce build open source.
+      #
+      # D'où le défaut VIDE, c'est-à-dire ouvert. Ce qui protège réellement
+      # l'instance dans cette configuration, ce n'est pas une clé, c'est le
+      # `ports:` plus bas : le port n'est publié que sur 127.0.0.1, et le
+      # daemon passe par le réseau Docker privé. Rien d'extérieur à la machine
+      # ne l'atteint. C'est tenable pour un POC mono-poste ; ça ne l'est plus
+      # dès que l'instance vit sur une machine partagée ou exposée.
+      #
+      # Poser une clé (dans .env) reste le bon réflexe si vous exposez le
+      # port : le daemon l'enverra, et vous piloterez OpenHands entièrement
+      # par son API — au prix de l'interface. Voir docs/openhands.md.
+      SESSION_API_KEY: ${OPENHANDS_API_KEY:-}
+
+      LOG_ALL_EVENTS: "true"
+
+    volumes:
+      # Le moteur de l'hôte : OpenHands lance ses bacs à sable en conteneurs
+      # frères, exactement comme le daemon lance les siens.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Réglages, conversations et jetons de fournisseurs. DOIT survivre à un
+      # `docker compose down` : c'est là que vit le jeton GitLab déclaré dans
+      # les réglages, et sans lui l'instance repart vierge.
+      - openhands-state:/.openhands
+
+    # `host.docker.internal` ne résout pas tout seul sous Linux : sans ce
+    # mapping, un CONTAINER_INFERENCE_URL qui le mentionne échoue à la
+    # première requête d'inférence, avec un message de DNS sans rapport
+    # apparent avec le modèle.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    networks:
+      cds-agent-net:
+
+    ports:
+      # Interface web, sur la boucle locale de l'HÔTE uniquement. Le daemon,
+      # lui, passe par le réseau Docker et n'a pas besoin de ce mapping.
+      # Publier ce port au-delà de 127.0.0.1 exposerait une API qui lance des
+      # conteneurs avec un jeton GitLab en écriture.
+      - "127.0.0.1:${OPENHANDS_PORT:-3000}:3000"
+
+volumes:
+  openhands-state:
+
+networks:
+  cds-agent-net:
+    # Créé par le docker-compose.yml de la racine (celui du daemon), ou à la
+    # main : `docker network create cds-agent-net`. Voir l'en-tête.
+    external: true
+    name: cds-agent-net

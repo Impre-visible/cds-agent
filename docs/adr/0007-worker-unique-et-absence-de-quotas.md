@@ -1,5 +1,14 @@
 # ADR 0007 — Worker unique assumé, aucun quota ni comptage de coûts
 
+> **Branche `openhands`** : toujours d'actualité, et le coût de la décision
+> augmente. Le worker unique ne tient plus une exécution locale mais une
+> ATTENTE : il reste bloqué à sonder une conversation OpenHands pendant tout
+> son budget (`OPENHANDS_TIMEOUT_MINUTES`), sans rien calculer. Autrement dit
+> la file sérialise désormais quelque chose qui n'a plus aucune raison
+> technique de l'être — OpenHands sait mener plusieurs conversations en
+> parallèle. C'est le premier endroit où regarder si la latence devient
+> gênante.
+
 ## Statut
 
 Acceptée (`src/daemon/queue.ts`, `src/daemon/authorize.ts` — comportement
