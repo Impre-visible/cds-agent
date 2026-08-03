@@ -11,7 +11,8 @@
     "test": "CDS_SKIP_DOTENV=1 node --test 'tests/**/*.test.ts'",
     "test:watch": "CDS_SKIP_DOTENV=1 node --test --watch 'tests/**/*.test.ts'",
     "dev": "tsx src/daemon/index.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "bench": "./scripts/bench.sh"
   },
   "keywords": [
     "gitlab",

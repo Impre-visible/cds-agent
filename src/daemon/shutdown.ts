@@ -24,6 +24,25 @@ export class ShutdownController {
   }
 
   /**
+   * Demande un arrêt gracieux sans signal — utilisé quand le daemon a fini le
+   * travail qu'on lui avait donné (CDS_MAX_TASKS, voir daemon/index.ts).
+   *
+   * Passe par la MÊME phase "draining" qu'un SIGINT plutôt que par un
+   * `process.exit()` : la file est drainée, ce qui n'a jamais démarré est
+   * consigné comme perdu, le serveur d'observabilité est fermé et le verrou
+   * libéré. Un banc de mesure qui laisserait des verrous ou des demandes
+   * dans un état ambigu derrière lui ne serait pas un banc de mesure.
+   *
+   * Sans effet si un arrêt est déjà en cours : un signal reçu au même moment
+   * ne doit pas être « rétrogradé ».
+   */
+  requestStop(): void {
+    if (this.phase !== "running") return;
+    this.phase = "draining";
+    this.wake?.();
+  }
+
+  /**
    * Enregistre un signal (SIGINT/SIGTERM). Renvoie la phase résultante :
    * "draining" au premier appel (on laisse une chance à la tâche en cours de
    * se terminer), "forced" à partir du second — à charge pour l'appelant de

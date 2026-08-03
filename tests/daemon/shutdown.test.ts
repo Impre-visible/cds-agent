@@ -141,3 +141,42 @@ describe("drain() — séquence d'arrêt de la file (voir index.ts)", () => {
     );
   });
 });
+
+describe("ShutdownController.requestStop — arrêt sans signal (CDS_MAX_TASKS)", () => {
+  test("passe par la même phase draining qu'un SIGINT", () => {
+    // Et non par un process.exit() : la file doit être drainée, le verrou
+    // libéré, ce qui n'a jamais démarré consigné comme perdu.
+    const controller = new ShutdownController();
+    assert.equal(controller.isStopping, false);
+    controller.requestStop();
+    assert.equal(controller.phaseName, "draining");
+    assert.equal(controller.isStopping, true);
+  });
+
+  test("réveille une attente de polling en cours", async () => {
+    const controller = new ShutdownController();
+    const started = Date.now();
+    const waiting = controller.sleep(60_000);
+    controller.requestStop();
+    await waiting;
+    assert.ok(Date.now() - started < 1_000, "l'attente doit être interrompue");
+  });
+
+  test("ne rétrograde JAMAIS un arrêt forcé déjà demandé", () => {
+    // Un second SIGINT pendant que le quota se déclenche veut dire « sors
+    // maintenant » : le ramener à draining ferait attendre l'utilisateur.
+    const controller = new ShutdownController();
+    controller.registerSignal();
+    controller.registerSignal();
+    assert.equal(controller.phaseName, "forced");
+    controller.requestStop();
+    assert.equal(controller.phaseName, "forced");
+  });
+
+  test("appelé deux fois, reste draining", () => {
+    const controller = new ShutdownController();
+    controller.requestStop();
+    controller.requestStop();
+    assert.equal(controller.phaseName, "draining");
+  });
+});

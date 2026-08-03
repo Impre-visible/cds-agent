@@ -328,3 +328,28 @@ describe("loadDotEnv — la suite de tests ne dépend pas du .env de l'opérateu
     }
   });
 });
+
+describe("buildConfig — CDS_MAX_TASKS (banc de mesure)", () => {
+  test("absent : illimité, comportement historique", () => {
+    // Le seul comportement d'exploitation : le daemon tourne jusqu'à SIGINT.
+    assert.equal(buildConfig(baseEnv()).maxTasks, 0);
+  });
+
+  test("valeur positive : le daemon s'arrêtera après ce nombre de tâches", () => {
+    assert.equal(buildConfig(baseEnv({ CDS_MAX_TASKS: "1" })).maxTasks, 1);
+  });
+
+  test("négatif rejeté", () => {
+    assert.throws(
+      () => buildConfig(baseEnv({ CDS_MAX_TASKS: "-1" })),
+      /CDS_MAX_TASKS/,
+    );
+  });
+
+  test("non numérique rejeté", () => {
+    assert.throws(
+      () => buildConfig(baseEnv({ CDS_MAX_TASKS: "une" })),
+      /CDS_MAX_TASKS/,
+    );
+  });
+});

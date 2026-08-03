@@ -1,0 +1,13 @@
+# Un modèle par ligne, au format LiteLLM. "#" commente.
+# Usage : npm run bench -- -f bench-models.txt
+#
+# Rappel : postez « @<bot> review » sur une merge request DIFFÉRENTE par
+# modèle AVANT de lancer, sinon le second modèle lirait les remarques du
+# premier. Chaque exécution consomme exactement un to-do.
+
+openrouter/qwen/qwen3.6-35b-a3b
+openrouter/openai/gpt-oss-120b
+openrouter/minimax/minimax-m2.5
+openrouter/moonshotai/kimi-k2.6
+openrouter/nvidia/nemotron-3-ultra-550b-a55b
+openrouter/xiaomi/mimo-v2.5

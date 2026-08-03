@@ -371,6 +371,23 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     /** Devient `api_key`. Jamais relue depuis le serveur, qui ne rend qu'un booléen. */
     inferenceApiKey: env.INFERENCE_API_KEY?.trim() || undefined,
 
+    /**
+     * Nombre de tâches à traiter avant de s'arrêter tout seul, proprement.
+     * 0 (le défaut) : illimité — le daemon tourne jusqu'à SIGINT, comportement
+     * historique et seul comportement d'exploitation.
+     *
+     * Existe pour le banc de mesure : comparer dix modèles demande de lancer
+     * le daemon dix fois, chacune avec un AGENT_MODEL différent, et d'attendre
+     * qu'UNE tâche se termine avant de passer au suivant. Le faire à la main
+     * (Ctrl-C au bon moment) marche mais oblige à rester devant l'écran des
+     * heures durant, et un Ctrl-C mal placé coupe une tâche en vol — qui
+     * atterrit alors en "running" non rejouable dans le journal.
+     *
+     * L'arrêt passe par la séquence de drain normale, pas par un exit brutal :
+     * voir ShutdownController.requestStop.
+     */
+    maxTasks: finiteNumber(env, "CDS_MAX_TASKS", 0, { min: 0, max: 1_000 }),
+
     healthEnabled: env.HEALTH_ENABLED !== "0",
     // min: 0 et non 1 — le port 0 demande au noyau un port libre au hasard,
     // ce qui est un réglage légitime (et utilisé en test), pas une erreur.

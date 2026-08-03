@@ -113,6 +113,23 @@ process.on("SIGTERM", () => onSignal("SIGTERM"));
  * worker démarre potentiellement bien après (une fois la tâche dépilée par
  * queue.ts, voir pump()), dans une chaîne d'appels asynchrones distincte.
  */
+/**
+ * Compte les tâches terminées et déclenche l'arrêt quand le quota
+ * CDS_MAX_TASKS est atteint — voir config.ts pour ce que ce réglage sert.
+ * Sans quota (0, le défaut), ne fait rien du tout.
+ */
+let tasksFinished = 0;
+function noteTaskFinished(): void {
+  if (config.maxTasks === 0) return;
+  tasksFinished += 1;
+  if (tasksFinished < config.maxTasks) return;
+
+  log.info(
+    `${tasksFinished}/${config.maxTasks} tâche(s) traitée(s) (CDS_MAX_TASKS) : arrêt gracieux.`,
+  );
+  shutdown.requestStop();
+}
+
 async function trackedWorker(request: AgentRequest): Promise<void> {
   await withRequestContext(
     { key: request.key, projectPath: request.projectPath, iid: request.iid },
@@ -128,6 +145,7 @@ async function trackedWorker(request: AgentRequest): Promise<void> {
         await runOpenHandsTask(request);
         store.record(request.key, request.todoId, "done");
         daemonStatus.recordProcessed();
+        noteTaskFinished();
       } catch (error) {
         store.record(
           request.key,
@@ -135,6 +153,10 @@ async function trackedWorker(request: AgentRequest): Promise<void> {
           "failed",
           `échec worker : ${(error as Error).message}`,
         );
+        // Une tâche en échec COMPTE quand même : sur un banc de mesure, un
+        // modèle qui plante est un résultat, pas une raison de rester bloqué
+        // à attendre indéfiniment la tâche suivante.
+        noteTaskFinished();
         throw error;
       } finally {
         daemonStatus.taskEnded();

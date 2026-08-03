@@ -21,3 +21,6 @@ revue-*.log
 
 # Repertoire de travail du daemon conteneurise (CDS_WORK_DIR, voir docker-compose.yml)
 .cds-work/
+
+# Résultats du banc de mesure (scripts/bench.sh)
+bench/

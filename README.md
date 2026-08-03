@@ -36,6 +36,7 @@ qui ne l'est pas.
 - [Configuration des projets](#configuration-des-projets)
 - [Ce que le bot publie](#ce-que-le-bot-publie)
 - [Lancement](#lancement)
+- [Enchaîner plusieurs modèles](#enchaîner-plusieurs-modèles)
 - [Déploiement (docker compose)](#déploiement-docker-compose)
 - [Journalisation](#journalisation)
 - [Observabilité](#observabilité)
@@ -306,6 +307,23 @@ L'image du daemon ne monte **plus** `/var/run/docker.sock` et n'embarque plus
 ni git ni le client docker : elle ne lance aucun conteneur et ne clone rien.
 Cet accès équivalent à root n'a pas disparu du déploiement pour autant — il a
 changé de mains, et c'est OpenHands qui le détient désormais.
+
+## Enchaîner plusieurs modèles
+
+```bash
+cp bench-models.example.txt bench-models.txt   # éditez la liste
+npm run bench -- -f bench-models.txt
+```
+
+Pour chaque modèle : l'instance OpenHands est alignée dessus, le daemon
+démarre, traite **une** tâche (`CDS_MAX_TASKS=1`), s'arrête proprement, et on
+passe au suivant. Un CSV et un journal par modèle dans `bench/`.
+
+Postez les mentions **avant** de lancer, sur une merge request différente par
+modèle — sur la même MR, le second modèle lirait les remarques du premier. Le
+script ne peut pas le faire à votre place : GitLab ne crée un to-do que sur
+mention d'un humain autorisé. Détails et pièges dans
+[`docs/openhands.md`](./docs/openhands.md).
 
 ## Journalisation
 

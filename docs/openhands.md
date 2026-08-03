@@ -24,6 +24,7 @@ intacts sur `hardening`.
 - [Démarrer l'instance](#démarrer-linstance)
 - [Configurer l'accès GitLab](#configurer-laccès-gitlab)
 - [Changer de modèle](#changer-de-modèle)
+- [Enchaîner plusieurs modèles](#enchaîner-plusieurs-modèles)
 - [Lancer une revue](#lancer-une-revue)
 - [Où vivent les prompts et les compétences](#où-vivent-les-prompts-et-les-compétences)
 - [Le bac à sable](#le-bac-à-sable)
@@ -663,6 +664,63 @@ protection. Voir la section « Démarrer l'instance ».
 préfixes viennent de deux routeurs différents côté serveur. Les avoir oubliés
 a produit des requêtes vers `/api/v1` tout court ; c'est un test unitaire qui
 l'a attrapé, pas une instance.
+
+## Enchaîner plusieurs modèles
+
+```bash
+# 1. Poster « @<bot> review » sur une merge request DIFFÉRENTE par modèle.
+#    Le script ne peut pas le faire à votre place : un to-do GitLab n'existe
+#    que si un HUMAIN AUTORISÉ mentionne le bot, et une note postée avec le
+#    jeton du bot serait écartée par ses propres filtres (daemon/request.ts).
+#
+# 2. Lancer le banc.
+cp bench-models.example.txt bench-models.txt   # puis éditez la liste
+npm run bench -- -f bench-models.txt
+```
+
+Pour chaque modèle : l'instance est alignée dessus, le daemon démarre, traite
+**une** tâche, s'arrête proprement, et on passe au suivant.
+
+```
+  modele                          | cle      | merge_request | issue        | secondes | conversation
+  --------------------------------+----------+---------------+--------------+----------+-------------
+  openrouter/qwen/qwen3.6-35b-a3b | note:363 | grp/repo!12   | finished     | 215      | http://…/abc
+  openrouter/openai/gpt-oss-120b  | note:364 | grp/repo!9    | timeout      | 600      | http://…/def
+  openrouter/minimax/minimax-m2.5 |          |               | aucune-tache |          |
+```
+
+Un CSV et un journal complet par modèle dans `bench/` (gitignoré).
+
+### Ce qui rend ça possible : `CDS_MAX_TASKS`
+
+Le daemon s'arrête tout seul, **proprement**, après N tâches. C'est ce qui
+remplace le Ctrl-C au bon moment — lequel marche, mais oblige à rester devant
+l'écran des heures durant, et coupe une tâche en vol s'il tombe mal (elle
+atterrit alors en `running` non rejouable dans le journal).
+
+L'arrêt passe par la séquence de drain normale, pas par un `process.exit()` :
+file drainée, ce qui n'a jamais démarré consigné comme perdu, serveur
+d'observabilité fermé, verrou libéré. Un banc qui laisserait des verrous ou
+des demandes ambiguës derrière lui ne serait pas un banc.
+
+`CDS_MAX_TASKS=0` (le défaut) : illimité, le seul comportement d'exploitation.
+Une tâche en **échec** compte aussi — un modèle qui plante est un résultat, pas
+une raison de rester bloqué à attendre la suivante.
+
+### Les trois pièges du protocole
+
+**Une merge request différente par modèle.** Sur la même MR, le deuxième
+modèle lirait les remarques du premier. Le dépôt de test porte donc plusieurs
+copies de la même MR.
+
+**Les to-dos sont consommés dans l'ordre où GitLab les rend**, pas dans
+l'ordre de la liste de modèles. Le CSV enregistre quelle MR est allée à quel
+modèle — c'est lui qui fait foi, pas l'intention.
+
+**Le chien de garde.** `BENCH_MAX_WAIT_SECONDS` (30 min par défaut) borne
+l'attente par modèle : sans lui, une mention oubliée bloquerait le banc pour
+toujours. À l'expiration, la ligne du CSV porte `aucune-tache` — un trou
+nommé plutôt qu'un trou silencieux.
 
 ## Comparabilité avec le banc de mesure
 
