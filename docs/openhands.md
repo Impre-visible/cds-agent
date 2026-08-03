@@ -26,6 +26,7 @@ intacts sur `hardening`.
 - [Changer de modèle](#changer-de-modèle)
 - [Enchaîner plusieurs modèles](#enchaîner-plusieurs-modèles)
 - [Lancer une revue](#lancer-une-revue)
+- [Ancrage sur le diff, suggestions, compétences](#ancrage-sur-le-diff-suggestions-compétences)
 - [Où vivent les prompts et les compétences](#où-vivent-les-prompts-et-les-compétences)
 - [Le bac à sable](#le-bac-à-sable)
 - [Ce qui a été vérifié, et où](#ce-qui-a-été-vérifié-et-où)
@@ -311,6 +312,103 @@ dernière exécution en `error`/`stuck` — relancer un modèle enlisé ne le
 désenlise pas. Un bac à sable simplement en `PAUSED` (mis en pause par
 OpenHands pour tenir sa limite) est **relancé** (`POST
 /api/v1/sandboxes/{id}/resume`) plutôt qu'abandonné.
+
+## Ancrage sur le diff, suggestions, compétences
+
+### Le constat
+
+Sept modèles, sept merge requests, le même message envoyé. Le résultat est
+**binaire** : un modèle ancre toutes ses remarques sur la ligne du diff, ou
+aucune.
+
+| Modèle | Remarques ancrées | Défauts trouvés /25 |
+|---|---|---|
+| Kimi K2.6 | 16/16 | 15 |
+| MiMo-V2.5 | 20/20 | 12 |
+| DeepSeek V4-Flash | 11/11 | 10 |
+| Qwen3.6-35B | **0/10** | 10 |
+| Nemotron 3 Ultra | **0/16** | 8 |
+| MiniMax M2.5 | **0/6** | 5 |
+| gpt-oss-120B | 3/4 | 4 |
+
+Zéro bloc `suggestion` sur les sept. Et les trois qui ancrent sont les trois
+qui trouvent le plus.
+
+Le message contenait déjà la consigne — mais noyée en fin de paragraphe et
+formulée comme une préférence (« sur la ligne concernée **plutôt qu'**un
+commentaire général »). Elle est désormais un impératif isolé, avec son
+critère d'échec (« une remarque au niveau de la MR n'apparaît pas dans
+l'onglet Changes : c'est une remarque ratée »).
+
+### Il n'y a rien à installer depuis le registre
+
+**Les 55 compétences du registre officiel sont déjà embarquées dans l'image**
+et livrées à chaque conversation. Vérifié :
+
+```bash
+curl -sS "http://127.0.0.1:3000/api/v1/app-conversations/<id>/skills" \
+  | python3 -c 'import json,sys; [print(s["name"]) for s in json.load(sys.stdin)["skills"]]'
+```
+
+On y trouve `gitlab`, `code-review`, `security`, `qa-changes`,
+`evidence-based-citations`, `agent-memory`, `skill-creator`,
+`learn-from-code-review`, `github-pr-review`… Les cloner serait au mieux
+redondant, au pire une divergence de version silencieuse.
+
+Ce qui manque : **l'équivalent GitLab de `github-pr-review`**. La compétence
+`gitlab` du registre existe mais reste générale (dépôts, MR, API) et ne dit
+rien de l'ancrage ni des suggestions. C'est la seule chose à écrire.
+
+### Les deux compétences maison
+
+`openhands/skills/gitlab-mr-review/` — l'API des discussions positionnées, les
+règles `old_line`/`new_line` qui font échouer un `POST` en 400, l'ordre des
+replis, la syntaxe `suggestion` et les deux façons de corrompre un fichier
+avec. Transposée de `github-pr-review`, dont elle reprend la structure.
+
+`openhands/skills/gitlab-conversations/` — répondre dans le fil d'où vient la
+question, une remarque = une discussion, aucune méta-note, signer du nom du
+compte, ne jamais notifier ni exécuter de quick action par accident.
+
+Les règles GitLab qu'elles portent ne sont pas devinées : elles viennent de
+`tasks/publish.ts` sur `hardening`, qui les applique en production.
+
+### Installer
+
+```bash
+# Recommandé, et le seul chemin vérifié : dans le dépôt relu.
+docker/openhands/install-skills.sh --repo ~/Projets/ai-agent-automation-test
+# puis commit + push dans CE dépôt — l'agent lit la branche, pas votre disque.
+
+# Alternative globale, NON vérifiée de bout en bout :
+docker/openhands/install-skills.sh --instance
+```
+
+Le premier écrit dans `<dépôt>/.agents/skills/`, l'emplacement documenté des
+« compétences de projet », résolu depuis l'espace de travail de la
+conversation. Le second écrit dans `/root/.openhands/microagents` du
+conteneur (`USER_SKILLS_DIR` côté serveur) — ce répertoire alimente à coup sûr
+la liste rendue par l'API des compétences, mais **que l'agent les reçoive
+dans son contexte n'a pas été constaté**, et il n'est pas persisté (le volume
+est monté sur `/.openhands`).
+
+### Le paramètre `suggestions`
+
+```json
+"mergeRequest": { "review": true, "suggestions": true }
+```
+
+Défaut `false` : rien ne change pour un dépôt existant. À `true`, une ligne
+est ajoutée au message ; la syntaxe et les pièges restent dans la compétence.
+À `false`, **rien n'est dit** — une consigne négative coûterait du contexte
+pour interdire un comportement qu'aucun modèle n'a eu spontanément.
+
+### AGENTS.md
+
+`openhands/AGENTS.example.md` porte la méthode de revue : lire les fichiers en
+entier, ne rien affirmer sur du code non lu, signaler des défauts et non des
+préférences, une remarque = un défaut = une ligne. À **copier dans le dépôt
+relu** et adapter — il n'est ni obligatoire ni généré.
 
 ## Où vivent les prompts et les compétences
 

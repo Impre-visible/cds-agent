@@ -34,6 +34,7 @@ function capabilities(
 ): MergeRequestCapabilities {
   return {
     review: false,
+    suggestions: false,
     writeTests: false,
     writeBusinessCode: false,
     pushToSourceBranch: false,
@@ -191,8 +192,13 @@ describe("buildMessage — ce que le daemon envoie à OpenHands", () => {
       "https://gitlab.example/x",
     );
     // Le message reste court par construction — c'est OpenHands qui explore.
+    // Plafond relevé de 1 500 à 2 500 avec l'ajout des consignes d'ancrage et
+    // de suggestions : ce sont des CONSIGNES (quelques lignes), pas du
+    // contexte. Le contexte standard qu'on refuse ici — diff numéroté, ticket
+    // lié, commentaires humains — se compte en dizaines de milliers de
+    // caractères, il ferait exploser ce plafond quel qu'il soit.
     assert.ok(
-      message.length < 1_500,
+      message.length < 2_500,
       `message de ${message.length} caractères : le contexte standard a dû se réintroduire`,
     );
   });
@@ -287,8 +293,13 @@ describe("publishingRules — signature et emplacement de la réponse", () => {
     assert.match(publishingRules(null), /Ne poste AUCUN message pour annoncer/);
   });
 
-  test("hors fil, rien n'est dit sur les discussions", () => {
-    assert.doesNotMatch(publishingRules(null), /discussions/);
+  test("hors fil, aucune consigne de réponse DANS un fil", () => {
+    // `discussions` apparaît désormais dans la consigne d'ancrage (c'est le
+    // point d'API des remarques de ligne) : on vérifie donc l'absence de la
+    // consigne de FIL, pas l'absence du mot.
+    const rules = publishingRules(null);
+    assert.doesNotMatch(rules, /FIL de discussion existant/);
+    assert.doesNotMatch(rules, /Réponds DANS ce fil/);
   });
 
   test("dans un fil, l'identifiant de discussion et la route sont donnés", () => {
@@ -359,5 +370,99 @@ describe("toThreadContext — quelles discussions sont de vrais fils", () => {
       notes: [note({ position: { new_path: "src/a.js", new_line: null } })],
     } as never);
     assert.equal(ctx?.location, "src/a.js");
+  });
+});
+
+describe("publishingRules — ancrage sur le diff", () => {
+  const anchored = capabilities({ review: true });
+
+  test("l'ancrage est une consigne isolée et IMPÉRATIVE, pas une préférence", () => {
+    // La formulation précédente (« sur la ligne concernée PLUTÔT QUE un
+    // commentaire général ») a été ignorée par 4 modèles sur 7 : 0 remarque
+    // ancrée sur 10, sur 16, sur 6. Une préférence enfouie dans un paragraphe
+    // ne s'applique pas.
+    const rules = publishingRules(null, anchored);
+    assert.match(rules, /ANCRE chaque remarque sur la LIGNE/);
+    assert.doesNotMatch(rules, /plutôt qu'un commentaire général/);
+  });
+
+  test("dit le critère d'échec, pas seulement la consigne", () => {
+    // Ce qui rend l'exigence vérifiable par le modèle lui-même : une remarque
+    // au niveau de la MR n'apparaît pas dans l'onglet Changes.
+    const rules = publishingRules(null, anchored);
+    assert.match(rules, /onglet Changes/);
+    assert.match(rules, /remarque ratée/);
+  });
+
+  test("donne l'ordre des replis, jamais le commentaire général en premier", () => {
+    const rules = publishingRules(null, anchored);
+    const ligne = rules.indexOf("ligne →");
+    assert.ok(ligne > -1, "l'ordre des replis doit être explicite");
+    assert.ok(rules.indexOf("position_type: file", ligne) > ligne);
+  });
+
+  test("renvoie à la compétence pour l'API, sans la recopier", () => {
+    // Le message doit rester court : il est renvoyé à CHAQUE relance.
+    const rules = publishingRules(null, anchored);
+    assert.match(rules, /gitlab-mr-review/);
+    assert.doesNotMatch(rules, /base_sha/);
+    assert.doesNotMatch(rules, /old_line/);
+  });
+});
+
+describe("publishingRules — blocs suggestion", () => {
+  test("capacité absente : RIEN n'est dit — une interdiction coûterait du contexte", () => {
+    const rules = publishingRules(null, capabilities({ review: true }));
+    assert.doesNotMatch(rules, /suggestion/i);
+  });
+
+  test("capacité accordée : la consigne apparaît", () => {
+    const rules = publishingRules(null, capabilities({ review: true, suggestions: true }));
+    assert.match(rules, /```suggestion```/);
+    assert.match(rules, /un clic/);
+  });
+
+  test("la syntaxe reste dans la compétence, pas dans le message", () => {
+    // Principe de cette branche : la méthode vit dans une compétence, le
+    // message reste court.
+    const rules = publishingRules(null, capabilities({ review: true, suggestions: true }));
+    assert.match(rules, /gitlab-mr-review/);
+    assert.doesNotMatch(rules, /start_line/);
+    assert.doesNotMatch(rules, /suggestion:-/);
+  });
+
+  test("sans capacités du tout (appel historique), aucun plantage et rien sur les suggestions", () => {
+    const rules = publishingRules(null);
+    assert.match(rules, /ANCRE chaque remarque/);
+    assert.doesNotMatch(rules, /suggestion/i);
+  });
+});
+
+describe("buildMessage — l'ancrage survit à une relance", () => {
+  test("une relance porte l'ancrage ET les suggestions, sans le préambule", () => {
+    // Une relance est le cas où le contexte est le plus long et où le modèle
+    // a le plus de chances d'avoir perdu la consigne de vue.
+    const followUp = buildMessage(
+      request({ text: "@bot et le problème 3 ?" }),
+      project(capabilities({ review: true, suggestions: true })),
+      "https://gitlab.example/x",
+      true,
+      null,
+    );
+    assert.match(followUp, /ANCRE chaque remarque sur la LIGNE/);
+    assert.match(followUp, /```suggestion```/);
+    assert.doesNotMatch(followUp, /Tu interviens sur la merge request/);
+  });
+
+  test("le message complet reste court malgré les nouvelles consignes", () => {
+    const message = buildMessage(
+      request(),
+      project(capabilities({ review: true, suggestions: true })),
+      "https://gitlab.example/x",
+    );
+    assert.ok(
+      message.length < 2_500,
+      `message de ${message.length} caractères — la méthode doit vivre dans les compétences`,
+    );
   });
 });

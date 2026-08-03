@@ -665,6 +665,9 @@ describe("iso-comportement avec l'ancienne configuration par variables d'environ
     const resolved = resolveProject(file, "groupe/depot-a", BASELINE)!;
     assert.deepEqual(resolved.capabilities.mergeRequest, {
       review: true,
+      // Non déclarée dans le fichier : résolue à false, donc aucun changement
+      // de comportement pour un projects.json antérieur à cette capacité.
+      suggestions: false,
       writeTests: true,
       writeBusinessCode: false,
       pushToSourceBranch: true,
@@ -743,5 +746,50 @@ describe("iso-comportement avec l'ancienne configuration par variables d'environ
     const b = resolveProject(file, "groupe/depot-b", BASELINE)!;
     assert.equal(b.docker.image, BASELINE.docker.image);
     assert.equal(b.commands.test, BASELINE.commands.test);
+  });
+});
+
+describe("mergeRequest.suggestions — corrections applicables en un clic", () => {
+  test("absente du fichier : résolue à false, aucun changement pour un dépôt existant", () => {
+    const file = parseProjectsFile({
+      projects: { "g/p": { capabilities: { mergeRequest: { review: true } } } },
+    });
+    assert.equal(
+      resolveProject(file, "g/p", BASELINE)!.capabilities.mergeRequest.suggestions,
+      false,
+    );
+  });
+
+  test("déclarée à true, elle est résolue à true", () => {
+    const file = parseProjectsFile({
+      projects: {
+        "g/p": { capabilities: { mergeRequest: { review: true, suggestions: true } } },
+      },
+    });
+    assert.equal(
+      resolveProject(file, "g/p", BASELINE)!.capabilities.mergeRequest.suggestions,
+      true,
+    );
+  });
+
+  test("héritée de defaults comme les autres capacités", () => {
+    const file = parseProjectsFile({
+      defaults: { capabilities: { mergeRequest: { suggestions: true } } },
+      projects: { "g/p": { capabilities: { mergeRequest: { review: true } } } },
+    });
+    assert.equal(
+      resolveProject(file, "g/p", BASELINE)!.capabilities.mergeRequest.suggestions,
+      true,
+    );
+  });
+
+  test("une valeur non booléenne est rejetée au chargement, comme les autres", () => {
+    assert.throws(
+      () =>
+        parseProjectsFile({
+          projects: { "g/p": { capabilities: { mergeRequest: { suggestions: "oui" } } } },
+        }),
+      /suggestions/,
+    );
   });
 });

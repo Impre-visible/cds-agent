@@ -8,7 +8,7 @@
         "writeBusinessCode": false
       },
       "mergeRequest": {
-        "review": true,
+        "review": true, "suggestions": false,
         "writeTests": false,
         "writeBusinessCode": false,
         "pushToSourceBranch": false

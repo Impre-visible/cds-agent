@@ -114,7 +114,10 @@ export function permissionStatement(capabilities: MergeRequestCapabilities): str
  *
  * Exportée pour être testée unitairement.
  */
-export function publishingRules(thread: ThreadContext | null): string {
+export function publishingRules(
+  thread: ThreadContext | null,
+  capabilities?: MergeRequestCapabilities,
+): string {
   const lines = [
     `- Signe tes messages « ${config.botUsername} ». Ne signe JAMAIS « OpenHands » ` +
       `ni du nom d'un modèle : le compte GitLab qui publie est ${config.botUsername}, ` +
@@ -130,6 +133,46 @@ export function publishingRules(thread: ThreadContext | null): string {
         `. Réponds DANS ce fil, pas en nouveau commentaire au niveau de la merge request : ` +
         `\`POST /projects/:id/merge_requests/:iid/discussions/${thread.discussionId}/notes\`. ` +
         `Un nouveau commentaire détacherait ta réponse de la question.`,
+    );
+  }
+
+  // L'ANCRAGE, en consigne isolée et impérative.
+  //
+  // Une version de cette exigence existait déjà, noyée en fin de paragraphe
+  // et formulée comme une préférence (« une remarque sur la ligne concernée
+  // PLUTÔT QUE un commentaire général »). Mesuré sur sept modèles et sept
+  // merge requests : quatre l'ont ignorée intégralement — 0 remarque ancrée
+  // sur 10, sur 16, sur 6. Et c'est binaire, un modèle ancre tout ou rien.
+  //
+  // Une remarque non ancrée n'apparaît pas dans l'onglet Changes et oblige le
+  // lecteur à retrouver la ligne depuis un numéro écrit en prose — numéro qui
+  // s'est révélé faux au moins une fois pendant la mesure. D'où la
+  // reformulation : un impératif, sur sa propre ligne, avec le critère
+  // d'échec explicite.
+  //
+  // Le COMMENT (l'API, les SHA, les règles old_line/new_line) reste dans la
+  // compétence `gitlab-mr-review` : le recopier ici alourdirait chaque
+  // conversation, relances comprises, pour une information que la compétence
+  // porte mieux.
+  lines.push(
+    "- ANCRE chaque remarque sur la LIGNE du diff qu'elle concerne " +
+      "(`POST …/discussions` avec un objet `position`). Une remarque au niveau de la " +
+      "merge request n'apparaît pas dans l'onglet Changes : c'est une remarque ratée, " +
+      "quelle qu'en soit la qualité. Replis, dans cet ordre et seulement si l'API " +
+      "refuse : ligne → fichier (`position_type: file`) → commentaire général en citant " +
+      "fichier et ligne. Voir la compétence `gitlab-mr-review`.",
+  );
+
+  // Rien n'est dit quand la capacité n'est pas accordée : une consigne
+  // négative (« n'utilise pas de suggestion ») coûterait du contexte pour
+  // interdire un comportement que le modèle n'a de toute façon pas eu
+  // spontanément une seule fois sur les sept mesures.
+  if (capabilities?.suggestions) {
+    lines.push(
+      "- Quand la correction tient en quelques lignes, joins un bloc " +
+        "```suggestion``` à la remarque, applicable en un clic. Vérifie ce qu'il " +
+        "remplace AVANT de le poster — la compétence `gitlab-mr-review` décrit la " +
+        "syntaxe et les deux façons de corrompre le fichier.",
     );
   }
 
@@ -192,7 +235,7 @@ export function buildMessage(
       permissionStatement(project.capabilities.mergeRequest),
       "",
       "Où et comment publier :",
-      publishingRules(thread),
+      publishingRules(thread, project.capabilities.mergeRequest),
     ].join("\n");
   }
 
@@ -211,10 +254,7 @@ export function buildMessage(
     permissionStatement(project.capabilities.mergeRequest),
     "",
     "Où et comment publier :",
-    "- Publie toi-même le résultat sur GitLab, à l'endroit le plus précis possible : " +
-      "une remarque de revue sur la LIGNE concernée du diff plutôt qu'un commentaire " +
-      "général, qui oblige le lecteur à retrouver de quoi tu parles.",
-    publishingRules(thread),
+    publishingRules(thread, project.capabilities.mergeRequest),
   ].join("\n");
 }
 

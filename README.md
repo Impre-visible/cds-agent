@@ -232,6 +232,12 @@ lui sont **énoncées dans le prompt** (`permissionStatement`,
 `src/tasks/openhands.ts`) et rien de plus. Un agent qui passe outre n'est
 arrêté par personne.
 
+`suggestions` autorise les blocs `suggestion` — des corrections applicables en
+un clic, attachées à la remarque qui les motive. Défaut `false` : ce n'est pas
+une capacité d'écriture (c'est un humain qui applique), mais ça met un bouton
+« appliquer » sous un texte écrit par un modèle, et ce choix revient au
+mainteneur. Voir [`docs/openhands.md`](./docs/openhands.md).
+
 `commands` et `docker.image` ne sont plus lus du tout : c'est
 `.openhands/setup.sh` du dépôt relu qui installe, et OpenHands qui choisit
 l'image de son bac à sable. Ils restent **acceptés** dans le fichier, sans

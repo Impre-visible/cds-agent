@@ -32,6 +32,7 @@ const BASE_CAPABILITIES: ResolvedProject["capabilities"] = {
   issue: { review: false, createMergeRequest: false, writeTests: false, writeBusinessCode: false },
   mergeRequest: {
     review: true,
+    suggestions: false,
     writeTests: false,
     writeBusinessCode: false,
     pushToSourceBranch: false,

@@ -90,6 +90,23 @@ export interface MergeRequestCapabilities {
    */
   pushToSourceBranch: boolean;
   /**
+   * Autorise les blocs `suggestion` — des corrections applicables en un clic
+   * depuis l'interface GitLab, attachées à la remarque qui les motive.
+   *
+   * Défaut `false` : un dépôt existant ne change pas de comportement. Ce
+   * n'est pas une capacité d'écriture (rien n'est poussé ; c'est un humain
+   * qui applique, ou non), mais ça met un bouton « appliquer » sous un texte
+   * écrit par un modèle — le mettre par défaut serait décider à la place du
+   * mainteneur.
+   *
+   * À `true`, une ligne est ajoutée au message envoyé à l'agent. La SYNTAXE
+   * et les pièges (ce qu'un bloc remplace exactement, comment ne pas
+   * dupliquer ou effacer du code) restent dans la compétence
+   * `gitlab-mr-review` : c'est le principe de cette branche, le message reste
+   * court et la méthode vit dans une compétence.
+   */
+  suggestions: boolean;
+  /**
    * Motifs glob ("**" et "*" seulement) élargissant PRÉCISÉMENT l'accès en
    * écriture à un sous-ensemble du dépôt,
    * en plus des chemins de test — l'entre-deux entre "writeTests" seul
@@ -177,6 +194,7 @@ const ISSUE_CAPABILITY_KEYS = [
 
 const MERGE_REQUEST_CAPABILITY_KEYS = [
   "review",
+  "suggestions",
   "writeTests",
   "writeBusinessCode",
   "pushToSourceBranch",
@@ -211,6 +229,7 @@ const BASE_ISSUE_CAPABILITIES: IssueCapabilities = {
 
 const BASE_MERGE_REQUEST_CAPABILITIES: MergeRequestCapabilities = {
   review: false,
+  suggestions: false,
   writeTests: false,
   writeBusinessCode: false,
   pushToSourceBranch: false,
