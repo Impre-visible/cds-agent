@@ -1,5 +1,7 @@
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { CompletionOutcome } from "../../src/openhands/client.ts";
 import type { MergeRequestCapabilities, ResolvedProject } from "../../src/projects.ts";
 import type { AgentRequest } from "../../src/types.ts";
@@ -465,4 +467,54 @@ describe("buildMessage — l'ancrage survit à une relance", () => {
       `message de ${message.length} caractères — la méthode doit vivre dans les compétences`,
     );
   });
+});
+
+describe("buildMessage — les compétences maison peuvent se déclencher", () => {
+  // Une compétence à déclencheurs n'est chargée EN ENTIER que si l'un de ses
+  // mots-clés apparaît dans le message. Ce bloc lit les déclencheurs
+  // RÉELLEMENT déclarés dans les SKILL.md et vérifie qu'au moins un atteint
+  // le message : sans ça, les deux fichiers dérivent en silence et la
+  // compétence reste lettre morte — c'est exactement ce qui était arrivé à
+  // `gitlab-conversations`, livrée mais jamais déclenchable.
+  function triggersOf(skill: string): string[] {
+    const source = readFileSync(
+      join(import.meta.dirname, "../../openhands/skills", skill, "SKILL.md"),
+      "utf8",
+    );
+    const block = /^triggers:\n((?:- .*\n)+)/m.exec(source);
+    assert.ok(block, `${skill} : aucun bloc triggers dans le frontmatter`);
+    return block![1]!.split("\n").filter(Boolean).map((l) => l.replace(/^- /, "").trim());
+  }
+
+  for (const skill of ["gitlab-mr-review", "gitlab-conversations"]) {
+    test(`${skill} : au moins un déclencheur atteint le message initial`, () => {
+      const message = buildMessage(
+        request(),
+        project(capabilities({ review: true })),
+        "https://gitlab.example/x",
+      ).toLowerCase();
+      const triggers = triggersOf(skill);
+      assert.ok(
+        triggers.some((t) => message.includes(t.toLowerCase())),
+        `aucun de [${triggers.join(", ")}] dans le message : la compétence ne se chargera pas`,
+      );
+    });
+
+    test(`${skill} : idem sur une RELANCE`, () => {
+      // La relance est justement le moment où l'on répond dans un fil, donc
+      // celui où gitlab-conversations compte le plus.
+      const message = buildMessage(
+        request(),
+        project(capabilities({ review: true })),
+        "https://gitlab.example/x",
+        true,
+        { discussionId: "d1", location: null },
+      ).toLowerCase();
+      const triggers = triggersOf(skill);
+      assert.ok(
+        triggers.some((t) => message.includes(t.toLowerCase())),
+        `aucun de [${triggers.join(", ")}] dans la relance`,
+      );
+    });
+  }
 });

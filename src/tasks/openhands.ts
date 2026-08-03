@@ -119,6 +119,21 @@ export function publishingRules(
   capabilities?: MergeRequestCapabilities,
 ): string {
   const lines = [
+    // NOMMER LES COMPÉTENCES N'EST PAS DÉCORATIF. Une compétence à
+    // déclencheurs n'est chargée EN ENTIER que si l'un de ses mots-clés
+    // apparaît dans le message (« These skills are only loaded when a prompt
+    // includes one of the trigger words », doc amont). Sans cette ligne,
+    // `gitlab-conversations` ne se déclenchait jamais : aucun de ses
+    // déclencheurs n'apparaissait nulle part — la compétence était livrée
+    // dans le catalogue et restait lettre morte.
+    //
+    // Le CATALOGUE, lui, est déjà là : le serveur transmet à chaque
+    // conversation les ~55 compétences avec leur nom, leur description et
+    // leurs déclencheurs. Les relister ici n'apporterait rien ; les NOMMER
+    // change le mode de chargement, de « le modèle peut l'invoquer » à
+    // « le contenu est injecté ».
+    `- Applique les compétences \`gitlab-mr-review\` (où poster une remarque) et ` +
+      `\`gitlab-conversations\` (comment répondre sans casser le fil).`,
     `- Signe tes messages « ${config.botUsername} ». Ne signe JAMAIS « OpenHands » ` +
       `ni du nom d'un modèle : le compte GitLab qui publie est ${config.botUsername}, ` +
       `et c'est le seul nom qu'un lecteur puisse retrouver ou mentionner.`,

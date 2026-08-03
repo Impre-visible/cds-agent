@@ -2,6 +2,7 @@
 name: gitlab-conversations
 description: How to reply on a GitLab merge request without breaking the conversation — reply inside the thread you were asked in, never open a parallel note, never post meta-announcements. Use whenever answering a question or following up on a GitLab merge request or issue.
 triggers:
+- gitlab-conversations
 - gitlab conversation
 - reply in thread
 - follow-up on merge request

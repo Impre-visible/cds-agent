@@ -392,6 +392,38 @@ la liste rendue par l'API des compétences, mais **que l'agent les reçoive
 dans son contexte n'a pas été constaté**, et il n'est pas persisté (le volume
 est monté sur `/.openhands`).
 
+### Nommer les compétences, plutôt que les lister
+
+Question naturelle : faut-il lister les compétences disponibles dans le prompt
+système ? **Non — c'est déjà fait, et ça ne suffit pas.**
+
+Le serveur transmet à chaque conversation les ~55 compétences avec leur nom,
+leur description et leurs déclencheurs. Le catalogue est donc déjà dans le
+contexte de l'agent ; le relister serait de la duplication pure.
+
+Ce qui change vraiment le comportement, c'est le **mode de chargement**. Une
+compétence à déclencheurs n'est chargée **en entier** que si l'un de ses
+mots-clés apparaît dans le message : « These skills are only loaded when a
+prompt includes one of the trigger words » (doc amont). Sans mot-clé, le
+modèle voit une ligne de catalogue et doit décider d'invoquer ; avec, le
+contenu complet est injecté sans qu'il ait à choisir.
+
+Le message nomme donc explicitement les deux compétences maison. Ce n'est pas
+décoratif : `gitlab-conversations` ne se déclenchait **jamais** — aucun de ses
+déclencheurs n'apparaissait nulle part, elle était livrée dans le catalogue et
+restait lettre morte.
+
+Un test lit les déclencheurs réellement déclarés dans les `SKILL.md` et vérifie
+qu'au moins un atteint le message, initial **et** relance. Sans lui, les deux
+fichiers dérivent en silence et la compétence redevient inerte sans que rien ne
+le signale.
+
+`system_message_suffix` existe sur `AppConversationStartRequest` et
+permettrait, en théorie, d'écrire directement dans le prompt système. Je ne
+l'ai **pas** câblé : je n'ai pas trouvé où le serveur le consomme, et poser une
+consigne dans un champ dont on ignore s'il est lu est le contraire de ce que
+fait cette branche.
+
 ### Le paramètre `suggestions`
 
 ```json
