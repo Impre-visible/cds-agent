@@ -221,6 +221,19 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
   // voir LEGACY_ENV_MIGRATIONS ci-dessus.
   assertNoLegacyEnvVars(env);
 
+  // BENCH_ACCEPT_BOT_NOTES retire le garde-fou anti-boucle. Le seul frein qui
+  // reste alors est le quota de tâches : on refuse donc la combinaison sans
+  // lui, plutôt que de laisser un dépôt réel s'emballer parce qu'un drapeau
+  // de banc de mesure a traîné dans un .env.
+  if (env.BENCH_ACCEPT_BOT_NOTES === "1" && !env.CDS_MAX_TASKS) {
+    throw new Error(
+      "BENCH_ACCEPT_BOT_NOTES=1 retire le garde-fou anti-boucle (le bot peut alors " +
+        "se répondre à lui-même) et exige donc CDS_MAX_TASKS pour borner le nombre " +
+        "de tâches. Posez CDS_MAX_TASKS=1 — c'est ce que fait scripts/bench.sh — ou " +
+        "retirez BENCH_ACCEPT_BOT_NOTES. Voir .env",
+    );
+  }
+
   return {
     // -----------------------------------------------------------------------
     // GitLab — connexion et identité du bot
@@ -387,6 +400,27 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
      * voir ShutdownController.requestStop.
      */
     maxTasks: finiteNumber(env, "CDS_MAX_TASKS", 0, { min: 0, max: 1_000 }),
+
+    /**
+     * Accepte les notes écrites par le BOT LUI-MÊME comme déclencheur.
+     *
+     * Normalement rejetées (daemon/request.ts) : c'est le garde-fou
+     * anti-boucle du projet. Sans lui, une note du bot qui mentionne le bot
+     * crée un to-do, qui crée une tâche, qui publie une note… Le seul autre
+     * frein serait le journal d'idempotence, et il ne freine rien ici : chaque
+     * publication porte un identifiant de note NEUF, donc une clé neuve.
+     *
+     * Pourquoi l'ouvrir quand même : le banc de mesure doit poster la demande
+     * de revue lui-même. Sans ce drapeau il lui faut un SECOND jeton, celui
+     * d'un compte humain — une pièce de configuration de plus, à créer et à
+     * garder à jour, pour une opération qui n'a lieu que sur un dépôt de test.
+     *
+     * COUPLÉ À CDS_MAX_TASKS, ET FAIL-CLOSED (voir plus bas) : le daemon
+     * refuse de démarrer avec ce drapeau si aucun quota de tâches n'est posé.
+     * Une boucle bornée à N tâches n'est pas une boucle ; une boucle non
+     * bornée sur un dépôt réel est un incident.
+     */
+    benchAcceptBotNotes: env.BENCH_ACCEPT_BOT_NOTES === "1",
 
     healthEnabled: env.HEALTH_ENABLED !== "0",
     // min: 0 et non 1 — le port 0 demande au noyau un port libre au hasard,

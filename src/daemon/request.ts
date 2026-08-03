@@ -103,7 +103,16 @@ export async function buildRequest(
     // Relecture de la note : le body du to-do peut être tronqué.
     const note = await gitlab.getNote(projectId, kind, iid, noteId);
     if (note.system) return { ok: false, reason: "note système" };
-    if (note.author.id === bot.id)
+    // Garde-fou anti-boucle : sans lui, une note du bot qui mentionne le bot
+    // crée un to-do, donc une tâche, donc une note… Le journal d'idempotence
+    // ne l'arrête pas — chaque publication a un identifiant de note neuf,
+    // donc une clé neuve.
+    //
+    // BENCH_ACCEPT_BOT_NOTES le lève pour que le banc de mesure puisse poster
+    // sa demande avec le jeton du bot, sans second jeton à gérer. buildConfig
+    // refuse ce drapeau sans CDS_MAX_TASKS : la boucle reste bornée par
+    // construction (voir config.ts).
+    if (note.author.id === bot.id && !config.benchAcceptBotNotes)
       return { ok: false, reason: "note écrite par le bot lui-même" };
     text = note.body;
     requester = note.author.username;

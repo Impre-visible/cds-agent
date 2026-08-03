@@ -6,12 +6,15 @@ Deux sous-commandes, appelées par scripts/bench.sh :
   prepare <branche>   remet la MR à zéro et poste la demande de revue
   collect  <branche>  compte ce que le bot a réellement publié
 
-POURQUOI DEUX JETONS. Le daemon rejette les notes écrites par le bot
-lui-même (`note.author.id === bot.id`, voir src/daemon/request.ts) : un
-garde-fou anti-boucle sans lequel le bot se répondrait à l'infini. Poster la
-demande avec GITLAB_TOKEN ne créerait donc aucune tâche. Il faut le jeton d'un
-compte HUMAIN, autorisé sur le dépôt dans projects.json — d'où
-BENCH_GITLAB_TOKEN, distinct et jamais utilisé par le daemon.
+UN SEUL JETON SUFFIT. Le daemon rejette normalement les notes écrites par le
+bot lui-même (`note.author.id === bot.id`, src/daemon/request.ts) : garde-fou
+anti-boucle. scripts/bench.sh lance le daemon avec BENCH_ACCEPT_BOT_NOTES=1,
+qui le lève — et que buildConfig refuse sans CDS_MAX_TASKS, donc la boucle
+reste bornée. La demande peut donc être postée avec GITLAB_TOKEN.
+
+BENCH_GITLAB_TOKEN reste accepté si vous préférez un compte humain distinct
+(plus proche du réel : les remarques ne sont pas déclenchées par leur propre
+auteur). Il doit alors être mainteneur pour effacer les notes du bot.
 
 CE QUE `prepare` EFFACE, ET POURQUOI. Toutes les notes non système de la MR :
 les demandes des runs précédents, et surtout les remarques du modèle
@@ -32,7 +35,11 @@ from pathlib import Path
 GITLAB_URL = os.environ.get("GITLAB_URL", "https://gitlab.com").rstrip("/")
 BOT = os.environ.get("BOT_USERNAME", "")
 BOT_TOKEN = os.environ.get("GITLAB_TOKEN", "")
-HUMAN_TOKEN = os.environ.get("BENCH_GITLAB_TOKEN", "")
+# Le jeton du bot suffit : le daemon est lancé avec BENCH_ACCEPT_BOT_NOTES=1,
+# qui lève son garde-fou anti-boucle le temps du banc (voir bench.sh).
+# BENCH_GITLAB_TOKEN reste accepté pour qui préfère un compte humain distinct —
+# c'est alors LUI qui doit être mainteneur pour effacer les notes du bot.
+HUMAN_TOKEN = os.environ.get("BENCH_GITLAB_TOKEN") or BOT_TOKEN
 STATE_FILE = os.environ.get("STATE_FILE", "./state/processed.jsonl")
 REQUEST_TEXT = os.environ.get(
     "BENCH_REQUEST", "@{bot} Review ca s'il te plait."
@@ -176,12 +183,7 @@ def main():
 
     if command == "prepare":
         if not HUMAN_TOKEN:
-            sys.exit(
-                "BENCH_GITLAB_TOKEN manquant.\n"
-                "  Le daemon ignore les notes écrites par le bot lui-même : la demande\n"
-                "  de revue doit venir d'un compte humain, autorisé sur le dépôt dans\n"
-                "  projects.json. Mettez-y SON jeton, pas celui du bot."
-            )
+            sys.exit("aucun jeton : renseignez GITLAB_TOKEN (ou BENCH_GITLAB_TOKEN)")
         iid = find_merge_request(project, branch)
         removed = wipe(project, iid)
         forgotten = forget_conversation(project, iid)

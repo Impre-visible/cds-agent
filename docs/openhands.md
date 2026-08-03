@@ -819,16 +819,25 @@ peut être rejouée** : le nettoyage retire la revue du modèle précédent, qui
 sinon serait lue par le suivant. C'est ce qui imposait jusqu'ici une merge
 request par modèle.
 
-### Les deux jetons
+### Un seul jeton, et le garde-fou qu'il faut lever
 
-`BENCH_GITLAB_TOKEN` est obligatoire, et ce n'est pas un confort. Le daemon
-rejette les notes écrites par le bot lui-même (`note.author.id === bot.id`,
-`src/daemon/request.ts`) : un garde-fou anti-boucle sans lequel il se
-répondrait à l'infini. Une demande postée avec `GITLAB_TOKEN` ne créerait donc
-aucune tâche.
+Le daemon rejette les notes écrites par le bot lui-même
+(`note.author.id === bot.id`, `src/daemon/request.ts`) : garde-fou anti-boucle
+sans lequel une note du bot qui mentionne le bot crée un to-do, donc une tâche,
+donc une note. Le journal d'idempotence n'y change rien — chaque publication
+porte un identifiant de note neuf, donc une clé neuve.
 
-Il faut le jeton d'un **compte humain**, autorisé sur le dépôt dans
-`projects.json`, et **mainteneur** pour pouvoir effacer les notes du bot.
+`scripts/bench.sh` lance donc le daemon avec **`BENCH_ACCEPT_BOT_NOTES=1`**,
+qui lève ce garde-fou. `GITLAB_TOKEN` suffit alors pour poster la demande.
+
+**Le drapeau est fail-closed** : `buildConfig` refuse de démarrer s'il est posé
+sans `CDS_MAX_TASKS`. Une boucle bornée à N tâches n'est pas une boucle ; une
+boucle non bornée sur un dépôt réel est un incident. Le daemon l'annonce en
+`warn` à chaque démarrage, en rappelant la borne active.
+
+`BENCH_GITLAB_TOKEN` reste accepté si vous préférez un compte humain distinct —
+plus proche du réel, où une remarque n'est pas déclenchée par son propre
+auteur. Il doit alors être **mainteneur** pour effacer les notes du bot.
 
 ### Ce que le nettoyage efface
 

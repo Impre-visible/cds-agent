@@ -14,18 +14,17 @@
 #   scripts/bench.sh -n -f bench-models.txt      # à blanc : liste et sort
 #
 # ---------------------------------------------------------------------------
-# LES DEUX JETONS — LIRE AVANT DE LANCER
+# LE JETON — UN SEUL SUFFIT
 # ---------------------------------------------------------------------------
 #
-# GITLAB_TOKEN        le bot. Sert au daemon, et ici à COMPTER ce qu'il publie.
-# BENCH_GITLAB_TOKEN  un compte HUMAIN, autorisé sur le dépôt dans
-#                     projects.json, et mainteneur pour pouvoir effacer les
+# GITLAB_TOKEN        suffit. Le daemon est lancé ici avec
+#                     BENCH_ACCEPT_BOT_NOTES=1, qui lève son garde-fou
+#                     anti-boucle — et que buildConfig refuse sans
+#                     CDS_MAX_TASKS, donc la boucle reste bornée.
+# BENCH_GITLAB_TOKEN  facultatif : un compte humain distinct, plus proche du
+#                     réel (les remarques ne sont pas déclenchées par leur
+#                     propre auteur). Doit être mainteneur pour effacer les
 #                     notes du bot.
-#
-# Le second n'est pas un confort : le daemon rejette les notes écrites par le
-# bot lui-même (garde-fou anti-boucle, src/daemon/request.ts). Une demande
-# postée avec le jeton du bot ne créerait aucune tâche — le banc attendrait
-# son chien de garde, ligne après ligne.
 #
 # ---------------------------------------------------------------------------
 # FORMAT DU FICHIER
@@ -99,7 +98,10 @@ for i in "${!models[@]}"; do
     continue
   fi
 
-  CDS_MAX_TASKS=1 LOG_PRETTY=1 AGENT_MODEL="$model" \
+  # BENCH_ACCEPT_BOT_NOTES : la demande est postée avec le jeton du bot, il
+  # faut donc que le daemon accepte ses propres notes. Borné par
+  # CDS_MAX_TASKS=1, sans quoi buildConfig refuse de démarrer.
+  CDS_MAX_TASKS=1 BENCH_ACCEPT_BOT_NOTES=1 LOG_PRETTY=1 AGENT_MODEL="$model" \
     npx tsx src/daemon/index.ts > "$log" 2>&1 &
   daemon=$!
 

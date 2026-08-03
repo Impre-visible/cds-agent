@@ -543,6 +543,14 @@ async function checkOpenHands(): Promise<void> {
       "qu'une consigne dans le prompt une fois qu'elle l'est — voir docs/openhands.md.",
   );
 
+  if (config.benchAcceptBotNotes) {
+    log.warn(
+      `⚠ BENCH_ACCEPT_BOT_NOTES=1 : les notes écrites par @${config.botUsername} lui-même ` +
+        `déclenchent des tâches. Le garde-fou anti-boucle est LEVÉ — seul CDS_MAX_TASKS=` +
+        `${config.maxTasks} borne l'emballement. Mode banc de mesure, jamais l'exploitation.`,
+    );
+  }
+
   if (!config.openhandsApiKey) {
     // Informatif, pas une alerte : c'est le réglage recommandé en local,
     // parce que l'interface web d'OpenHands devient inutilisable dès qu'une

@@ -37,9 +37,5 @@ openrouter/moonshotai/kimi-k3                   bench/kimi-k3                   
 # Pas des candidats d'exploitation : une borne haute. Si un modèle à 0,61 $/M
 # en trouve autant, c'est lui qu'on garde.
 #
-# DÉCOMMENTEZ APRÈS AVOIR CRÉÉ LES BRANCHES ET LEURS MERGE REQUESTS — elles
-# n'existent pas au 3 août 2026, et le banc s'arrêterait sur la ligne :
-#   git switch -c bench/claude-sonnet-5 <base>  && git push -u origin HEAD
-#   puis ouvrir la MR vers la branche cible habituelle.
-# openrouter/anthropic/claude-sonnet-5          bench/claude-sonnet-5                # 2.00 / 10.00
-# openrouter/anthropic/claude-opus-5            bench/claude-opus-5                  # 5.00 / 25.00
+openrouter/anthropic/claude-sonnet-5            bench/claude-sonnet-5                # 2.00 / 10.00
+openrouter/anthropic/claude-opus-5              bench/claude-opus-5                  # 5.00 / 25.00

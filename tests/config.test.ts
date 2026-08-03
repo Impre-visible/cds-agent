@@ -353,3 +353,40 @@ describe("buildConfig — CDS_MAX_TASKS (banc de mesure)", () => {
     );
   });
 });
+
+describe("buildConfig — BENCH_ACCEPT_BOT_NOTES (garde-fou anti-boucle levé)", () => {
+  test("absent : le garde-fou tient, comportement d'exploitation", () => {
+    assert.equal(buildConfig(baseEnv()).benchAcceptBotNotes, false);
+  });
+
+  test("posé SANS quota de tâches : le daemon refuse de démarrer", () => {
+    // Sans CDS_MAX_TASKS, rien ne borne la boucle : le bot publie une note,
+    // qui crée un to-do, qui crée une tâche, qui publie une note… Le journal
+    // d'idempotence n'aide pas — chaque publication a un identifiant neuf.
+    assert.throws(
+      () => buildConfig(baseEnv({ BENCH_ACCEPT_BOT_NOTES: "1" })),
+      /CDS_MAX_TASKS/,
+    );
+  });
+
+  test("posé AVEC un quota : accepté, la boucle est bornée par construction", () => {
+    const config = buildConfig(
+      baseEnv({ BENCH_ACCEPT_BOT_NOTES: "1", CDS_MAX_TASKS: "1" }),
+    );
+    assert.equal(config.benchAcceptBotNotes, true);
+    assert.equal(config.maxTasks, 1);
+  });
+
+  test("toute valeur autre que « 1 » laisse le garde-fou en place", () => {
+    // Pas de « true », pas de « yes » : un opt-in de ce niveau ne doit pas
+    // s'activer par approximation.
+    for (const value of ["0", "true", "oui", ""]) {
+      assert.equal(
+        buildConfig(baseEnv({ BENCH_ACCEPT_BOT_NOTES: value, CDS_MAX_TASKS: "1" }))
+          .benchAcceptBotNotes,
+        false,
+        `BENCH_ACCEPT_BOT_NOTES=${JSON.stringify(value)} ne doit RIEN lever`,
+      );
+    }
+  });
+});
