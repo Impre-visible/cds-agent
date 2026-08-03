@@ -8,7 +8,8 @@ import { authorize } from "./authorize.ts";
 import { ProjectsRegistry, type ProjectsBaseline } from "../projects.ts";
 import { TaskQueue } from "./queue.ts";
 import { ShutdownController, drain } from "./shutdown.ts";
-import { runOpenHandsTask } from "../tasks/openhands.ts";
+import { conversations, runOpenHandsTask } from "../tasks/openhands.ts";
+import { applyModel } from "../openhands/model.ts";
 import { OpenHandsClient } from "../openhands/client.ts";
 import { SeenTracker } from "./seen.ts";
 import { bootstrapIfFresh } from "./bootstrap.ts";
@@ -541,6 +542,27 @@ async function checkOpenHands(): Promise<void> {
     });
     const status = await client.health();
     log.info(`OpenHands répond (GET /health → ${status}).`);
+
+    // Le modèle vit dans les réglages de l'instance, pas dans son
+    // environnement : sans cet alignement, changer AGENT_MODEL dans .env
+    // n'aurait aucun effet ici alors qu'il en a un sur `hardening` — et une
+    // campagne multi-modèles finirait par comparer deux modèles différents
+    // sans que rien ne le signale. Voir openhands/model.ts.
+    if (config.agentModel) {
+      await applyModel(
+        {
+          model: config.agentModel,
+          baseUrl: config.inferenceUrl,
+          apiKey: config.inferenceApiKey,
+        },
+        {
+          getLlmSettings: () => client.getLlmSettings(),
+          setLlmSettings: (desired) => client.setLlmSettings(desired),
+          forgetConversations: () => conversations.clear(),
+          log: (level, message) => log[level](message),
+        },
+      );
+    }
   } catch (error) {
     log.warn(
       `⚠ OpenHands injoignable au démarrage (${(error as Error).message}) — le daemon démarre quand ` +

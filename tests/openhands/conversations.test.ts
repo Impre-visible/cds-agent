@@ -137,3 +137,22 @@ describe("ConversationStore", () => {
     assert.equal(existsSync(nested), true);
   });
 });
+
+describe("ConversationStore.clear — changement de modèle", () => {
+  test("vide tout et rend le compte, sur disque aussi", () => {
+    // Appelé quand AGENT_MODEL change : une conversation garde le modèle avec
+    // lequel elle a démarré, la réutiliser remesurerait l'ancien.
+    const store = new ConversationStore(path);
+    store.set("g/p!5", { conversationId: "c5", sandboxId: null });
+    store.set("g/p!6", { conversationId: "c6", sandboxId: null });
+
+    assert.equal(store.clear(), 2);
+    assert.equal(store.get("g/p!5"), null);
+    assert.equal(new ConversationStore(path).get("g/p!6"), null);
+  });
+
+  test("sur un registre déjà vide : rend 0 et n'écrit rien", () => {
+    assert.equal(new ConversationStore(path).clear(), 0);
+    assert.equal(existsSync(path), false);
+  });
+});

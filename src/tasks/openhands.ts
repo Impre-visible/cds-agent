@@ -390,7 +390,7 @@ async function findDiscussion(request: AgentRequest): Promise<ThreadContext | nu
  * d'environnement de plus : même raisonnement que le fichier de verrou (voir
  * daemon/index.ts), ce chemin n'a jamais besoin d'être ajusté séparément.
  */
-const conversations = new ConversationStore(
+export const conversations = new ConversationStore(
   join(dirname(config.stateFile), "conversations.json"),
 );
 

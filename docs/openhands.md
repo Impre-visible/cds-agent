@@ -381,22 +381,62 @@ exactement le genre de chose à vérifier au montage plutôt qu'à supposer.
 
 ## Changer de modèle
 
-**Modifier le `.env` ne suffit pas, et ne fait rien.** C'est le piège le plus
-coûteux de cette branche, parce qu'il est silencieux.
+### En pratique : deux lignes
+
+```bash
+sed -i '' 's|^AGENT_MODEL=.*|AGENT_MODEL=openrouter/anthropic/claude-sonnet-4|' .env
+npm run dev
+```
+
+C'est tout. Le daemon aligne l'instance OpenHands sur `AGENT_MODEL` à chaque
+démarrage, et le dit :
+
+```
+Modèle OpenHands changé — modèle : openrouter/xiaomi/mimo-v2.5 → openrouter/anthropic/claude-sonnet-4.
+1 conversation(s) oubliée(s) : les merge requests déjà touchées repartiront sur une
+conversation neuve, sans quoi elles auraient continué avec l'ancien modèle.
+```
+
+Au démarrage suivant, sans changement : `Modèle OpenHands : déjà aligné sur …`
+— aucune écriture, donc aucun risque d'écraser un réglage fait à la main dans
+l'interface entre deux campagnes.
+
+### Pourquoi le daemon doit s'en mêler
+
+Parce que `.env` **seul** ne fait rien, et silencieusement.
 
 Vérifié en le testant : instance relancée avec `LLM_MODEL=openai/sonde-de-test`
 dans son environnement, `GET /api/v1/settings` continuait d'annoncer le modèle
 précédent — et c'est celui-là que l'agent utilise. Aucun code de l'application
 server V1 ne lit `LLM_MODEL` ni `LLM_API_KEY` ; `LLM_BASE_URL` n'y est lu que
-comme repli pour `OPENHANDS_PROVIDER_BASE_URL`, qui est autre chose.
+comme repli pour `OPENHANDS_PROVIDER_BASE_URL`, qui est autre chose. Le modèle
+vit dans les **réglages de l'instance** (`agent_settings.llm.*`), persistés
+dans le volume `openhands-state`.
 
-Le modèle vit dans les **réglages de l'instance** (`agent_settings.llm.*`),
-persistés dans le volume `openhands-state`. Deux façons d'en changer :
+Sans cet alignement, changer de modèle demanderait de cliquer dans l'interface
+à chaque fois — ingérable pour comparer une dizaine de modèles. Et surtout :
+sur `hardening`, `AGENT_MODEL` dans `.env` **est** le modèle. Une campagne où
+une branche lit `.env` et l'autre un réglage d'interface est une campagne où
+l'on finit par mesurer deux modèles différents sans s'en apercevoir. C'est
+l'erreur la plus coûteuse possible dans une comparaison, et la moins visible.
 
-**Par l'interface** — `Settings > LLM`, `Advanced` activé : `Custom Model`,
-`Base URL`, `API Key`.
+### Le piège que l'alignement referme
 
-**Par l'API**, si vous enchaînez plusieurs modèles dans une campagne :
+Une conversation **garde le modèle avec lequel elle a démarré**, et sur cette
+branche une merge request réutilise sa conversation. Changer de modèle sans
+rien d'autre ferait donc remesurer l'ANCIEN modèle sur toute MR déjà touchée.
+
+Le registre `state/conversations.json` est donc vidé dès que le modèle change,
+et seulement dans ce cas : poser une clé d'API manquante ou corriger un
+`base_url` n'y touche pas — ces conversations tournent déjà sur le bon modèle,
+les jeter perdrait du contexte pour rien.
+
+### Les deux autres façons de faire
+
+**Par l'interface** — `Settings > LLM`, `Advanced` activé. Attention : le
+prochain démarrage du daemon réalignera sur `.env`.
+
+**Par l'API**, si vous scriptez sans passer par le daemon :
 
 ```bash
 curl -sS -X POST http://127.0.0.1:3000/api/v1/settings \
@@ -407,32 +447,16 @@ curl -sS -X POST http://127.0.0.1:3000/api/v1/settings \
         "api_key": "sk-or-..." }}}'
 ```
 
-Puis vérifiez ce qui est réellement en vigueur — c'est la seule source de
-vérité :
+`agent_settings_diff` fait une fusion en profondeur côté serveur : envoyer le
+seul sous-objet `llm` ne touche ni aux réglages MCP, ni au condenseur.
 
-```bash
-curl -sS http://127.0.0.1:3000/api/v1/settings \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)['agent_settings']['llm']['model'])"
-```
+### Ce qui n'est pas détecté
 
-Aucun redémarrage n'est nécessaire : les réglages sont relus à la création de
-chaque conversation. En revanche, **une conversation déjà ouverte garde son
-modèle** — sur cette branche, une merge request réutilise sa conversation
-(voir plus haut). Pour remesurer la même MR avec un autre modèle, supprimez
-son entrée de `state/conversations.json` (ou la conversation dans l'interface)
-avant de relancer, sinon vous mesurerez l'ancien.
-
-### L'asymétrie à ne pas rater pour la campagne
-
-Sur `hardening`, `AGENT_MODEL` dans `.env` **est** le modèle : `config.ts` le
-lit et le passe à `opencode`. Ici, il est ignoré. Changer cette ligne puis
-basculer de branche mesurerait donc **deux modèles différents sans que rien ne
-le signale** — l'erreur la plus coûteuse possible dans une comparaison.
-
-Le réflexe qui la neutralise : après chaque changement de modèle, lire le
-modèle effectif des deux côtés. `.env` sur `hardening`, l'API des réglages
-ici. Et écrire la valeur sous la forme `openai/<modèle>` ou
-`openrouter/<éditeur>/<modèle>`, qui est valide des deux côtés.
+Une clé d'API **changée** à modèle et point d'accès identiques passe
+inaperçue : le serveur ne rend jamais la clé, seulement `llm_api_key_set`. La
+seule alternative serait de réécrire les réglages à chaque démarrage, ce qui
+effacerait sans prévenir tout réglage fait à la main. Si vous changez de clé
+sans changer de modèle, passez par l'interface ou le curl ci-dessus.
 
 ## Le bac à sable
 

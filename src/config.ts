@@ -176,6 +176,30 @@ function validateOpenHandsUrl(env: NodeJS.ProcessEnv): string {
 }
 
 /**
+ * Format LiteLLM attendu par OpenHands : "<fournisseur>/<modèle>", le
+ * fournisseur pouvant lui-même contenir des "/" ("openrouter/xiaomi/mimo").
+ * Un identifiant sans "/" ne dit rien à LiteLLM et échouerait au premier
+ * appel, loin de la variable fautive — même garde-fou que le
+ * validateAgentModel de `hardening`, pour la même raison.
+ *
+ * Vide ou absent : le daemon ne touche pas aux réglages de l'instance.
+ */
+function validateAgentModel(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = env.AGENT_MODEL?.trim();
+  if (!raw) return undefined;
+
+  const slash = raw.indexOf("/");
+  if (slash <= 0 || slash === raw.length - 1) {
+    throw new Error(
+      `Variable d'environnement invalide : AGENT_MODEL="${raw}" doit être au format ` +
+        `"fournisseur/modèle" attendu par LiteLLM (ex. "openai/qwen3.6-35b-a3b", ` +
+        `"openrouter/xiaomi/mimo-v2.5") — voir .env`,
+    );
+  }
+  return raw;
+}
+
+/**
  * Construit la configuration à partir d'un environnement donné. Fonction
  * pure exportée séparément de `config` afin d'être testable en isolation
  * (sans dépendre de process.env ni du cache des modules ESM) : voir
@@ -323,6 +347,29 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     // -----------------------------------------------------------------------
     // Observabilité
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Modèle — imposé à l'instance OpenHands au démarrage du daemon
+    // -----------------------------------------------------------------------
+    //
+    // Le modèle ne vit PAS dans l'environnement du conteneur OpenHands : il
+    // vit dans ses réglages persistés, et les variables LLM_* ne l'y
+    // remplacent pas (vérifié en le testant, voir docs/openhands.md). Sans ce
+    // bloc, changer de modèle demanderait de passer par l'interface à chaque
+    // fois — ingérable pour comparer une dizaine de modèles.
+    //
+    // Le daemon aligne donc l'instance sur ces trois valeurs à chaque
+    // démarrage. `.env` redevient la source de vérité du modèle, comme sur
+    // `hardening` : c'est ce qui rend une campagne multi-modèles symétrique
+    // entre les deux branches.
+    //
+    // AGENT_MODEL absent : le daemon ne touche à rien, et l'instance garde ce
+    // qui a été réglé dans son interface.
+    agentModel: validateAgentModel(env),
+    /** Devient `base_url` côté OpenHands. Absent : le fournisseur décide. */
+    inferenceUrl: env.CONTAINER_INFERENCE_URL?.trim() || undefined,
+    /** Devient `api_key`. Jamais relue depuis le serveur, qui ne rend qu'un booléen. */
+    inferenceApiKey: env.INFERENCE_API_KEY?.trim() || undefined,
 
     healthEnabled: env.HEALTH_ENABLED !== "0",
     // min: 0 et non 1 — le port 0 demande au noyau un port libre au hasard,

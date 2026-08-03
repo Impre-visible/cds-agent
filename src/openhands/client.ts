@@ -186,6 +186,21 @@ export interface Conversation {
   title: string | null;
 }
 
+/** Le modèle en vigueur sur l'instance, tel que `GET /api/v1/settings` le décrit. */
+export interface LlmSettings {
+  model: string | null;
+  baseUrl: string | null;
+  /** Le serveur ne rend jamais la clé, seulement si elle est posée. */
+  apiKeySet: boolean;
+}
+
+/** Ce qu'on veut imposer à l'instance — voir setLlmSettings. */
+export interface DesiredLlm {
+  model: string;
+  baseUrl?: string | undefined;
+  apiKey?: string | undefined;
+}
+
 export interface OpenHandsClientOptions {
   /** Racine de l'instance, sans `/api/v1` : les "/" de fin sont retirés. */
   baseUrl: string;
@@ -239,14 +254,10 @@ export class OpenHandsClient {
   }
 
   /**
-   * `path` est relatif à `/api/v1/app-conversations` : les deux préfixes se
-   * composent côté serveur (v1_router.py monte `/api/v1`, le routeur des
-   * conversations y ajoute `/app-conversations`) et sont donc assemblés en un
-   * seul endroit ici. Une chaîne vide vise la ressource racine — c'est le cas
-   * de `POST ''` (démarrer) et de `GET ''` (lecture par lot).
+   * LE seul endroit qui pose les en-têtes et lit les erreurs. `url` est
+   * absolue : les deux helpers ci-dessous construisent les préfixes.
    */
-  async #request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const url = `${this.baseUrl}${CONVERSATIONS_PATH}${path}`;
+  async #send<T>(url: string, init: RequestInit = {}): Promise<T> {
     const headers: Record<string, string> = {
       accept: "application/json",
       ...(init.body === undefined ? {} : { "content-type": "application/json" }),
@@ -276,6 +287,66 @@ export class OpenHandsClient {
         `réponse illisible (JSON attendu) : ${text}`,
       );
     }
+  }
+
+  /**
+   * `path` est relatif à `/api/v1/app-conversations` : les deux préfixes se
+   * composent côté serveur (v1_router.py monte `/api/v1`, le routeur des
+   * conversations y ajoute `/app-conversations`) et sont donc assemblés en un
+   * seul endroit ici. Une chaîne vide vise la ressource racine — c'est le cas
+   * de `POST ''` (démarrer) et de `GET ''` (lecture par lot).
+   */
+  #request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    return this.#send<T>(`${this.baseUrl}${CONVERSATIONS_PATH}${path}`, init);
+  }
+
+  /** `path` est relatif à `/api/v1` — pour les routeurs hors conversations. */
+  #v1<T>(path: string, init: RequestInit = {}): Promise<T> {
+    return this.#send<T>(`${this.baseUrl}/api/v1${path}`, init);
+  }
+
+  /**
+   * Le modèle réellement en vigueur, tel que l'instance l'appliquera à la
+   * PROCHAINE conversation.
+   *
+   * C'est la seule source de vérité : les variables `LLM_*` de
+   * l'environnement du conteneur ne choisissent PAS le modèle (vérifié en le
+   * testant — voir docs/openhands.md, section « Changer de modèle »).
+   *
+   * `api_key` n'est jamais rendue en clair par le serveur ; il rend un
+   * booléen `llm_api_key_set`, d'où la forme de LlmSettings.
+   */
+  async getLlmSettings(): Promise<LlmSettings> {
+    const settings = await this.#v1<{
+      agent_settings?: { llm?: { model?: string | null; base_url?: string | null } };
+      llm_api_key_set?: boolean;
+    }>("/settings");
+
+    return {
+      model: settings?.agent_settings?.llm?.model ?? null,
+      baseUrl: settings?.agent_settings?.llm?.base_url ?? null,
+      apiKeySet: settings?.llm_api_key_set === true,
+    };
+  }
+
+  /**
+   * `POST /api/v1/settings` — fusion en profondeur côté serveur : le champ
+   * s'appelle `agent_settings_diff` précisément parce qu'il ne remplace pas
+   * le bloc entier (voir le docstring de `store_settings`). Envoyer le seul
+   * sous-objet `llm` ne touche donc ni aux réglages MCP, ni au condenseur, ni
+   * au reste.
+   */
+  setLlmSettings(desired: DesiredLlm): Promise<void> {
+    const llm: Record<string, unknown> = { model: desired.model };
+    // Une base_url vide n'est pas la même chose qu'absente : l'envoyer
+    // écraserait celle d'un fournisseur qui n'en a pas besoin.
+    if (desired.baseUrl) llm.base_url = desired.baseUrl;
+    if (desired.apiKey) llm.api_key = desired.apiKey;
+
+    return this.#v1<void>("/settings", {
+      method: "POST",
+      body: JSON.stringify({ agent_settings_diff: { llm } }),
+    });
   }
 
   /**
@@ -361,14 +432,10 @@ export class OpenHandsClient {
    * démarrage de chaque nouvelle conversation). Reprendre une conversation
    * ancienne suppose donc de le relancer d'abord.
    */
-  async resumeSandbox(sandboxId: string): Promise<void> {
-    const url = `${this.baseUrl}/api/v1/sandboxes/${encodeURIComponent(sandboxId)}/resume`;
-    const headers: Record<string, string> = { accept: "application/json" };
-    if (this.#apiKey) headers["X-Session-API-Key"] = this.#apiKey;
-
-    const response = await this.#fetch(url, { method: "POST", headers });
-    const text = await response.text();
-    if (!response.ok) throw new OpenHandsError(response.status, url, text);
+  resumeSandbox(sandboxId: string): Promise<void> {
+    return this.#v1<void>(`/sandboxes/${encodeURIComponent(sandboxId)}/resume`, {
+      method: "POST",
+    });
   }
 
   /**

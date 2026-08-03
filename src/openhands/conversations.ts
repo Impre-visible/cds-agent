@@ -109,6 +109,20 @@ export class ConversationStore {
     if (this.#entries.delete(key)) this.#persist();
   }
 
+  /**
+   * Oublie TOUTES les conversations et rend le nombre d'entrées effacées.
+   * Appelé quand le modèle change (voir model.ts) : une conversation garde le
+   * modèle avec lequel elle a démarré, donc la réutiliser après un changement
+   * remesurerait l'ancien.
+   */
+  clear(): number {
+    const count = this.#entries.size;
+    if (count === 0) return 0;
+    this.#entries.clear();
+    this.#persist();
+    return count;
+  }
+
   #persist(): void {
     const directory = dirname(this.#path);
     if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
