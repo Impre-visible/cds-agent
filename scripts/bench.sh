@@ -9,6 +9,7 @@
 #
 #   scripts/bench.sh openrouter/qwen/qwen3.6-35b-a3b openrouter/openai/gpt-oss-120b
 #   scripts/bench.sh -f bench-models.txt          # un modèle par ligne, # = commentaire
+#   scripts/bench.sh -n -f bench-models.txt       # à blanc : liste et sort
 #
 # CE QUE VOUS DEVEZ FAIRE AVANT DE LE LANCER, et qu'il ne peut pas faire à
 # votre place : poster les mentions. Le daemon est piloté par les to-dos
@@ -35,6 +36,15 @@ BENCH_DIR="${BENCH_DIR:-bench}"
 # (10 min par défaut), il reste de la marge pour le démarrage du bac à sable.
 MAX_WAIT_SECONDS="${BENCH_MAX_WAIT_SECONDS:-1800}"
 
+# -n / --dry-run : montre ce qui SERAIT lancé, puis sort. Un banc de neuf
+# modèles coûte de l'argent et immobilise autant de merge requests : mieux vaut
+# relire la liste une fois de trop qu'une fois de moins.
+DRY_RUN=0
+if [ "${1:-}" = "-n" ] || [ "${1:-}" = "--dry-run" ]; then
+  DRY_RUN=1
+  shift
+fi
+
 models=()
 if [ "${1:-}" = "-f" ]; then
   [ -n "${2:-}" ] || { echo "usage: $0 -f <fichier>" >&2; exit 2; }
@@ -50,6 +60,17 @@ fi
 if [ "${#models[@]}" -eq 0 ]; then
   echo "usage: $0 <modele> [modele...]   |   $0 -f <fichier>" >&2
   exit 2
+fi
+
+if [ "$DRY_RUN" = "1" ]; then
+  echo "${#models[@]} modèle(s) — il faut autant de mentions « @<bot> review » en attente,"
+  echo "sur des merge requests DIFFÉRENTES :"
+  index=1
+  for model in "${models[@]}"; do
+    printf '  %2d. %s\n' "$index" "$model"
+    index=$((index + 1))
+  done
+  exit 0
 fi
 
 mkdir -p "$BENCH_DIR"

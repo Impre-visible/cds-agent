@@ -668,13 +668,17 @@ l'a attrapé, pas une instance.
 ## Enchaîner plusieurs modèles
 
 ```bash
-# 1. Poster « @<bot> review » sur une merge request DIFFÉRENTE par modèle.
+cp bench-models.example.txt bench-models.txt   # puis éditez la liste
+
+# 1. Vérifier ce qui SERA lancé, et combien de mentions préparer.
+npm run bench -- -n -f bench-models.txt
+
+# 2. Poster « @<bot> review » sur une merge request DIFFÉRENTE par modèle.
 #    Le script ne peut pas le faire à votre place : un to-do GitLab n'existe
 #    que si un HUMAIN AUTORISÉ mentionne le bot, et une note postée avec le
 #    jeton du bot serait écartée par ses propres filtres (daemon/request.ts).
 #
-# 2. Lancer le banc.
-cp bench-models.example.txt bench-models.txt   # puis éditez la liste
+# 3. Lancer.
 npm run bench -- -f bench-models.txt
 ```
 
@@ -706,6 +710,25 @@ des demandes ambiguës derrière lui ne serait pas un banc.
 `CDS_MAX_TASKS=0` (le défaut) : illimité, le seul comportement d'exploitation.
 Une tâche en **échec** compte aussi — un modèle qui plante est un résultat, pas
 une raison de rester bloqué à attendre la suivante.
+
+### Choisir les modèles
+
+`bench-models.example.txt` liste neuf modèles OpenRouter, du moins cher au
+plus cher — si vous coupez le banc en route, vous aurez perdu le moins.
+
+Les identifiants viennent du catalogue (`GET https://openrouter.ai/api/v1/models`),
+pas d'une supposition : **GLM est publié sous `z-ai`, pas `glm`**, et un
+identifiant inexact échoue au premier appel avec un message qui ne dit pas
+grand-chose.
+
+Tous ont été vérifiés capables d'**appeler des outils** (`tools` dans leurs
+`supported_parameters`). Ce n'est pas un détail décoratif : un modèle sans
+appel d'outils ne peut rien faire dans OpenHands — il ne lit aucun fichier, ne
+publie rien — et il échoue sans que la cause soit lisible dans le journal.
+
+Enfin, regardez les prix avant de lancer. Une revue agentique consomme surtout
+de l'**entrée**, parce que le modèle relit le dépôt à chaque tour : l'écart
+entre `gpt-oss-120b` (0,04 \$/M) et `kimi-k3` (3,00 \$/M) est d'un facteur 75.
 
 ### Les trois pièges du protocole
 
