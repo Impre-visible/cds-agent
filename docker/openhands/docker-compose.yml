@@ -1,6 +1,6 @@
-# Instance OpenHands auto-hébergée — le backend d'exécution alternatif
-# (AGENT_BACKEND=openhands côté daemon). Voir docs/openhands.md pour le mode
-# d'emploi complet, ce qui a été vérifié et ce qui ne l'a pas été.
+# Instance OpenHands auto-hébergée — l'exécutant de cette branche. Voir
+# docs/openhands.md pour le mode d'emploi complet, ce qui a été vérifié et ce
+# qui ne l'a pas été.
 #
 #   docker compose --env-file .env -f docker/openhands/docker-compose.yml up -d
 #
@@ -106,17 +106,34 @@ services:
       # dépassent quand même ce plafond.
       OH_SANDBOX_MAX_NUM_SANDBOXES: ${OPENHANDS_MAX_SANDBOXES:-2}
 
-      # -- Modèle -----------------------------------------------------------
-      # OpenHands passe par LiteLLM : un point d'accès compatible OpenAI se
-      # décrit "openai/<modèle>", quel que soit le fournisseur derrière
-      # (Scaleway, vLLM, LM Studio, un serveur local). C'est la MÊME valeur
-      # qu'AGENT_MODEL côté opencode, à une condition — que sa partie
-      # "fournisseur" soit `openai` et non `lmstudio` : opencode accepte
-      # n'importe quel nom (il déclare un fournisseur custom sous ce nom, voir
-      # agent/sandbox.ts), LiteLLM non. `AGENT_MODEL=openai/<modèle>` marche
-      # donc sur LES DEUX backends, et c'est le réglage recommandé.
-      # OpenRouter fait exception : il a son propre préfixe,
-      # `openrouter/<éditeur>/<modèle>`.
+      # -- Modèle : CES VARIABLES NE CHOISISSENT PAS LE MODÈLE ---------------
+      #
+      # Piège vérifié en le testant, pas déduit : le modèle effectivement
+      # utilisé vient des RÉGLAGES de l'instance (`agent_settings.llm.*`,
+      # persistés dans le volume openhands-state), pas de ces variables.
+      # Mesuré — conteneur relancé avec LLM_MODEL=openai/sonde-de-test,
+      # `GET /api/v1/settings` continuait d'annoncer le modèle précédent, et
+      # c'est celui-là que l'agent utilise. Aucun code de l'application server
+      # V1 ne lit LLM_MODEL ni LLM_API_KEY ; LLM_BASE_URL n'y est lu que comme
+      # repli pour OPENHANDS_PROVIDER_BASE_URL, autre chose.
+      #
+      # Pour CHANGER de modèle : l'interface (Settings > LLM) ou
+      # `POST /api/v1/settings` avec `agent_settings_diff.llm`. Voir
+      # docs/openhands.md, section « Changer de modèle ».
+      #
+      # Pourquoi les passer quand même : `get_agent_server_env()`
+      # (sandbox_spec_service.py) auto-transmet TOUT préfixe `LLM_*` au
+      # conteneur agent-server. Ça ne choisit pas le modèle, mais ça fait
+      # marcher les réglages fins que l'interface n'expose pas — LLM_TIMEOUT,
+      # LLM_NUM_RETRIES, LLM_DROP_PARAMS… Et ça sert de valeur de départ
+      # plausible sur une instance vierge (non vérifié : le volume d'état
+      # était déjà rempli lors du test).
+      #
+      # Format : LiteLLM. Un point d'accès compatible OpenAI se décrit
+      # "openai/<modèle>" ; OpenRouter a son propre préfixe,
+      # "openrouter/<éditeur>/<modèle>". `openai/<modèle>` marche AUSSI sur
+      # `hardening` (opencode accepte n'importe quel nom de fournisseur) —
+      # c'est la valeur à retenir pour comparer les deux branches.
       LLM_MODEL: ${AGENT_MODEL:?AGENT_MODEL doit etre renseigne (ex. openai/qwen3.6-35b-a3b) - voir .env}
       # CONTAINER_INFERENCE_URL est l'adresse du serveur d'inférence VUE
       # DEPUIS UN CONTENEUR — c'est exactement ce qu'il faut ici. Le

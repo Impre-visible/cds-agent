@@ -23,6 +23,7 @@ intacts sur `hardening`.
 - [Ce qui change vraiment](#ce-qui-change-vraiment)
 - [Démarrer l'instance](#démarrer-linstance)
 - [Configurer l'accès GitLab](#configurer-laccès-gitlab)
+- [Changer de modèle](#changer-de-modèle)
 - [Lancer une revue](#lancer-une-revue)
 - [Où vivent les prompts et les compétences](#où-vivent-les-prompts-et-les-compétences)
 - [Le bac à sable](#le-bac-à-sable)
@@ -377,6 +378,61 @@ exactement le genre de chose à vérifier au montage plutôt qu'à supposer.
   bac à sable**, versionné dans le dépôt relu — donc modifiable par ce que
   l'agent y écrit. Celui de `hardening` tournait sur l'hôte, hors de sa
   portée.
+
+## Changer de modèle
+
+**Modifier le `.env` ne suffit pas, et ne fait rien.** C'est le piège le plus
+coûteux de cette branche, parce qu'il est silencieux.
+
+Vérifié en le testant : instance relancée avec `LLM_MODEL=openai/sonde-de-test`
+dans son environnement, `GET /api/v1/settings` continuait d'annoncer le modèle
+précédent — et c'est celui-là que l'agent utilise. Aucun code de l'application
+server V1 ne lit `LLM_MODEL` ni `LLM_API_KEY` ; `LLM_BASE_URL` n'y est lu que
+comme repli pour `OPENHANDS_PROVIDER_BASE_URL`, qui est autre chose.
+
+Le modèle vit dans les **réglages de l'instance** (`agent_settings.llm.*`),
+persistés dans le volume `openhands-state`. Deux façons d'en changer :
+
+**Par l'interface** — `Settings > LLM`, `Advanced` activé : `Custom Model`,
+`Base URL`, `API Key`.
+
+**Par l'API**, si vous enchaînez plusieurs modèles dans une campagne :
+
+```bash
+curl -sS -X POST http://127.0.0.1:3000/api/v1/settings \
+  -H 'content-type: application/json' \
+  -d '{"agent_settings_diff": {"llm": {
+        "model": "openrouter/anthropic/claude-sonnet-4",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key": "sk-or-..." }}}'
+```
+
+Puis vérifiez ce qui est réellement en vigueur — c'est la seule source de
+vérité :
+
+```bash
+curl -sS http://127.0.0.1:3000/api/v1/settings \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['agent_settings']['llm']['model'])"
+```
+
+Aucun redémarrage n'est nécessaire : les réglages sont relus à la création de
+chaque conversation. En revanche, **une conversation déjà ouverte garde son
+modèle** — sur cette branche, une merge request réutilise sa conversation
+(voir plus haut). Pour remesurer la même MR avec un autre modèle, supprimez
+son entrée de `state/conversations.json` (ou la conversation dans l'interface)
+avant de relancer, sinon vous mesurerez l'ancien.
+
+### L'asymétrie à ne pas rater pour la campagne
+
+Sur `hardening`, `AGENT_MODEL` dans `.env` **est** le modèle : `config.ts` le
+lit et le passe à `opencode`. Ici, il est ignoré. Changer cette ligne puis
+basculer de branche mesurerait donc **deux modèles différents sans que rien ne
+le signale** — l'erreur la plus coûteuse possible dans une comparaison.
+
+Le réflexe qui la neutralise : après chaque changement de modèle, lire le
+modèle effectif des deux côtés. `.env` sur `hardening`, l'API des réglages
+ici. Et écrire la valeur sous la forme `openai/<modèle>` ou
+`openrouter/<éditeur>/<modèle>`, qui est valide des deux côtés.
 
 ## Le bac à sable
 
