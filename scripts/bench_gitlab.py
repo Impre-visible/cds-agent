@@ -32,6 +32,40 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+def load_dotenv(path=".env"):
+    """Charge .env, comme le fait le daemon.
+
+    Sans ça, ce script ne voyait AUCUNE variable : le daemon lit .env lui-même
+    (loadDotEnv, src/config.ts) mais ce helper tourne dans un autre process,
+    et scripts/bench.sh ne lui passe que ce qu'il a dans son environnement —
+    c'est-à-dire rien quand on lance `npm run bench` depuis un shell propre.
+
+    Mêmes règles que loadDotEnv, au caractère près, pour qu'une valeur ne soit
+    jamais lue différemment des deux côtés : commentaires et lignes vides
+    ignorés, découpe au PREMIER `=`, guillemets simples ou doubles retirés, et
+    surtout une variable DÉJÀ dans l'environnement n'est jamais écrasée — c'est
+    ce qui permet à `BENCH_PROJECT=x npm run bench` de primer sur le fichier.
+
+    CDS_SKIP_DOTENV=1 la désactive, comme pour le daemon.
+    """
+    if os.environ.get("CDS_SKIP_DOTENV") == "1":
+        return
+    file = Path(path)
+    if not file.exists():
+        return
+    for raw in file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+load_dotenv()
+
 GITLAB_URL = os.environ.get("GITLAB_URL", "https://gitlab.com").rstrip("/")
 BOT = os.environ.get("BOT_USERNAME", "")
 BOT_TOKEN = os.environ.get("GITLAB_TOKEN", "")
@@ -199,9 +233,59 @@ def skills_of(conversation_url):
     return "+".join(sorted(ours & names)) or "aucune"
 
 
+def check(branches):
+    """Contrôle préalable : le jeton répond, et chaque branche a UNE merge
+    request ouverte.
+
+    Existe parce que l'inverse coûte cher : sans lui, un .env non chargé
+    produisait douze échecs identiques, douze lignes de CSV inutiles, et aucun
+    message avant la fin. Un banc qui va effacer des commentaires doit dire ce
+    qui cloche AVANT d'en effacer un seul."""
+    if not HUMAN_TOKEN:
+        sys.exit(
+            "aucun jeton. GITLAB_TOKEN doit être dans .env ou dans l'environnement\n"
+            "  (CDS_SKIP_DOTENV=1 empêche la lecture de .env)."
+        )
+    try:
+        user = api("/user", HUMAN_TOKEN)
+    except Exception as error:
+        sys.exit(f"jeton refusé par {GITLAB_URL} : {error}")
+
+    project = project_path()
+    print(f"  jeton : @{user['username']}   dépôt : {project}")
+
+    problems = 0
+    for branch in branches:
+        encoded = urllib.parse.quote(project, safe="")
+        query = urllib.parse.urlencode(
+            {"source_branch": branch, "state": "opened", "per_page": 100}
+        )
+        try:
+            found = api(f"/projects/{encoded}/merge_requests?{query}", HUMAN_TOKEN)
+        except Exception as error:
+            print(f"  ✗ {branch} : {error}", file=sys.stderr)
+            problems += 1
+            continue
+        if len(found or []) != 1:
+            print(
+                f"  ✗ {branch} : {len(found or [])} merge request(s) ouverte(s), il en faut une",
+                file=sys.stderr,
+            )
+            problems += 1
+    if problems:
+        sys.exit(f"{problems} branche(s) inexploitable(s) — rien n'a été touché")
+    print(f"  {len(branches)} branche(s) prêtes")
+
+
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "check":
+        check(sys.argv[2:])
+        return
     if len(sys.argv) not in (3, 4) or sys.argv[1] not in ("prepare", "collect", "skills"):
-        sys.exit("usage: bench_gitlab.py prepare|collect <branche> | skills <url>")
+        sys.exit(
+            "usage: bench_gitlab.py prepare|collect <branche> | skills <url> "
+            "| check <branche>..."
+        )
     if sys.argv[1] == "skills":
         print(skills_of(sys.argv[2]))
         return

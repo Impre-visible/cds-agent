@@ -51,13 +51,13 @@ if [ "${1:-}" = "-n" ] || [ "${1:-}" = "--dry-run" ]; then DRY_RUN=1; shift; fi
 
 [ "${1:-}" = "-f" ] && [ -n "${2:-}" ] || { echo "usage: $0 [-n] -f <fichier>" >&2; exit 2; }
 
-models=(); branches=()
+models=(); branches_all=()
 while IFS= read -r raw || [ -n "$raw" ]; do
   raw="${raw%%#*}"
   model=$(printf '%s' "$raw" | awk '{print $1}')
   branch=$(printf '%s' "$raw" | awk '{print $2}')
   [ -z "$model" ] && continue
-  models+=("$model"); branches+=("$branch")
+  models+=("$model"); branches_all+=("$branch")
 done < "$2"
 
 if [ "${#models[@]}" -eq 0 ]; then
@@ -69,11 +69,26 @@ if [ "$DRY_RUN" = "1" ]; then
   echo "${#models[@]} ligne(s) :"
   for i in "${!models[@]}"; do
     printf '  %2d. %-46s %s\n' "$((i + 1))" "${models[$i]}" \
-      "${branches[$i]:-<aucune branche : mode manuel>}"
+      "${branches_all[$i]:-<aucune branche : mode manuel>}"
   done
   echo
   echo "Chaque ligne AVEC une branche effacera toutes les notes de sa merge request."
   exit 0
+fi
+
+# Contrôle préalable AVANT d'effacer quoi que ce soit : jeton valide, et une
+# merge request ouverte par branche. Sans lui, un .env non chargé donnait
+# douze échecs identiques et un CSV vide — après coup.
+branches=""
+for branch in "${branches_all[@]:-}"; do [ -n "$branch" ] && branches="$branches $branch"; done
+if [ -n "$branches" ]; then
+  echo "Contrôle préalable…"
+  # shellcheck disable=SC2086
+  if ! python3 "$HELPER" check $branches; then
+    echo "Rien n'a été modifié." >&2
+    exit 1
+  fi
+  echo
 fi
 
 mkdir -p "$BENCH_DIR"
@@ -85,7 +100,7 @@ echo "Banc de mesure — ${#models[@]} modèle(s), résultats dans $CSV"
 echo
 
 for i in "${!models[@]}"; do
-  model="${models[$i]}"; branch="${branches[$i]}"
+  model="${models[$i]}"; branch="${branches_all[$i]}"
   slug="$(printf '%s' "$model" | tr '/:' '--')"
   log="$BENCH_DIR/$STAMP-$slug.log"
 
