@@ -79,7 +79,7 @@ fi
 mkdir -p "$BENCH_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 CSV="$BENCH_DIR/$STAMP.csv"
-echo "modele,branche,mr,issue,secondes,ligne,fichier,generale,suggestions,conversation" > "$CSV"
+echo "modele,branche,mr,issue,secondes,ligne,fichier,generale,suggestions,competences,conversation" > "$CSV"
 
 echo "Banc de mesure — ${#models[@]} modèle(s), résultats dans $CSV"
 echo
@@ -93,7 +93,7 @@ for i in "${!models[@]}"; do
 
   if [ -n "$branch" ] && ! python3 "$HELPER" prepare "$branch"; then
     echo "  ⚠ préparation impossible — ligne ignorée"
-    printf '%s,%s,,preparation-impossible,,,,,,\n' "$model" "$branch" >> "$CSV"
+    printf '%s,%s,,preparation-impossible,,,,,,,\n' "$model" "$branch" >> "$CSV"
     echo
     continue
   fi
@@ -117,7 +117,7 @@ for i in "${!models[@]}"; do
   [ -n "$branch" ] && published=$(python3 "$HELPER" collect "$branch" 2>/dev/null || echo '{}')
 
   python3 - "$model" "$branch" "$log" "$CSV" "$published" <<'PY'
-import re, sys, csv, json
+import re, sys, csv, json, subprocess
 model, branch, log_path, csv_path, published = sys.argv[1:6]
 counts = json.loads(published or "{}")
 
@@ -133,11 +133,21 @@ issue = row[1] if row else "aucune-tache"
 seconds = row[2] if row else ""
 url = (row[3] or "") if row else ""
 
+# Les compétences réellement reçues par l'agent : sans cette colonne, un run
+# où elles ne se chargent pas est indiscernable d'un run où elles se chargent
+# et ne servent à rien.
+skills = ""
+if url:
+    skills = subprocess.run(
+        [sys.executable, "scripts/bench_gitlab.py", "skills", url],
+        capture_output=True, text=True,
+    ).stdout.strip()
+
 with open(csv_path, "a", newline="", encoding="utf-8") as handle:
     csv.writer(handle).writerow([
         model, branch, counts.get("iid", ""), issue, seconds,
         counts.get("ligne", ""), counts.get("fichier", ""),
-        counts.get("generale", ""), counts.get("suggestions", ""), url,
+        counts.get("generale", ""), counts.get("suggestions", ""), skills, url,
     ])
 
 if row:
@@ -146,7 +156,10 @@ if row:
     # (gpt-oss : `timeout`, zéro remarque).
     ligne = counts.get("ligne", 0)
     total = ligne + counts.get("fichier", 0) + counts.get("generale", 0)
-    print(f"  {issue} en {seconds} s — {total} remarque(s), dont {ligne} ancrée(s)")
+    print(
+        f"  {issue} en {seconds} s — {total} remarque(s), dont {ligne} ancrée(s)"
+        + (f" — compétences : {skills}" if skills else "")
+    )
 else:
     print(f"  ⚠ aucune tâche traitée — voir {log_path}")
 PY

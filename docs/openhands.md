@@ -373,24 +373,52 @@ compte, ne jamais notifier ni exécuter de quick action par accident.
 Les règles GitLab qu'elles portent ne sont pas devinées : elles viennent de
 `tasks/publish.ts` sur `hardening`, qui les applique en production.
 
-### Installer
+### Installer : rien à faire
+
+`docker/openhands/docker-compose.yml` **monte** `openhands/skills/` sur
+`/root/.openhands/microagents` en lecture seule — l'emplacement que
+l'application server lit comme « compétences utilisateur » (`USER_SKILLS_DIR`,
+`skills_router.py`). Elles sont donc là au démarrage, versionnées avec ce
+dépôt, et valables pour **tous** les dépôts relus.
 
 ```bash
-# Recommandé, et le seul chemin vérifié : dans le dépôt relu.
-docker/openhands/install-skills.sh --repo ~/Projets/ai-agent-automation-test
-# puis commit + push dans CE dépôt — l'agent lit la branche, pas votre disque.
-
-# Alternative globale, NON vérifiée de bout en bout :
-docker/openhands/install-skills.sh --instance
+docker compose --env-file .env -f docker/openhands/docker-compose.yml up -d
+curl -sS http://127.0.0.1:3000/api/v1/skills/search?limit=100 \
+  | python3 -c 'import json,sys; [print(s["name"]) for s in json.load(sys.stdin)["items"] if s["source"]=="user"]'
+# gitlab-conversations
+# gitlab-mr-review
+# revue-methode
 ```
 
-Le premier écrit dans `<dépôt>/.agents/skills/`, l'emplacement documenté des
-« compétences de projet », résolu depuis l'espace de travail de la
-conversation. Le second écrit dans `/root/.openhands/microagents` du
-conteneur (`USER_SKILLS_DIR` côté serveur) — ce répertoire alimente à coup sûr
-la liste rendue par l'API des compétences, mais **que l'agent les reçoive
-dans son contexte n'a pas été constaté**, et il n'est pas persisté (le volume
-est monté sur `/.openhands`).
+### Pourquoi pas dans le dépôt relu, qui serait l'emplacement documenté
+
+Parce qu'elles apparaîtraient dans le **diff** des merge requests de mesure.
+Les neutraliser suppose de les poser aussi sur la branche cible — et sur ce
+dépôt c'est impossible : `master` est protégée en push Mainteneur, le compte du
+bot est Développeur. GitLab refuse d'ailleurs un push **en bloc** : un seul ref
+rejeté fait tomber tous les autres.
+
+`install-skills.sh --repo <chemin>` reste là pour un dépôt où ce n'est pas un
+problème — c'est l'emplacement documenté en amont, et les compétences y sont
+relues par les mainteneurs du projet.
+
+### `revue-methode`, à la place d'`AGENTS.md`
+
+La méthode de revue est livrée comme compétence
+(`openhands/skills/revue-methode/`) pour la même raison : `AGENTS.md` vit
+forcément dans le dépôt relu, donc dans le diff.
+
+`openhands/AGENTS.example.md` porte la même méthode en version « à copier dans
+le dépôt relu », avec en plus les sections propres au projet — structure,
+commandes, conventions maison — qui, elles, n'ont de sens que versionnées avec
+le code.
+
+### Ce que le banc vérifie désormais
+
+La colonne `competences` du CSV liste celles que l'agent a **réellement
+reçues**, lues sur `/api/v1/app-conversations/<id>/skills`. Sans elle, un run
+où les compétences ne se chargent pas est indiscernable d'un run où elles se
+chargent et ne servent à rien — deux conclusions opposées.
 
 ### Nommer les compétences, plutôt que les lister
 

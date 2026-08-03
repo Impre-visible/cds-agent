@@ -175,9 +175,36 @@ def forget_requests(project, iid):
     path.write_text("\n".join(kept) + ("\n" if kept else ""))
 
 
+def skills_of(conversation_url):
+    """Les compétences maison que l'agent a RÉELLEMENT reçues.
+
+    Le seul moyen de savoir si le montage `microagents` atteint le bac à
+    sable, plutôt que de le supposer. Sans cette colonne, un run où les
+    compétences ne se chargent pas est indiscernable d'un run où elles se
+    chargent et ne servent à rien — deux conclusions opposées."""
+    base = os.environ.get("OPENHANDS_URL", "http://127.0.0.1:3000").rstrip("/")
+    ident = conversation_url.rstrip("/").rsplit("/", 1)[-1]
+    if not ident:
+        return ""
+    request = urllib.request.Request(f"{base}/api/v1/app-conversations/{ident}/skills")
+    key = os.environ.get("OPENHANDS_API_KEY")
+    if key:
+        request.add_header("X-Session-API-Key", key)
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            names = {s.get("name") for s in json.load(response).get("skills", [])}
+    except Exception:
+        return "?"
+    ours = {"gitlab-mr-review", "gitlab-conversations", "revue-methode"}
+    return "+".join(sorted(ours & names)) or "aucune"
+
+
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in ("prepare", "collect"):
-        sys.exit("usage: bench_gitlab.py prepare|collect <branche>")
+    if len(sys.argv) not in (3, 4) or sys.argv[1] not in ("prepare", "collect", "skills"):
+        sys.exit("usage: bench_gitlab.py prepare|collect <branche> | skills <url>")
+    if sys.argv[1] == "skills":
+        print(skills_of(sys.argv[2]))
+        return
     command, branch = sys.argv[1], sys.argv[2]
     project = project_path()
 

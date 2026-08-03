@@ -36,15 +36,18 @@
 #    conversation. Elles se versionnent avec le dépôt relu, ce qui les rend
 #    visibles de ses mainteneurs. À privilégier.
 #
-# 2. INSTANCE (--instance) : copie dans le volume monté sur
-#    /root/.openhands/microagents, l'emplacement que l'application server lit
-#    comme « compétences utilisateur » (USER_SKILLS_DIR dans
-#    openhands/app_server/user/skills_router.py). Avantage : vaut pour TOUS
-#    les dépôts sans les toucher.
-#    ⚠ NON VÉRIFIÉ de bout en bout : ce répertoire alimente à coup sûr la
-#    liste rendue par l'API des compétences ; que l'agent du bac à sable les
-#    reçoive effectivement dans son contexte n'a PAS été constaté. À valider
-#    en lisant /api/v1/app-conversations/<id>/skills après une conversation.
+# 2. INSTANCE (--instance) : DEVENU INUTILE dans le déploiement fourni.
+#    docker/openhands/docker-compose.yml monte désormais openhands/skills/ sur
+#    /root/.openhands/microagents en lecture seule : les compétences sont donc
+#    là au démarrage, sans copie. Vérifié — `GET /api/v1/skills/search` les
+#    rend avec source=user.
+#    Le mode reste pour une instance montée autrement. Il écrit dans un
+#    répertoire NON persisté : la copie disparaît au prochain `compose up` qui
+#    recrée le conteneur.
+#
+#    ⚠ Ce qui reste À VÉRIFIER dans les deux cas : que l'agent du BAC À SABLE
+#    les reçoive dans son contexte. Le banc le dit désormais, colonne
+#    `competences` du CSV (scripts/bench.sh).
 #
 # Rien n'empêche les deux : le projet l'emporte sur l'utilisateur à nom égal.
 

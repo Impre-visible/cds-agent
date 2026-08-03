@@ -189,6 +189,23 @@ services:
       # Le moteur de l'hôte : OpenHands lance ses bacs à sable en conteneurs
       # frères, exactement comme le daemon lance les siens.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Compétences maison, en lecture seule, à l'emplacement que
+      # l'application server lit comme « compétences utilisateur »
+      # (USER_SKILLS_DIR = Path.home()/'.openhands'/'microagents', voir
+      # openhands/app_server/user/skills_router.py ; HOME vaut /root dans
+      # cette image).
+      #
+      # POURQUOI PAS DANS LE DÉPÔT RELU, qui serait l'emplacement documenté :
+      # les compétences y seraient visibles dans le DIFF des merge requests de
+      # mesure, sauf à les poser aussi sur la branche cible — impossible ici,
+      # `master` est protégée en push Mainteneur et le compte du bot est
+      # Développeur. Monter le répertoire évite les deux problèmes : rien dans
+      # le dépôt relu, donc rien dans le diff, et ça vaut pour tous les dépôts.
+      #
+      # `:ro` : l'instance n'a aucune raison d'écrire dedans, et une écriture
+      # accidentelle depuis un bac à sable ne doit pas modifier des consignes
+      # versionnées ici.
+      - ../../openhands/skills:/root/.openhands/microagents:ro
       # Réglages, conversations et jetons de fournisseurs. DOIT survivre à un
       # `docker compose down` : c'est là que vit le jeton GitLab déclaré dans
       # les réglages, et sans lui l'instance repart vierge.
