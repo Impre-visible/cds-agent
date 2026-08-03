@@ -1,103 +1,108 @@
 #!/usr/bin/env bash
 #
-# Banc de mesure multi-modèles.
+# Banc de mesure multi-modèles, de bout en bout.
 #
-# Enchaîne les modèles : pour chacun, aligne l'instance OpenHands dessus,
-# lance le daemon, attend qu'UNE tâche se termine, l'arrête proprement, passe
-# au suivant. Écrit une ligne de CSV par modèle et un journal complet par
-# modèle.
+# Pour chaque ligne « modèle + branche » :
+#   1. retrouve la merge request ouverte sur cette branche ;
+#   2. efface toutes ses notes — dont la revue du modèle précédent ;
+#   3. oublie sa conversation OpenHands (sinon on remesure l'ancien modèle) ;
+#   4. poste la demande de revue en mentionnant le bot ;
+#   5. aligne l'instance sur le modèle, lance le daemon, attend UNE tâche ;
+#   6. relève ce qui a réellement été publié, passe au suivant.
 #
-#   scripts/bench.sh openrouter/qwen/qwen3.6-35b-a3b openrouter/openai/gpt-oss-120b
-#   scripts/bench.sh -f bench-models.txt          # un modèle par ligne, # = commentaire
-#   scripts/bench.sh -n -f bench-models.txt       # à blanc : liste et sort
+#   scripts/bench.sh -f bench-models.txt
+#   scripts/bench.sh -n -f bench-models.txt      # à blanc : liste et sort
 #
-# CE QUE VOUS DEVEZ FAIRE AVANT DE LE LANCER, et qu'il ne peut pas faire à
-# votre place : poster les mentions. Le daemon est piloté par les to-dos
-# GitLab, et un to-do n'existe que si un HUMAIN AUTORISÉ mentionne le bot —
-# une note postée avec le jeton du bot serait ignorée par ses propres filtres
-# (voir daemon/request.ts). Postez donc « @<bot> review » sur autant de merge
-# requests que de modèles à tester, AVANT de lancer ce script. Chaque
-# exécution du daemon en consommera exactement une, dans l'ordre où GitLab
-# les rend.
+# ---------------------------------------------------------------------------
+# LES DEUX JETONS — LIRE AVANT DE LANCER
+# ---------------------------------------------------------------------------
 #
-# Une merge request DIFFÉRENTE par modèle, et ce n'est pas un détail : sur la
-# même MR, le deuxième modèle lirait les remarques du premier — le dépôt de
-# test porte donc plusieurs copies de la même MR, une par modèle.
+# GITLAB_TOKEN        le bot. Sert au daemon, et ici à COMPTER ce qu'il publie.
+# BENCH_GITLAB_TOKEN  un compte HUMAIN, autorisé sur le dépôt dans
+#                     projects.json, et mainteneur pour pouvoir effacer les
+#                     notes du bot.
 #
-# Variables reprises telles quelles du .env : tout sauf AGENT_MODEL, que ce
-# script impose modèle par modèle.
+# Le second n'est pas un confort : le daemon rejette les notes écrites par le
+# bot lui-même (garde-fou anti-boucle, src/daemon/request.ts). Une demande
+# postée avec le jeton du bot ne créerait aucune tâche — le banc attendrait
+# son chien de garde, ligne après ligne.
+#
+# ---------------------------------------------------------------------------
+# FORMAT DU FICHIER
+# ---------------------------------------------------------------------------
+#
+#   openrouter/z-ai/glm-5.2          bench/glm-5-2
+#   openrouter/moonshotai/kimi-k3    bench/kimi-k3
+#
+# Deux colonnes séparées par des espaces, « # » commente. Une ligne sans
+# branche reste acceptée : le banc ne prépare alors rien et consomme le
+# premier to-do qui se présente (l'ancien mode, manuel).
 
 set -u
 
 BENCH_DIR="${BENCH_DIR:-bench}"
-# Garde-fou de temps par modèle. Sans lui, un modèle qui ne reçoit jamais de
-# to-do (mention oubliée, quota GitLab, réseau coupé) bloquerait le banc pour
-# toujours. Généreux : OPENHANDS_TIMEOUT_MINUTES borne déjà le travail lui-même
-# (10 min par défaut), il reste de la marge pour le démarrage du bac à sable.
+# Garde-fou de temps par modèle. Sans lui, un modèle qui ne rend jamais la main
+# bloquerait le banc. Généreux : OPENHANDS_TIMEOUT_MINUTES borne déjà le
+# travail, il reste la marge du démarrage du bac à sable.
 MAX_WAIT_SECONDS="${BENCH_MAX_WAIT_SECONDS:-1800}"
+HELPER="scripts/bench_gitlab.py"
 
-# -n / --dry-run : montre ce qui SERAIT lancé, puis sort. Un banc de neuf
-# modèles coûte de l'argent et immobilise autant de merge requests : mieux vaut
-# relire la liste une fois de trop qu'une fois de moins.
 DRY_RUN=0
-if [ "${1:-}" = "-n" ] || [ "${1:-}" = "--dry-run" ]; then
-  DRY_RUN=1
-  shift
-fi
+if [ "${1:-}" = "-n" ] || [ "${1:-}" = "--dry-run" ]; then DRY_RUN=1; shift; fi
 
-models=()
-if [ "${1:-}" = "-f" ]; then
-  [ -n "${2:-}" ] || { echo "usage: $0 -f <fichier>" >&2; exit 2; }
-  while IFS= read -r line; do
-    line="${line%%#*}"                      # commentaire en fin de ligne
-    line="$(printf '%s' "$line" | tr -d '[:space:]')"
-    [ -n "$line" ] && models+=("$line")
-  done < "$2"
-else
-  models=("$@")
-fi
+[ "${1:-}" = "-f" ] && [ -n "${2:-}" ] || { echo "usage: $0 [-n] -f <fichier>" >&2; exit 2; }
+
+models=(); branches=()
+while IFS= read -r raw || [ -n "$raw" ]; do
+  raw="${raw%%#*}"
+  model=$(printf '%s' "$raw" | awk '{print $1}')
+  branch=$(printf '%s' "$raw" | awk '{print $2}')
+  [ -z "$model" ] && continue
+  models+=("$model"); branches+=("$branch")
+done < "$2"
 
 if [ "${#models[@]}" -eq 0 ]; then
-  echo "usage: $0 <modele> [modele...]   |   $0 -f <fichier>" >&2
+  echo "aucun modèle dans $2" >&2
   exit 2
 fi
 
 if [ "$DRY_RUN" = "1" ]; then
-  echo "${#models[@]} modèle(s) — il faut autant de mentions « @<bot> review » en attente,"
-  echo "sur des merge requests DIFFÉRENTES :"
-  index=1
-  for model in "${models[@]}"; do
-    printf '  %2d. %s\n' "$index" "$model"
-    index=$((index + 1))
+  echo "${#models[@]} ligne(s) :"
+  for i in "${!models[@]}"; do
+    printf '  %2d. %-46s %s\n' "$((i + 1))" "${models[$i]}" \
+      "${branches[$i]:-<aucune branche : mode manuel>}"
   done
+  echo
+  echo "Chaque ligne AVEC une branche effacera toutes les notes de sa merge request."
   exit 0
 fi
 
 mkdir -p "$BENCH_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 CSV="$BENCH_DIR/$STAMP.csv"
-echo "modele,cle,merge_request,issue,secondes,conversation" > "$CSV"
+echo "modele,branche,mr,issue,secondes,ligne,fichier,generale,suggestions,conversation" > "$CSV"
 
 echo "Banc de mesure — ${#models[@]} modèle(s), résultats dans $CSV"
-echo "Rappel : une mention « @<bot> review » doit déjà attendre sur une MR distincte par modèle."
 echo
 
-for model in "${models[@]}"; do
+for i in "${!models[@]}"; do
+  model="${models[$i]}"; branch="${branches[$i]}"
   slug="$(printf '%s' "$model" | tr '/:' '--')"
   log="$BENCH_DIR/$STAMP-$slug.log"
 
-  echo "▶ $model"
+  echo "▶ $model  ${branch:+($branch)}"
 
-  # CDS_MAX_TASKS=1 : le daemon s'arrête tout seul, proprement, dès qu'une
-  # tâche est terminée — c'est ce qui remplace le Ctrl-C au bon moment.
-  # LOG_PRETTY=1 : le journal reste lisible par un humain qui relit après coup.
+  if [ -n "$branch" ] && ! python3 "$HELPER" prepare "$branch"; then
+    echo "  ⚠ préparation impossible — ligne ignorée"
+    printf '%s,%s,,preparation-impossible,,,,,,\n' "$model" "$branch" >> "$CSV"
+    echo
+    continue
+  fi
+
   CDS_MAX_TASKS=1 LOG_PRETTY=1 AGENT_MODEL="$model" \
     npx tsx src/daemon/index.ts > "$log" 2>&1 &
   daemon=$!
 
-  # Chien de garde : si le daemon n'a pas rendu la main dans le délai, on lui
-  # envoie un SIGINT (arrêt gracieux, la tâche en cours a encore sa chance),
-  # puis un second s'il s'obstine.
   ( sleep "$MAX_WAIT_SECONDS"
     kill -INT "$daemon" 2>/dev/null && sleep 40 && kill -INT "$daemon" 2>/dev/null
   ) & watchdog=$!
@@ -106,49 +111,47 @@ for model in "${models[@]}"; do
   kill "$watchdog" 2>/dev/null
   wait "$watchdog" 2>/dev/null
 
-  # Extraction depuis le journal plutôt que depuis un code de retour : c'est
-  # la ligne de fin de tâche qui porte l'issue, la durée et l'adresse de la
-  # conversation, et elle a le même format en JSON comme en mode lisible.
-  python3 - "$model" "$log" "$CSV" <<'PY'
-import re, sys, csv
-model, log_path, csv_path = sys.argv[1:4]
-pattern = re.compile(
-    r"\[worker\] terminé (\S+) — (\S+) en (\d+) s(?: — (\S+))?"
-)
+  published="{}"
+  [ -n "$branch" ] && published=$(python3 "$HELPER" collect "$branch" 2>/dev/null || echo '{}')
+
+  python3 - "$model" "$branch" "$log" "$CSV" "$published" <<'PY'
+import re, sys, csv, json
+model, branch, log_path, csv_path, published = sys.argv[1:6]
+counts = json.loads(published or "{}")
+
+pattern = re.compile(r"\[worker\] terminé (\S+) — (\S+) en (\d+) s(?: — (\S+))?")
 row = None
 with open(log_path, encoding="utf-8", errors="replace") as handle:
     for line in handle:
-        match = pattern.search(line)
-        if match:
-            row = match.groups()
+        found = pattern.search(line)
+        if found:
+            row = found.groups()
 
-mr = ""
-if row:
-    # La clé porte la MR dans les lignes de corrélation ; on la relit dans le
-    # journal plutôt que de la reconstruire.
-    with open(log_path, encoding="utf-8", errors="replace") as handle:
-        found = re.search(r"\[" + re.escape(row[0]) + r" (\S+!\d+)\]", handle.read())
-    mr = found.group(1) if found else ""
+issue = row[1] if row else "aucune-tache"
+seconds = row[2] if row else ""
+url = (row[3] or "") if row else ""
 
 with open(csv_path, "a", newline="", encoding="utf-8") as handle:
-    writer = csv.writer(handle)
-    if row:
-        writer.writerow([model, row[0], mr, row[1], row[2], row[3] or ""])
-        print(f"  {row[1]} en {row[2]} s — {mr}")
-    else:
-        # Aucune tâche traitée : mention manquante, chien de garde, ou panne.
-        # Une ligne quand même — un trou silencieux dans un CSV de mesure est
-        # pire qu'un trou nommé.
-        writer.writerow([model, "", "", "aucune-tache", "", ""])
-        print(f"  ⚠ aucune tâche traitée — voir {log_path}")
+    csv.writer(handle).writerow([
+        model, branch, counts.get("iid", ""), issue, seconds,
+        counts.get("ligne", ""), counts.get("fichier", ""),
+        counts.get("generale", ""), counts.get("suggestions", ""), url,
+    ])
+
+if row:
+    # Le compte des remarques distingue « a travaillé » de « a rendu la main
+    # sans rien publier » — deux cas que le seul statut confondait
+    # (gpt-oss : `timeout`, zéro remarque).
+    ligne = counts.get("ligne", 0)
+    total = ligne + counts.get("fichier", 0) + counts.get("generale", 0)
+    print(f"  {issue} en {seconds} s — {total} remarque(s), dont {ligne} ancrée(s)")
+else:
+    print(f"  ⚠ aucune tâche traitée — voir {log_path}")
 PY
   echo
 done
 
 echo "Terminé. Résultats : $CSV"
-# `column -s, -t` écrase les champs vides et décale les colonnes : sur un CSV
-# de mesure où « pas de valeur » EST une information, c'est un affichage qui
-# ment. On formate donc à la main.
 python3 - "$CSV" <<'PY'
 import csv, sys
 rows = list(csv.reader(open(sys.argv[1], encoding="utf-8")))

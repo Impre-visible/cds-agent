@@ -1,34 +1,45 @@
-# Un modèle par ligne, au format LiteLLM. "#" commente.
-# Usage : npm run bench -- -f bench-models.txt
+# Une ligne = un modèle + la branche de sa merge request de mesure.
+# "#" commente. Une ligne sans branche = mode manuel (le banc ne prépare rien).
 #
-# Rappel : postez « @<bot> review » sur une merge request DIFFÉRENTE par
-# modèle AVANT de lancer, sinon le second modèle lirait les remarques du
-# premier. Chaque exécution consomme exactement un to-do — il en faut donc
-# autant que de lignes actives ci-dessous.
+#   npm run bench -- -n -f bench-models.txt    # à blanc, pour relire
+#   npm run bench -- -f bench-models.txt
 #
-# Identifiants relevés dans le catalogue OpenRouter (GET /api/v1/models),
-# pas devinés — attention, GLM est publié sous « z-ai », pas « glm ».
-# Tous vérifiés capables d'appeler des outils (`tools` dans
-# supported_parameters) : un modèle qui ne le peut pas ne fait rien du tout
-# dans OpenHands, et il échoue sans que la cause soit lisible.
+# ⚠ Chaque ligne AVEC une branche EFFACE toutes les notes de sa merge request
+#   avant de poster la demande — c'est ce qui permet de rejouer un modèle sur
+#   la même MR sans qu'il lise la revue du précédent.
 #
-# Prix indicatifs au 3 août 2026, en $/million de tokens (entrée / sortie).
-# Ils comptent : une revue agentique consomme surtout de l'ENTRÉE — le modèle
-# relit le dépôt à chaque tour — et un banc de neuf modèles se chiffre vite.
-# L'ordre ci-dessous va du moins cher au plus cher : si vous coupez le banc en
-# cours de route, vous aurez perdu le moins.
+# Deux jetons sont nécessaires : GITLAB_TOKEN (le bot) et BENCH_GITLAB_TOKEN
+# (un compte humain, autorisé dans projects.json et mainteneur du dépôt). Le
+# daemon rejette les notes écrites par le bot lui-même : la demande doit venir
+# d'ailleurs.
+#
+# Identifiants relevés dans le catalogue OpenRouter, pas devinés. Tous
+# vérifiés capables d'appeler des outils — sans quoi le modèle ne lit aucun
+# fichier et ne publie rien.
+#
+# Prix indicatifs au 3 août 2026, $/M tokens (entrée / sortie). Ordre du moins
+# cher au plus cher : couper le banc en route coûte alors le moins.
 
-# ── Économiques ─────────────────────────────────────────  ctx     in / out
-openrouter/openai/gpt-oss-120b                            # 131k   0.04 / 0.17
-openrouter/qwen/qwen3.6-35b-a3b                           # 262k   0.14 / 1.00
-openrouter/xiaomi/mimo-v2.5                               # 1.05M  0.14 / 0.28
-openrouter/minimax/minimax-m2.5                           # 205k   0.15 / 0.90
+# modèle                                        branche                              # ctx    in / out
+openrouter/openai/gpt-oss-120b                  bench/gpt-oss-120b                   # 131k   0.04 / 0.17
+openrouter/qwen/qwen3.6-35b-a3b                 bench/qwen3-6-35b-a3b                # 262k   0.14 / 1.00
+openrouter/xiaomi/mimo-v2.5                     bench/mimo-v2-5-310b-a15b            # 1.05M  0.14 / 0.28
+openrouter/minimax/minimax-m2.5                 bench/minimax-m2-5-230b-a10b         # 205k   0.15 / 0.90
+openrouter/deepseek/deepseek-v4-flash           bench/deepseek-v4-flash-284b-a13b    # 0.19 / 0.55
+openrouter/moonshotai/kimi-k2.6                 bench/kimi-k2-6-196b-a11b            # 262k   0.60 / 3.41
+openrouter/nvidia/nemotron-3-ultra-550b-a55b    bench/nemotron-3-ultra-550b-a55b     # 512k   0.60 / 3.60
+openrouter/z-ai/glm-5.2                         bench/glm-5-2                        # 1.05M  0.61 / 1.93
+openrouter/moonshotai/kimi-k2.7-code            bench/kimi-k2-7                      # 262k   0.73 / 3.50
 
-# ── Milieu de gamme ─────────────────────────────────────
-openrouter/moonshotai/kimi-k2.6                           # 262k   0.60 / 3.41
-openrouter/nvidia/nemotron-3-ultra-550b-a55b              # 512k   0.60 / 3.60
-openrouter/z-ai/glm-5.2                                   # 1.05M  0.61 / 1.93
-openrouter/moonshotai/kimi-k2.7-code                      # 262k   0.73 / 3.50
+openrouter/moonshotai/kimi-k3                   bench/kimi-k3                        # 1.05M  3.00 / 15.00
 
-# ── Le plus cher du lot, à garder pour la fin ───────────
-openrouter/moonshotai/kimi-k3                             # 1.05M  3.00 / 15.00
+# ── Références payantes, pour situer le reste ───────────────────────────────
+# Pas des candidats d'exploitation : une borne haute. Si un modèle à 0,61 $/M
+# en trouve autant, c'est lui qu'on garde.
+#
+# DÉCOMMENTEZ APRÈS AVOIR CRÉÉ LES BRANCHES ET LEURS MERGE REQUESTS — elles
+# n'existent pas au 3 août 2026, et le banc s'arrêterait sur la ligne :
+#   git switch -c bench/claude-sonnet-5 <base>  && git push -u origin HEAD
+#   puis ouvrir la MR vers la branche cible habituelle.
+# openrouter/anthropic/claude-sonnet-5          bench/claude-sonnet-5                # 2.00 / 10.00
+# openrouter/anthropic/claude-opus-5            bench/claude-opus-5                  # 5.00 / 25.00

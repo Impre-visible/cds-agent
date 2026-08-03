@@ -799,21 +799,58 @@ l'a attrapé, pas une instance.
 
 ```bash
 cp bench-models.example.txt bench-models.txt   # puis éditez la liste
-
-# 1. Vérifier ce qui SERA lancé, et combien de mentions préparer.
-npm run bench -- -n -f bench-models.txt
-
-# 2. Poster « @<bot> review » sur une merge request DIFFÉRENTE par modèle.
-#    Le script ne peut pas le faire à votre place : un to-do GitLab n'existe
-#    que si un HUMAIN AUTORISÉ mentionne le bot, et une note postée avec le
-#    jeton du bot serait écartée par ses propres filtres (daemon/request.ts).
-#
-# 3. Lancer.
+npm run bench -- -n -f bench-models.txt        # à blanc, pour relire
 npm run bench -- -f bench-models.txt
 ```
 
-Pour chaque modèle : l'instance est alignée dessus, le daemon démarre, traite
-**une** tâche, s'arrête proprement, et on passe au suivant.
+Une ligne = **un modèle et sa branche**. Pour chacune, le banc retrouve la
+merge request ouverte sur cette branche, **efface toutes ses notes**, oublie sa
+conversation OpenHands, poste la demande de revue, aligne l'instance sur le
+modèle, lance le daemon jusqu'à ce qu'une tâche finisse, relève ce qui a été
+publié, et passe à la suivante.
+
+```
+openrouter/z-ai/glm-5.2          bench/glm-5-2
+openrouter/moonshotai/kimi-k3    bench/kimi-k3
+```
+
+Plus rien à taper dans GitLab entre deux modèles — et surtout, **une même MR
+peut être rejouée** : le nettoyage retire la revue du modèle précédent, qui
+sinon serait lue par le suivant. C'est ce qui imposait jusqu'ici une merge
+request par modèle.
+
+### Les deux jetons
+
+`BENCH_GITLAB_TOKEN` est obligatoire, et ce n'est pas un confort. Le daemon
+rejette les notes écrites par le bot lui-même (`note.author.id === bot.id`,
+`src/daemon/request.ts`) : un garde-fou anti-boucle sans lequel il se
+répondrait à l'infini. Une demande postée avec `GITLAB_TOKEN` ne créerait donc
+aucune tâche.
+
+Il faut le jeton d'un **compte humain**, autorisé sur le dépôt dans
+`projects.json`, et **mainteneur** pour pouvoir effacer les notes du bot.
+
+### Ce que le nettoyage efface
+
+Toutes les notes non système de la MR, plus les réactions emoji du bot (elles
+survivent à la suppression des notes). Le banc oublie aussi l'entrée de
+`state/conversations.json` : sans ça, la relance reprendrait la conversation du
+modèle précédent — qui garde **son** modèle et **son** historique, donc on
+mesurerait l'ancien avec la revue précédente dans son contexte.
+
+### Ce que le CSV dit désormais
+
+```
+modele,branche,mr,issue,secondes,ligne,fichier,generale,suggestions,conversation
+```
+
+Les trois colonnes de placement viennent de GitLab, pas du journal : elles
+distinguent « a travaillé » de « a rendu la main sans rien publier » — deux cas
+que le seul statut confondait. Lors de la campagne du 3 août, gpt-oss-120b
+affichait `timeout` comme Qwen et MiMo, avec **zéro** remarque publiée quand
+les autres en avaient 11 et 86.
+
+`ligne` est la colonne qui compte pour l'ancrage.
 
 ```
   modele                          | cle      | merge_request | issue        | secondes | conversation

@@ -325,10 +325,14 @@ Pour chaque modèle : l'instance OpenHands est alignée dessus, le daemon
 démarre, traite **une** tâche (`CDS_MAX_TASKS=1`), s'arrête proprement, et on
 passe au suivant. Un CSV et un journal par modèle dans `bench/`.
 
-Postez les mentions **avant** de lancer, sur une merge request différente par
-modèle — sur la même MR, le second modèle lirait les remarques du premier. Le
-script ne peut pas le faire à votre place : GitLab ne crée un to-do que sur
-mention d'un humain autorisé. Détails et pièges dans
+Une ligne = **un modèle et sa branche**. Le banc retrouve la merge request
+ouverte sur cette branche, efface ses notes (dont la revue du modèle
+précédent), poste la demande, mesure, et passe à la suivante. Rien à taper
+dans GitLab entre deux modèles.
+
+Il faut un second jeton, `BENCH_GITLAB_TOKEN` — celui d'un compte humain
+mainteneur : le daemon rejette les notes écrites par le bot lui-même, une
+demande postée avec son jeton ne créerait aucune tâche. Détails et pièges dans
 [`docs/openhands.md`](./docs/openhands.md).
 
 ## Journalisation
