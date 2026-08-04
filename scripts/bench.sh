@@ -47,7 +47,18 @@ MAX_WAIT_SECONDS="${BENCH_MAX_WAIT_SECONDS:-1800}"
 HELPER="scripts/bench_gitlab.py"
 
 DRY_RUN=0
-if [ "${1:-}" = "-n" ] || [ "${1:-}" = "--dry-run" ]; then DRY_RUN=1; shift; fi
+# Nombre de tirages par ligne. TROIS par défaut, et ce n'est pas de la
+# prudence rituelle : mesuré sur ce projet, qwen3.6 a rendu 3, 4 puis 4
+# défauts sur trois tirages STRICTEMENT identiques. Un ecart d'un ou deux
+# défauts entre deux runs uniques ne prouve rien du tout.
+RUNS="${BENCH_RUNS:-3}"
+while [ $# -gt 0 ]; do
+  case "${1:-}" in
+    -n|--dry-run) DRY_RUN=1; shift ;;
+    --runs) RUNS="${2:-3}"; shift 2 ;;
+    *) break ;;
+  esac
+done
 
 [ "${1:-}" = "-f" ] && [ -n "${2:-}" ] || { echo "usage: $0 [-n] -f <fichier>" >&2; exit 2; }
 
@@ -94,21 +105,22 @@ fi
 mkdir -p "$BENCH_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 CSV="$BENCH_DIR/$STAMP.csv"
-echo "modele,branche,mr,issue,secondes,ligne,fichier,generale,suggestions,competences,conversation" > "$CSV"
+echo "modele,branche,tirage,mr,issue,secondes,ligne,fichier,generale,suggestions,competences,conversation" > "$CSV"
 
-echo "Banc de mesure — ${#models[@]} modèle(s), résultats dans $CSV"
+echo "Banc de mesure — ${#models[@]} modèle(s) × $RUNS tirage(s), résultats dans $CSV"
 echo
 
 for i in "${!models[@]}"; do
+ for run in $(seq 1 "$RUNS"); do
   model="${models[$i]}"; branch="${branches_all[$i]}"
   slug="$(printf '%s' "$model" | tr '/:' '--')"
-  log="$BENCH_DIR/$STAMP-$slug.log"
+  log="$BENCH_DIR/$STAMP-$slug-$run.log"
 
-  echo "▶ $model  ${branch:+($branch)}"
+  echo "▶ $model  ${branch:+($branch)}  tirage $run/$RUNS"
 
   if [ -n "$branch" ] && ! python3 "$HELPER" prepare "$branch"; then
     echo "  ⚠ préparation impossible — ligne ignorée"
-    printf '%s,%s,,preparation-impossible,,,,,,,\n' "$model" "$branch" >> "$CSV"
+    printf '%s,%s,%s,,preparation-impossible,,,,,,,\n' "$model" "$branch" "$run" >> "$CSV"
     echo
     continue
   fi
@@ -131,9 +143,9 @@ for i in "${!models[@]}"; do
   published="{}"
   [ -n "$branch" ] && published=$(python3 "$HELPER" collect "$branch" 2>/dev/null || echo '{}')
 
-  python3 - "$model" "$branch" "$log" "$CSV" "$published" <<'PY'
+  python3 - "$model" "$branch" "$log" "$CSV" "$published" "$run" <<'PY'
 import re, sys, csv, json, subprocess
-model, branch, log_path, csv_path, published = sys.argv[1:6]
+model, branch, log_path, csv_path, published, run = sys.argv[1:7]
 counts = json.loads(published or "{}")
 
 pattern = re.compile(r"\[worker\] terminé (\S+) — (\S+) en (\d+) s(?: — (\S+))?")
@@ -160,7 +172,7 @@ if url:
 
 with open(csv_path, "a", newline="", encoding="utf-8") as handle:
     csv.writer(handle).writerow([
-        model, branch, counts.get("iid", ""), issue, seconds,
+        model, branch, run, counts.get("iid", ""), issue, seconds,
         counts.get("ligne", ""), counts.get("fichier", ""),
         counts.get("generale", ""), counts.get("suggestions", ""), skills, url,
     ])
@@ -179,6 +191,7 @@ else:
     print(f"  ⚠ aucune tâche traitée — voir {log_path}")
 PY
   echo
+ done
 done
 
 echo "Terminé. Résultats : $CSV"

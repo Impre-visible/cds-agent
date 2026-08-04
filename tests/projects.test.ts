@@ -793,3 +793,51 @@ describe("mergeRequest.suggestions — corrections applicables en un clic", () =
     );
   });
 });
+
+describe("delegation — flux à deux niveaux, fail-closed", () => {
+  test("absente : désactivée, aucun changement pour un dépôt existant", () => {
+    // C'est ce qui garde comparables les trois manches déjà mesurées.
+    const file = parseProjectsFile({ projects: { "g/p": { users: ["a"] } } });
+    assert.deepEqual(resolveProject(file, "g/p", BASELINE)!.delegation, {
+      enabled: false,
+      planFirst: false,
+    });
+  });
+
+  test("déclarée par projet", () => {
+    const file = parseProjectsFile({
+      projects: { "g/p": { delegation: { enabled: true, planFirst: true } } },
+    });
+    assert.deepEqual(resolveProject(file, "g/p", BASELINE)!.delegation, {
+      enabled: true,
+      planFirst: true,
+    });
+  });
+
+  test("héritée de defaults, et surchargeable champ par champ", () => {
+    const file = parseProjectsFile({
+      defaults: { delegation: { enabled: true, planFirst: true } },
+      projects: { "g/p": { delegation: { planFirst: false } } },
+    });
+    assert.deepEqual(resolveProject(file, "g/p", BASELINE)!.delegation, {
+      enabled: true,
+      planFirst: false,
+    });
+  });
+
+  test("une clé inconnue est rejetée — pas ignorée en silence", () => {
+    // « enable » au lieu de « enabled » ne ferait rien, et personne ne le
+    // verrait avant de relire un run raté.
+    assert.throws(
+      () => parseProjectsFile({ projects: { "g/p": { delegation: { enable: true } } } }),
+      /delegation/,
+    );
+  });
+
+  test("une valeur non booléenne est rejetée", () => {
+    assert.throws(
+      () => parseProjectsFile({ projects: { "g/p": { delegation: { enabled: "oui" } } } }),
+      /delegation\.enabled.*booléen/s,
+    );
+  });
+});

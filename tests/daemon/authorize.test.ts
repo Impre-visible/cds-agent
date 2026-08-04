@@ -47,6 +47,7 @@ function makeProject(overrides: Partial<ResolvedProject> = {}): ResolvedProject 
     commands: { install: "npm install", test: "npm test" },
     docker: { image: "node:22-bookworm-slim" },
     testDirectories: [],
+    delegation: { enabled: false, planFirst: false },
     ...overrides,
   };
 }

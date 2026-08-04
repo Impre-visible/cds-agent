@@ -135,6 +135,39 @@ export interface MergeRequestCapabilities {
   writablePaths: string[];
 }
 
+/**
+ * Flux à deux niveaux : l'agent planifie, puis délègue l'exécution à un
+ * sous-agent (outil `delegate` du SDK OpenHands, commandes `spawn` puis
+ * `delegate`). Le sous-agent tourne EN-PROCESS dans le même bac à sable, rend
+ * son résultat au parent et disparaît — rien n'est écrit sur disque, rien ne
+ * survit à la tâche.
+ *
+ * `enabled: false` par défaut, et ce défaut n'est pas cosmétique : la manche 3
+ * du banc a fait BAISSER la couverture (25/25 → 23/25) en ajoutant deux
+ * consignes. Une étape de planification est plus lourde que ça. Tant que son
+ * effet n'est pas mesuré, l'activer par défaut casserait la comparabilité des
+ * manches déjà faites.
+ *
+ * ⚠ CE QUE CE RÉGLAGE NE FAIT PAS. Il ne restreint RIEN mécaniquement. Voir
+ * tasks/openhands.ts::delegationInstructions pour le détail : le sous-agent a
+ * les mêmes outils et le même jeton que le parent, et c'est le MODÈLE qui
+ * choisit le type de sous-agent qu'il instancie. Les capacités lui sont
+ * répétées, comme au parent. Rien de plus.
+ */
+export interface DelegationConfig {
+  enabled: boolean;
+  /**
+   * Demander un plan avant l'exécution. Sans effet si `enabled` est faux.
+   *
+   * Le plan n'est PUBLIÉ dans la merge request que lorsque le dépôt accorde
+   * une capacité d'écriture — voir delegationInstructions. Sur une revue en
+   * lecture seule il resterait interne : publier un plan pour une action qui
+   * ne modifie rien ajoute un commentaire par tâche sans rien permettre
+   * d'interrompre.
+   */
+  planFirst: boolean;
+}
+
 export interface ResolvedCapabilities {
   issue: IssueCapabilities;
   mergeRequest: MergeRequestCapabilities;
@@ -166,6 +199,8 @@ export interface ResolvedProject {
   capabilities: ResolvedCapabilities;
   commands: CommandsConfig;
   docker: DockerConfig;
+  /** Flux à deux niveaux — voir DelegationConfig. Toujours résolu. */
+  delegation: DelegationConfig;
   /** Répertoires de test maison. NON LUS sur cette branche (le daemon ne reconnaît plus les chemins de test lui-même) ; acceptés pour rester compatible avec `hardening`. */
   testDirectories: string[];
 }
@@ -236,6 +271,36 @@ const BASE_MERGE_REQUEST_CAPABILITIES: MergeRequestCapabilities = {
   writablePaths: [],
 };
 
+/**
+ * Bloc "delegation", validé comme les autres : une clé inconnue ou une valeur
+ * non booléenne fait échouer le chargement plutôt que d'être ignorée en
+ * silence. Un `"enable": true` mal orthographié qui ne ferait rien serait
+ * exactement le genre de configuration muette que ce fichier refuse.
+ */
+function parseDelegationBlock(
+  raw: unknown,
+  path: string,
+): Partial<DelegationConfig> | undefined {
+  if (raw === undefined) return undefined;
+  if (!isPlainObject(raw)) {
+    throw new Error(`projects.json invalide : "${path}" doit être un objet`);
+  }
+  assertOnlyKeys(raw, ["enabled", "planFirst"], path);
+
+  const block: Partial<DelegationConfig> = {};
+  for (const key of ["enabled", "planFirst"] as const) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (typeof value !== "boolean") {
+      throw new Error(
+        `projects.json invalide : "${path}.${key}" doit être un booléen (reçu ${JSON.stringify(value)})`,
+      );
+    }
+    block[key] = value;
+  }
+  return block;
+}
+
 type PartialCapabilities<K extends string> = Partial<Record<K, boolean>>;
 
 /** Bloc "mergeRequest" tel que parsé : les booléens (partiels), plus "writablePaths" (partiel lui aussi — absent tant que non déclaré, ni par defaults ni par le projet). */
@@ -264,6 +329,7 @@ interface ParsedCommonFields {
   commands: ParsedCommandsBlock;
   docker: ParsedDockerBlock;
   testDirectories?: string[];
+  delegation?: Partial<DelegationConfig> | undefined;
 }
 
 interface ParsedEntry extends ParsedCommonFields {
@@ -505,7 +571,7 @@ export function parseProjectsFile(raw: unknown): ProjectsFile {
   if (isPlainObject(defaultsRaw)) {
     assertOnlyKeys(
       defaultsRaw,
-      ["capabilities", "commands", "docker", "testDirectories"],
+      ["capabilities", "commands", "docker", "testDirectories", "delegation"],
       "defaults",
     );
   }
@@ -522,6 +588,10 @@ export function parseProjectsFile(raw: unknown): ProjectsFile {
     docker: parseDockerBlock(
       isPlainObject(defaultsRaw) ? defaultsRaw.docker : undefined,
       "defaults.docker",
+    ),
+    delegation: parseDelegationBlock(
+      isPlainObject(defaultsRaw) ? defaultsRaw.delegation : undefined,
+      "defaults.delegation",
     ),
     testDirectories: parseStringArray(
       isPlainObject(defaultsRaw) ? defaultsRaw.testDirectories : undefined,
@@ -552,7 +622,11 @@ export function parseProjectsFile(raw: unknown): ProjectsFile {
     if (!isPlainObject(entryRaw)) {
       throw new Error(`projects.json invalide : "${path}" doit être un objet`);
     }
-    assertOnlyKeys(entryRaw, ["users", "capabilities", "commands", "docker", "testDirectories"], path);
+    assertOnlyKeys(
+      entryRaw,
+      ["users", "capabilities", "commands", "docker", "testDirectories", "delegation"],
+      path,
+    );
 
     const users = parseStringArray(entryRaw.users, `${path}.users`, "noms d'utilisateur") ?? [];
 
@@ -581,6 +655,7 @@ export function parseProjectsFile(raw: unknown): ProjectsFile {
       commands: parseCommandsBlock(entryRaw.commands, `${path}.commands`),
       docker: parseDockerBlock(entryRaw.docker, `${path}.docker`),
       testDirectories: parseStringArray(entryRaw.testDirectories, `${path}.testDirectories`, "noms de répertoire"),
+      delegation: parseDelegationBlock(entryRaw.delegation, `${path}.delegation`),
     });
   }
 
@@ -631,6 +706,14 @@ export function resolveProject(
       image: entry.docker.image ?? file.defaults.docker.image ?? baseline.docker.image,
     },
     testDirectories: entry.testDirectories ?? file.defaults.testDirectories ?? [],
+    delegation: {
+      // Fail-closed comme les capacités : non déclaré ⇒ désactivé. Le défaut
+      // du bloc "defaults" s'applique, puis celui du projet le surcharge.
+      enabled:
+        entry.delegation?.enabled ?? file.defaults.delegation?.enabled ?? false,
+      planFirst:
+        entry.delegation?.planFirst ?? file.defaults.delegation?.planFirst ?? false,
+    },
   };
 }
 

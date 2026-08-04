@@ -28,6 +28,7 @@ intacts sur `hardening`.
 - [Lancer une revue](#lancer-une-revue)
 - [Ancrage sur le diff, suggestions, compétences](#ancrage-sur-le-diff-suggestions-compétences)
 - [Où vivent les prompts et les compétences](#où-vivent-les-prompts-et-les-compétences)
+- [Délégation à un sous-agent](#délégation-à-un-sous-agent)
 - [Le bac à sable](#le-bac-à-sable)
 - [Ce qui a été vérifié, et où](#ce-qui-a-été-vérifié-et-où)
 - [Ce que je n'ai pas pu vérifier](#ce-que-je-nai-pas-pu-vérifier)
@@ -616,6 +617,86 @@ inaperçue : le serveur ne rend jamais la clé, seulement `llm_api_key_set`. La
 seule alternative serait de réécrire les réglages à chaque démarrage, ce qui
 effacerait sans prévenir tout réglage fait à la main. Si vous changez de clé
 sans changer de modèle, passez par l'interface ou le curl ci-dessus.
+
+## Délégation à un sous-agent
+
+Désactivée par défaut. `projects.json` :
+
+```json
+"delegation": { "enabled": true, "planFirst": true }
+```
+
+```bash
+npm run bench -- --runs 3 -f bench-models.txt
+```
+
+### Le mécanisme, et ce qu'il n'est pas
+
+L'outil **`delegate`** du SDK OpenHands : `spawn` instancie des sous-agents,
+`delegate` leur confie des tâches. Ils tournent **en-process dans le bac à
+sable du parent**, rendent leur résultat et disparaissent. Rien sur disque,
+rien qui survive à la tâche — c'est bien la sous-tâche éphémère, pas un
+artefact persistant.
+
+Il est **déjà actif** sur l'instance : `enable_sub_agents: true` dans
+`GET /api/v1/settings`. Les trois manches de benchmark ont donc tourné avec la
+délégation disponible, et aucun des douze modèles ne s'en est servi. Ce que ce
+chantier ajoute n'est donc pas une capacité, c'est une **consigne**.
+
+`agent-creator` du registre ne convient pas : son `SKILL.md` impose « Ask ONE
+question at a time » et « Do NOT proceed until confirmed ». Un agent autonome
+qui l'invoque s'arrête à la première question — la conversation partirait en
+`waiting_for_confirmation`. Elle produit en outre un `.md` persistant.
+
+### ⚠ L'héritage des autorisations n'est PAS mécanique
+
+Le sous-agent partage le bac à sable, les outils et le jeton GitLab du parent.
+
+Une `AgentDefinition` fichier peut restreindre `tools` et `permission_mode` —
+mais `spawn` prend `agent_types` en paramètre **optionnel**, et sans lui
+« the default general-purpose agent is used ». C'est donc **le modèle** qui
+choisit s'il s'auto-restreint.
+
+Conséquence exacte : un sous-agent n'est jamais **plus** puissant que son
+parent — il n'y a pas d'escalade de privilège — mais **rien ne l'empêche de
+pousser** si le parent le pouvait techniquement. Or sur cette branche le parent
+le peut toujours : `permissionStatement` est une consigne, pas un contrôle.
+
+La promesse « le sous-agent hérite des mêmes règles d'autorisation » est donc
+vraie au sens faible (mêmes consignes, pas d'escalade) et **fausse au sens
+fort** (rien n'est empêché). Les limites lui sont répétées quand même : c'est
+le seul levier disponible, et un délégué qui ne les a pas est strictement pire
+qu'un délégué qui les a.
+
+### Le plan, publié seulement quand il peut servir
+
+| Capacités du dépôt | Plan demandé | Plan publié |
+|---|---|---|
+| `review` seul | oui | **non** |
+| `writeTests` ou `writeBusinessCode` | oui | **oui, avant exécution** |
+
+Publier un plan pour une revue en lecture seule ajouterait un commentaire par
+tâche sans rien permettre d'interrompre : rien ne sera modifié. Dès qu'il y a
+écriture, c'est au contraire **le seul moment où un humain peut arrêter un
+mauvais plan** — après, le code est poussé.
+
+L'agent est explicitement prié de **ne pas attendre de réponse** : personne ne
+répondra, et un agent qui attend part en `waiting_for_confirmation`.
+
+Repli explicite : si le plan serait vide ou la délégation artificielle, faire
+le travail directement. Le plan est un moyen, jamais une livraison.
+
+### Durée
+
+Un flux à deux niveaux **double au minimum** le temps de travail, et
+`tool_concurrency_limit: 1` sur l'instance : les sous-agents s'enchaînent en
+série. Les runs mesurés tenaient déjà 400 à 600 s, l'un a atteint le plafond.
+Le daemon avertit au dispatch si `OPENHANDS_TIMEOUT_MINUTES` est sous 20.
+
+Pas de sous-agent orphelin à craindre : ils vivent **dans** la boucle du
+parent, donc la conversation parente les emporte. Ce qui reste vrai, et qui ne
+change pas, c'est qu'un `timeout` côté daemon n'interrompt rien du tout — la
+conversation continue, sous-agents compris.
 
 ## Le bac à sable
 

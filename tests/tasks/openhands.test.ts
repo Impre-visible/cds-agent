@@ -15,6 +15,7 @@ let buildReport: typeof import("../../src/tasks/openhands.ts").buildReport;
 let permissionStatement: typeof import("../../src/tasks/openhands.ts").permissionStatement;
 let publishingRules: typeof import("../../src/tasks/openhands.ts").publishingRules;
 let toThreadContext: typeof import("../../src/tasks/openhands.ts").toThreadContext;
+let delegationInstructions: typeof import("../../src/tasks/openhands.ts").delegationInstructions;
 
 before(async () => {
   process.env.GITLAB_TOKEN = "glpat-test";
@@ -29,6 +30,7 @@ before(async () => {
   permissionStatement = module.permissionStatement;
   publishingRules = module.publishingRules;
   toThreadContext = module.toThreadContext;
+  delegationInstructions = module.delegationInstructions;
 });
 
 function capabilities(
@@ -45,7 +47,10 @@ function capabilities(
   };
 }
 
-function project(mergeRequest: MergeRequestCapabilities): ResolvedProject {
+function project(
+  mergeRequest: MergeRequestCapabilities,
+  delegation = { enabled: false, planFirst: false },
+): ResolvedProject {
   return {
     users: ["alice"],
     capabilities: {
@@ -60,6 +65,7 @@ function project(mergeRequest: MergeRequestCapabilities): ResolvedProject {
     commands: { install: "npm ci", test: "npm test" },
     docker: { image: "node:22" },
     testDirectories: [],
+    delegation,
   };
 }
 
@@ -517,4 +523,91 @@ describe("buildMessage — les compétences maison peuvent se déclencher", () =
       );
     });
   }
+});
+
+describe("delegationInstructions — flux à deux niveaux", () => {
+  const off = { enabled: false, planFirst: false };
+  const on = { enabled: true, planFirst: true };
+  const noPlan = { enabled: true, planFirst: false };
+
+  test("désactivée : RIEN n'est dit, le message est celui d'avant le chantier", () => {
+    // Le défaut. C'est ce qui garde comparables les trois manches déjà
+    // mesurées : un dépôt existant ne voit pas un caractère de différence.
+    assert.equal(delegationInstructions(off, capabilities({ review: true })), "");
+  });
+
+  test("activée : l'outil `delegate` est nommé, avec ses deux commandes", () => {
+    const text = delegationInstructions(noPlan, capabilities({ review: true }));
+    assert.match(text, /`delegate`/);
+    assert.match(text, /`spawn`/);
+  });
+
+  test("les limites du parent doivent être redites au délégué", () => {
+    // Point 2 du chantier : le sous-agent ne connaît pas les capacités
+    // autrement. C'est déclaratif, pas mécanique — mais un délégué SANS les
+    // limites est strictement pire qu'un délégué qui les a.
+    const text = delegationInstructions(noPlan, capabilities({ review: true }));
+    assert.match(text, /hérite de TES limites/);
+    assert.match(text, /Redis-les-lui/);
+  });
+
+  test("planFirst=false : aucune étape de plan", () => {
+    const text = delegationInstructions(noPlan, capabilities({ review: true }));
+    assert.doesNotMatch(text, /PLAN/);
+  });
+
+  test("revue en LECTURE SEULE : plan demandé, mais PAS publié", () => {
+    // Publier un plan pour une action qui ne modifie rien ajoute un
+    // commentaire par tâche sans rien permettre d'interrompre.
+    const text = delegationInstructions(on, capabilities({ review: true }));
+    assert.match(text, /Établis d'abord un PLAN/);
+    assert.doesNotMatch(text, /PUBLIE ce plan/);
+  });
+
+  for (const capability of ["writeTests", "writeBusinessCode"] as const) {
+    test(`${capability} accordé : le plan est PUBLIÉ avant exécution`, () => {
+      // Le seul moment où un humain peut arrêter un mauvais plan : après, le
+      // code est poussé.
+      const text = delegationInstructions(
+        on,
+        capabilities({ review: true, [capability]: true }),
+      );
+      assert.match(text, /PUBLIE ce plan sur la merge request AVANT/);
+      assert.match(text, /seul moment où quelqu'un peut t'arrêter/);
+    });
+  }
+
+  test("n'attend AUCUNE réponse humaine — le flux est autonome", () => {
+    // Le piège d'agent-creator : un agent qui attend une confirmation
+    // s'arrête, et la conversation part en waiting_for_confirmation.
+    const text = delegationInstructions(on, capabilities({ writeTests: true }));
+    assert.match(text, /sans attendre de réponse — personne ne répondra/);
+  });
+
+  test("repli explicite si le plan serait vide ou artificiel", () => {
+    const text = delegationInstructions(on, capabilities({ review: true }));
+    assert.match(text, /fais le travail directement/);
+  });
+
+  test("buildMessage ne porte rien de tout ça quand la délégation est coupée", () => {
+    const message = buildMessage(
+      request(),
+      project(capabilities({ review: true })),
+      "https://gitlab.example/x",
+    );
+    assert.doesNotMatch(message, /delegate|sous-agent/i);
+  });
+
+  test("buildMessage porte les consignes, y compris sur une RELANCE", () => {
+    const followUp = buildMessage(
+      request(),
+      project(capabilities({ review: true, writeTests: true }), { enabled: true, planFirst: true }),
+      "https://gitlab.example/x",
+      true,
+      null,
+    );
+    assert.match(followUp, /`delegate`/);
+    assert.match(followUp, /PUBLIE ce plan/);
+    assert.doesNotMatch(followUp, /Tu interviens sur la merge request/);
+  });
 });

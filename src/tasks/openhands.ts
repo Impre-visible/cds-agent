@@ -30,7 +30,11 @@ import { OpenHandsClient, type CompletionOutcome } from "../openhands/client.ts"
 import { ConversationStore, conversationKey } from "../openhands/conversations.ts";
 import { report, type TaskOutcome } from "./report.ts";
 import type { AgentRequest, Discussion } from "../types.ts";
-import type { MergeRequestCapabilities, ResolvedProject } from "../projects.ts";
+import type {
+  DelegationConfig,
+  MergeRequestCapabilities,
+  ResolvedProject,
+} from "../projects.ts";
 import {
   MAX_LIST_PAGES,
   OPENHANDS_POLL_MS,
@@ -194,6 +198,90 @@ export function publishingRules(
   return lines.join("\n");
 }
 
+/**
+ * Flux à deux niveaux : planifier, puis déléguer l'exécution à un sous-agent.
+ *
+ * MÉCANISME. L'outil `delegate` du SDK OpenHands, déjà présent dans l'agent
+ * (`enable_sub_agents` est un réglage de l'instance, vrai par défaut sur
+ * celle du projet — vérifié via GET /api/v1/settings). Deux commandes :
+ * `spawn` instancie des sous-agents, `delegate` leur assigne des tâches. Ils
+ * tournent EN-PROCESS dans le bac à sable du parent, rendent leur résultat et
+ * disparaissent : rien sur disque, rien qui survive à la tâche. C'est le
+ * modèle de la sous-tâche éphémère, pas celui d'`agent-creator` — lequel est
+ * de toute façon inutilisable ici (« Ask ONE question at a time », « Do NOT
+ * proceed until confirmed » : il attend un humain).
+ *
+ * ⚠ L'HÉRITAGE DES AUTORISATIONS N'EST PAS MÉCANIQUE, ET IL FAUT LE DIRE.
+ *
+ * Le sous-agent partage le bac à sable, les outils et le jeton GitLab du
+ * parent. Une `AgentDefinition` fichier peut certes restreindre `tools` et
+ * `permission_mode` — mais `spawn` prend `agent_types` en paramètre
+ * OPTIONNEL, et sans lui « the default general-purpose agent is used ». C'est
+ * donc LE MODÈLE qui choisit s'il s'auto-restreint.
+ *
+ * Autrement dit : un sous-agent n'est jamais PLUS puissant que son parent —
+ * il n'y a pas d'escalade — mais rien ne l'empêche de pousser si le parent
+ * le pouvait techniquement. Or sur cette branche le parent peut toujours
+ * techniquement : `permissionStatement` est une consigne, pas un contrôle.
+ * Répéter les limites au délégué ne change donc rien à la garantie réelle,
+ * qui reste nulle des deux côtés. On les répète quand même — c'est le seul
+ * levier disponible, et un délégué qui ne les a pas est strictement pire.
+ *
+ * Rend "" quand la délégation est désactivée : rien n'est dit, et le
+ * comportement est strictement celui d'avant ce chantier.
+ *
+ * Exportée pour être testée unitairement.
+ */
+export function delegationInstructions(
+  delegation: DelegationConfig,
+  capabilities: MergeRequestCapabilities,
+): string {
+  if (!delegation.enabled) return "";
+
+  const lines = [
+    "",
+    "Organisation du travail :",
+    "- Tu PEUX déléguer l'exécution à des sous-agents (outil `delegate` : `spawn` " +
+      "pour les instancier, puis `delegate` pour leur confier une tâche). Ils " +
+      "partagent ton bac à sable et rendent leur résultat ici.",
+    "- Un sous-agent hérite de TES limites, celles listées plus haut. Redis-les-lui " +
+      "explicitement dans la tâche que tu lui confies : il ne les connaît pas autrement.",
+  ];
+
+  if (delegation.planFirst) {
+    lines.push(
+      "- Établis d'abord un PLAN : ce que tu vas examiner, dans quel ordre, et ce que " +
+        "tu confies à qui. Puis exécute-le.",
+    );
+
+    // Le plan n'est publié que si le dépôt accorde une écriture. Publier un
+    // plan de revue en lecture seule ajouterait un commentaire par tâche sans
+    // rien permettre d'interrompre : il n'y a rien à arrêter, rien ne sera
+    // modifié. Dès qu'il y a écriture, en revanche, c'est le SEUL moment où
+    // un humain peut arrêter un mauvais plan — après, le code est poussé.
+    if (capabilities.writeTests || capabilities.writeBusinessCode) {
+      lines.push(
+        "- PUBLIE ce plan sur la merge request AVANT de commencer à écrire quoi que " +
+          "ce soit, en un seul commentaire court. Ce dépôt t'autorise à modifier des " +
+          "fichiers : ce commentaire est le seul moment où quelqu'un peut t'arrêter " +
+          "si le plan est mauvais. Laisse-le visible, puis exécute sans attendre de " +
+          "réponse — personne ne répondra.",
+      );
+    }
+
+    // Repli explicite : sans lui, un modèle qui ne sait pas planifier peut
+    // s'enliser à produire un plan au lieu de faire le travail. Le plan est
+    // un moyen, jamais une livraison.
+    lines.push(
+      "- Si tu ne vois rien d'utile à planifier ou à déléguer, fais le travail " +
+        "directement. Un plan vide ou une délégation artificielle coûtent du temps " +
+        "sans rien apporter.",
+    );
+  }
+
+  return lines.join("\n");
+}
+
 /** Le fil d'où vient la demande, quand elle vient d'un fil (voir findDiscussion). */
 export interface ThreadContext {
   discussionId: string;
@@ -251,6 +339,7 @@ export function buildMessage(
       "",
       "Où et comment publier :",
       publishingRules(thread, project.capabilities.mergeRequest),
+      delegationInstructions(project.delegation, project.capabilities.mergeRequest),
     ].join("\n");
   }
 
@@ -270,6 +359,7 @@ export function buildMessage(
     "",
     "Où et comment publier :",
     publishingRules(thread, project.capabilities.mergeRequest),
+    delegationInstructions(project.delegation, project.capabilities.mergeRequest),
   ].join("\n");
 }
 
