@@ -24,13 +24,23 @@ que ce nettoyage remplace. Les réactions emoji du bot partent aussi : elles
 survivraient à la suppression des notes et fausseraient la lecture.
 """
 
+import datetime
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+
+def now_iso():
+    """Même forme que les horodatages écrits par le daemon (Date#toISOString) :
+    UTC, millisecondes, suffixe Z. Le journal est relu par du code TypeScript,
+    pas seulement par des yeux humains."""
+    stamp = datetime.datetime.now(datetime.timezone.utc)
+    return stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 def load_dotenv(path=".env"):
     """Charge .env, comme le fait le daemon.
@@ -213,6 +223,77 @@ def forget_requests(project, iid):
     path.write_text("\n".join(kept) + ("\n" if kept else ""))
 
 
+def purge_todos(project):
+    """Marque « done » les to-dos EN ATTENTE du bot sur ce dépôt.
+
+    LE BANC NE CIBLE PAS SA PROPRE DEMANDE. Il poste une mention, puis lance
+    un daemon borné à une tâche — et ce daemon sert le PREMIER to-do venu, pas
+    celui que le banc vient de créer. Tant qu'aucun reliquat ne traîne, les
+    deux coïncident et personne ne voit le problème.
+
+    Observé le 4 août 2026 : une campagne interrompue avait laissé des to-dos
+    en attente. Le tirage suivant, étiqueté gpt-oss-120b / branche
+    bench/gpt-oss-120b / MR !9, a relu la MR !13 — pendant que sa propre
+    demande restait en file, jamais servie (CDS_MAX_TASKS=1 arrête après la
+    première). `collect` lisait ensuite !9, n'y trouvait rien, et écrivait
+    « 0 remarque » pour un modèle qui avait travaillé ailleurs. Une mesure
+    fausse qui se lit comme une mesure.
+
+    Appelée AVANT de poster la demande, sinon elle effacerait celle-ci.
+
+    Bornée au dépôt visé : les to-dos d'un autre dépôt n'appartiennent pas au
+    banc, et le daemon ne les servirait de toute façon pas s'il n'est pas
+    configuré pour. Même champ que le daemon (`todo.project.path_with_namespace`,
+    voir src/types.ts) — pas de devinette sur la forme de la réponse.
+
+    DEUX GESTES, ET LES DEUX SONT NÉCESSAIRES.
+
+    Marquer le to-do « done » côté GitLab ne suffit PAS : `collectTodos()`
+    (src/daemon/todos.ts) ramasse les `pending` ET les `done` récents, dans une
+    fenêtre de rattrapage de `lookbackMs`. Un to-do qu'on vient de résoudre
+    tombe pile dedans — il serait repêché aussitôt.
+
+    Ce qui fait vraiment sauter une demande, c'est son statut dans le journal
+    d'idempotence : `canProcess()` (src/daemon/store.ts) ne laisse passer que
+    `undefined`, `claimed` et `acked`. On y écrit donc `done`, statut terminal
+    qu'aucune écriture ultérieure ne peut faire régresser.
+
+    L'inverse ne suffit pas non plus : sans le geste GitLab, la liste des
+    to-dos en attente ne désenfle jamais et chaque tirage repaie leur lecture."""
+    purged = 0
+    lines = []
+    for todo in api("/todos?state=pending&per_page=100", BOT_TOKEN) or []:
+        if (todo.get("project") or {}).get("path_with_namespace") != project:
+            continue
+        match = re.search(r"#note_(\d+)", todo.get("target_url", ""))
+        if match:
+            lines.append(
+                json.dumps(
+                    {
+                        "key": f"note:{match.group(1)}",
+                        "todoId": todo["id"],
+                        "status": "done",
+                        "at": now_iso(),
+                        "reason": "reliquat écarté par le banc avant un tirage",
+                    }
+                )
+            )
+        try:
+            api(f"/todos/{todo['id']}/mark_as_done", BOT_TOKEN, method="POST")
+        except urllib.error.HTTPError:
+            # 304 quand il est déjà done, 404 s'il a disparu : sans
+            # conséquence, le but est qu'il ne soit plus en attente.
+            pass
+        purged += 1
+
+    if lines:
+        path = Path(STATE_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as handle:
+            handle.write("\n".join(lines) + "\n")
+    return purged
+
+
 def skills_of(conversation_url):
     """Les compétences maison que l'agent a RÉELLEMENT reçues.
 
@@ -370,6 +451,8 @@ def main():
         removed = wipe(project, iid)
         forgotten = forget_conversation(project, iid)
         forget_requests(project, iid)
+        # AVANT de poster : le daemon sert le premier to-do venu, pas le nôtre.
+        purged = purge_todos(project)
 
         encoded = urllib.parse.quote(project, safe="")
         api(
@@ -381,6 +464,7 @@ def main():
         print(
             f"    !{iid} — {removed} note(s) effacée(s)"
             + (", conversation oubliée" if forgotten else "")
+            + (f", {purged} to-do(s) en reliquat écarté(s)" if purged else "")
             + ", demande postée"
         )
         return
