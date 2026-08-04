@@ -22,20 +22,39 @@
 
 # modèle                                        branche                              # ctx    in / out
 openrouter/openai/gpt-oss-120b                  bench/gpt-oss-120b                   # 131k   0.04 / 0.17
+openrouter/qwen/qwen3-coder-30b-a3b-instruct    bench/qwen3-coder-30b-a3b            # 262k   0.07 / 0.27
+openrouter/qwen/qwen3-coder-next                bench/qwen3-coder-next-80b-a3b       # 262k   0.12 / 0.80
 openrouter/qwen/qwen3.6-35b-a3b                 bench/qwen3-6-35b-a3b                # 262k   0.14 / 1.00
 openrouter/xiaomi/mimo-v2.5                     bench/mimo-v2-5-310b-a15b            # 1.05M  0.14 / 0.28
 openrouter/minimax/minimax-m2.5                 bench/minimax-m2-5-230b-a10b         # 205k   0.15 / 0.90
 openrouter/deepseek/deepseek-v4-flash           bench/deepseek-v4-flash-284b-a13b    # 0.19 / 0.55
+openrouter/qwen/qwen3.6-27b                     bench/qwen3-6-27b                    # 262k   0.29 / 2.40
+openrouter/qwen/qwen3.5-122b-a10b               bench/qwen3-5-122b-a10b              # 262k   0.29 / 2.40  fp4 DeepInfra
+openrouter/nvidia/nemotron-3-super-120b-a12b    bench/nemotron-3-super               # 262k   0.30 / 0.90  fp4 Nebius
 openrouter/moonshotai/kimi-k2.6                 bench/kimi-k2-6-196b-a11b            # 262k   0.60 / 3.41
-openrouter/nvidia/nemotron-3-ultra-550b-a55b    bench/nemotron-3-ultra-550b-a55b     # 512k   0.60 / 3.60
 openrouter/z-ai/glm-5.2                         bench/glm-5-2                        # 1.05M  0.61 / 1.93
-openrouter/moonshotai/kimi-k2.7-code            bench/kimi-k2-7                      # 262k   0.73 / 3.50
 
-#openrouter/moonshotai/kimi-k3                   bench/kimi-k3                        # 1.05M  3.00 / 15.00
-
-# ── Références payantes, pour situer le reste ───────────────────────────────
-# Pas des candidats d'exploitation : une borne haute. Si un modèle à 0,61 $/M
-# en trouve autant, c'est lui qu'on garde.
+# ── Écarté : qwen2.5-coder-32b ──────────────────────────────────────────────
+# Demandé, puis écarté sur relevé : qwen/qwen-2.5-coder-32b-instruct n'expose
+# PAS "tools" au catalogue OpenRouter (champ supported_parameters, relevé le
+# 4 août 2026). Sans appel d'outil il ne peut ni ouvrir un fichier ni publier
+# une remarque — ses trois tirages rendraient exactement les journaux vides
+# diagnostiqués sur la campagne du 4 août. Son contexte est par ailleurs de
+# 32k, contre 262k pour tout le reste de cette liste.
 #
-#openrouter/anthropic/claude-sonnet-5            bench/claude-sonnet-5                # 2.00 / 10.00
-#openrouter/anthropic/claude-opus-5              bench/claude-opus-5                  # 5.00 / 25.00
+# Remplacé dans la liste ci-dessus par qwen3-coder-30b-a3b-instruct : même
+# créneau (spécialisé code, ~30B), mais capable d'outils et à 262k.
+
+# ── Écarté : nemotron-3-ultra-550b-a55b ─────────────────────────────────────
+# Remplacé par nemotron-3-super-120b-a12b le 4 août 2026. L'Ultra exige 512 Go
+# et n'était qu'une borne haute : 3 défauts sur 25 en manche 3, la plus faible
+# couverture de la campagne. Le Super est mesurable dans sa configuration de
+# déploiement réelle.
+#
+# ⚠ QUANTIFICATION NON GARANTIE. Les deux lignes marquées « fp4 » ne le sont
+# que chez UN fournisseur : Nebius pour le Super (les autres servent bf16, ou
+# ne le déclarent pas), DeepInfra pour qwen3.5-122b (les autres servent fp8 ou
+# bf16). OpenRouter route seul : deux tirages d'une même ligne peuvent tomber
+# sur deux quantifications différentes, sans que rien ne le signale. Tant que
+# le routage n'est pas épinglé, ces prix et ces quantifications sont ce qui est
+# SERVI EN fp4, pas ce qui sera nécessairement mesuré. Voir docs/openhands.md.
