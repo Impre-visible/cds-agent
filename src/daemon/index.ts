@@ -571,6 +571,15 @@ async function checkOpenHands(): Promise<void> {
       apiKey: config.openhandsApiKey,
     });
     const status = await client.health();
+    // Un 200 ne prouve pas que c'est OpenHands en face — n'importe quelle
+    // application web répond 200 quelque part. Le corps, lui, vaut signature :
+    // l'instance rend `"OK"`, guillemets JSON compris.
+    if (status.replaceAll('"', "").trim().toUpperCase() !== "OK") {
+      throw new Error(
+        `GET /health a rendu « ${status.slice(0, 60)} » au lieu de "OK" — ` +
+          "un autre service occupe ce port",
+      );
+    }
     log.info(`OpenHands répond (GET /health → ${status}).`);
 
     // Le modèle vit dans les réglages de l'instance, pas dans son
@@ -594,9 +603,33 @@ async function checkOpenHands(): Promise<void> {
       );
     }
   } catch (error) {
+    // FAIL-CLOSED EN MODE BANC, tolérant en exploitation — et la différence
+    // n'est pas de la coquetterie.
+    //
+    // Un daemon d'exploitation tourne des jours : l'instance peut être en
+    // train de redémarrer, elle reviendra, et tomber ferait perdre le
+    // polling GitLab pour un incident de trente secondes. Il avertit et
+    // continue.
+    //
+    // Une exécution bornée par CDS_MAX_TASKS est un TIRAGE DE MESURE : elle
+    // consomme une demande, une merge request effacée, un créneau de
+    // campagne, et n'a aucune seconde chance. Le 4 août 2026, un autre
+    // service local écoutait sur le port d'OpenHands ; ce chemin-ci a
+    // simplement averti, puis a laissé le banc brûler ses tirages contre un
+    // backend Express. Un tirage qui ne peut pas aboutir ne doit pas
+    // commencer.
+    const message = `OpenHands injoignable au démarrage (${(error as Error).message})`;
+    if (config.maxTasks > 0) {
+      log.error(
+        `ARRÊT : ${message}. Exécution bornée (CDS_MAX_TASKS=${config.maxTasks}) : ` +
+          "aucune demande n'est consommée contre une instance absente. " +
+          `Vérifiez que c'est bien OpenHands qui écoute sur ${config.openhandsUrl}.`,
+      );
+      process.exit(1);
+    }
     log.warn(
-      `⚠ OpenHands injoignable au démarrage (${(error as Error).message}) — le daemon démarre quand ` +
-        "même, mais toute demande échouera tant que l'instance ne répond pas.",
+      `⚠ ${message} — le daemon démarre quand même, mais toute demande échouera ` +
+        "tant que l'instance ne répond pas.",
     );
   }
 }

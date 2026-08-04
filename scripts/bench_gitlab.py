@@ -75,6 +75,10 @@ BOT_TOKEN = os.environ.get("GITLAB_TOKEN", "")
 # c'est alors LUI qui doit être mainteneur pour effacer les notes du bot.
 HUMAN_TOKEN = os.environ.get("BENCH_GITLAB_TOKEN") or BOT_TOKEN
 STATE_FILE = os.environ.get("STATE_FILE", "./state/processed.jsonl")
+# L'instance qui exécute réellement le travail. Même source que le daemon
+# (config.ts) : sans elle, le banc efface des merge requests pour rien.
+OPENHANDS_URL = os.environ.get("OPENHANDS_URL", "").rstrip("/")
+OPENHANDS_API_KEY = os.environ.get("OPENHANDS_API_KEY", "")
 REQUEST_TEXT = os.environ.get(
     "BENCH_REQUEST", "@{bot} Review ca s'il te plait."
 )
@@ -233,14 +237,81 @@ def skills_of(conversation_url):
     return "+".join(sorted(ours & names)) or "aucune"
 
 
+def openhands_get(path, timeout=15):
+    """GET sur l'instance OpenHands. Rend (code, corps). Ne lève pas sur 4xx/5xx."""
+    request = urllib.request.Request(f"{OPENHANDS_URL}{path}")
+    if OPENHANDS_API_KEY:
+        request.add_header("X-Session-API-Key", OPENHANDS_API_KEY)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read().decode(errors="replace")
+    except urllib.error.HTTPError as error:
+        return error.code, error.read().decode(errors="replace")
+
+
+def check_openhands():
+    """L'instance répond, et c'est BIEN OpenHands qui répond.
+
+    Les deux moitiés comptent, et la seconde a été apprise à la dure : le
+    4 août 2026, un autre projet local écoutait sur le port 3000 pendant que
+    `cds-openhands` était mort (Exited 137). Le banc a effacé trois merge
+    requests et lancé trois daemons avant que quiconque s'en aperçoive — les
+    404 venaient d'un backend Express, pas d'OpenHands.
+
+    D'où le contrôle en deux temps :
+
+      1. `/health` doit rendre `OK`. Un serveur étranger qui renvoie 404 ou
+         autre chose tombe ici.
+      2. une VRAIE route de l'API doit rendre du JSON. C'est ce qui distingue
+         l'API d'OpenHands d'une application web quelconque qui servirait sa
+         page d'accueil sur n'importe quel chemin — y compris OpenHands
+         lui-même, dont le frontend répond en HTML, avec un 200, sur les
+         chemins d'API qui n'existent pas.
+
+    `app-conversations/search` est relevée dans le journal d'accès de
+    l'instance (`GET /api/v1/app-conversations/search?limit=10 → 200 OK`),
+    pas devinée. Elle est en lecture seule."""
+    if not OPENHANDS_URL:
+        sys.exit("OPENHANDS_URL absent : le banc ne saurait pas à qui parler")
+
+    try:
+        status, body = openhands_get("/health")
+    except Exception as error:
+        sys.exit(
+            f"OpenHands injoignable sur {OPENHANDS_URL} : {error}\n"
+            "  démarrez l'instance : "
+            "docker compose -f docker/openhands/docker-compose.yml up -d"
+        )
+    if status != 200 or body.strip().strip('"') != "OK":
+        sys.exit(
+            f"{OPENHANDS_URL}/health a répondu {status} « {body.strip()[:80]} », "
+            'attendu 200 "OK".\n'
+            "  Ce n'est pas OpenHands qui écoute sur ce port. Vérifiez :\n"
+            "    lsof -nP -iTCP:$(printf '%s' \"$OPENHANDS_URL\" | sed 's|.*:||') -sTCP:LISTEN"
+        )
+
+    status, body = openhands_get("/api/v1/app-conversations/search?limit=1")
+    try:
+        json.loads(body)
+    except ValueError:
+        sys.exit(
+            f"{OPENHANDS_URL} répond à /health mais son API rend du non-JSON "
+            f"({status}, « {body.strip()[:60]} »).\n"
+            "  Un autre service occupe le port, ou l'instance n'a pas fini de démarrer."
+        )
+    print(f"  OpenHands : {OPENHANDS_URL} répond")
+
+
 def check(branches):
-    """Contrôle préalable : le jeton répond, et chaque branche a UNE merge
-    request ouverte.
+    """Contrôle préalable : l'instance OpenHands est là, le jeton répond, et
+    chaque branche a UNE merge request ouverte.
 
     Existe parce que l'inverse coûte cher : sans lui, un .env non chargé
     produisait douze échecs identiques, douze lignes de CSV inutiles, et aucun
     message avant la fin. Un banc qui va effacer des commentaires doit dire ce
     qui cloche AVANT d'en effacer un seul."""
+    check_openhands()
+
     if not HUMAN_TOKEN:
         sys.exit(
             "aucun jeton. GITLAB_TOKEN doit être dans .env ou dans l'environnement\n"

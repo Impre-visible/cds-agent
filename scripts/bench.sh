@@ -87,20 +87,23 @@ if [ "$DRY_RUN" = "1" ]; then
   exit 0
 fi
 
-# Contrôle préalable AVANT d'effacer quoi que ce soit : jeton valide, et une
-# merge request ouverte par branche. Sans lui, un .env non chargé donnait
-# douze échecs identiques et un CSV vide — après coup.
+# Contrôle préalable AVANT d'effacer quoi que ce soit : instance OpenHands
+# debout, jeton valide, une merge request ouverte par branche. Sans lui, un
+# .env non chargé donnait douze échecs identiques et un CSV vide — après coup.
+#
+# INCONDITIONNEL, y compris sans branche. C'est le mode manuel qui l'a montré :
+# il n'efface rien, donc l'ancienne garde `[ -n "$branches" ]` le dispensait de
+# tout contrôle — et il consommait quand même un to-do réel contre une instance
+# absente. Un tirage brûlé reste un tirage brûlé, qu'il ait effacé ou non.
 branches=""
 for branch in "${branches_all[@]:-}"; do [ -n "$branch" ] && branches="$branches $branch"; done
-if [ -n "$branches" ]; then
-  echo "Contrôle préalable…"
-  # shellcheck disable=SC2086
-  if ! python3 "$HELPER" check $branches; then
-    echo "Rien n'a été modifié." >&2
-    exit 1
-  fi
-  echo
+echo "Contrôle préalable…"
+# shellcheck disable=SC2086
+if ! python3 "$HELPER" check $branches; then
+  echo "Rien n'a été modifié." >&2
+  exit 1
 fi
+echo
 
 mkdir -p "$BENCH_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
