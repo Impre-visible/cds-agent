@@ -192,6 +192,13 @@ export interface LlmSettings {
   baseUrl: string | null;
   /** Le serveur ne rend jamais la clé, seulement si elle est posée. */
   apiKeySet: boolean;
+  /**
+   * `litellm_extra_body` tel que l'instance le porte. Rendu pour que
+   * reconcile() puisse voir qu'une contrainte de quantification a changé —
+   * sans quoi le banc laisserait le pin du modèle précédent s'appliquer au
+   * suivant. Voir openhands/quantization.ts.
+   */
+  extraBody: Record<string, unknown>;
 }
 
 /** Ce qu'on veut imposer à l'instance — voir setLlmSettings. */
@@ -199,6 +206,15 @@ export interface DesiredLlm {
   model: string;
   baseUrl?: string | undefined;
   apiKey?: string | undefined;
+  /**
+   * Paramètres bruts ajoutés au corps de la requête d'inférence. Sert à
+   * imposer la quantification servie par OpenRouter (`provider.quantizations`
+   * + `allow_fallbacks: false`) — voir openhands/quantization.ts.
+   *
+   * TOUJOURS envoyé, y compris vide : c'est ce qui EFFACE la contrainte du
+   * modèle précédent quand le banc enchaîne les modèles sur une même instance.
+   */
+  extraBody?: Record<string, unknown> | undefined;
 }
 
 export interface OpenHandsClientOptions {
@@ -318,7 +334,13 @@ export class OpenHandsClient {
    */
   async getLlmSettings(): Promise<LlmSettings> {
     const settings = await this.#v1<{
-      agent_settings?: { llm?: { model?: string | null; base_url?: string | null } };
+      agent_settings?: {
+        llm?: {
+          model?: string | null;
+          base_url?: string | null;
+          litellm_extra_body?: Record<string, unknown> | null;
+        };
+      };
       llm_api_key_set?: boolean;
     }>("/settings");
 
@@ -326,6 +348,7 @@ export class OpenHandsClient {
       model: settings?.agent_settings?.llm?.model ?? null,
       baseUrl: settings?.agent_settings?.llm?.base_url ?? null,
       apiKeySet: settings?.llm_api_key_set === true,
+      extraBody: settings?.agent_settings?.llm?.litellm_extra_body ?? {},
     };
   }
 
@@ -342,6 +365,12 @@ export class OpenHandsClient {
     // écraserait celle d'un fournisseur qui n'en a pas besoin.
     if (desired.baseUrl) llm.base_url = desired.baseUrl;
     if (desired.apiKey) llm.api_key = desired.apiKey;
+    // Envoyé même vide, à la différence de base_url ci-dessus : un {} EFFACE
+    // la contrainte du modèle précédent, ce qui est le comportement voulu.
+    // L'omettre la laisserait en place — `agent_settings_diff` fusionne.
+    if (desired.extraBody !== undefined) {
+      llm.litellm_extra_body = desired.extraBody;
+    }
 
     return this.#v1<void>("/settings", {
       method: "POST",

@@ -108,7 +108,7 @@ echo
 mkdir -p "$BENCH_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 CSV="$BENCH_DIR/$STAMP.csv"
-echo "modele,branche,tirage,mr,issue,secondes,ligne,fichier,generale,suggestions,competences,conversation" > "$CSV"
+echo "modele,quantification,deployable,branche,tirage,mr,issue,secondes,ligne,fichier,generale,suggestions,competences,conversation" > "$CSV"
 
 echo "Banc de mesure — ${#models[@]} modèle(s) × $RUNS tirage(s), résultats dans $CSV"
 echo
@@ -123,7 +123,7 @@ for i in "${!models[@]}"; do
 
   if [ -n "$branch" ] && ! python3 "$HELPER" prepare "$branch"; then
     echo "  ⚠ préparation impossible — ligne ignorée"
-    printf '%s,%s,%s,,preparation-impossible,,,,,,,\n' "$model" "$branch" "$run" >> "$CSV"
+    printf '%s,,,%s,%s,,preparation-impossible,,,,,,,\n' "$model" "$branch" "$run" >> "$CSV"
     echo
     continue
   fi
@@ -147,7 +147,7 @@ for i in "${!models[@]}"; do
   [ -n "$branch" ] && published=$(python3 "$HELPER" collect "$branch" 2>/dev/null || echo '{}')
 
   python3 - "$model" "$branch" "$log" "$CSV" "$published" "$run" <<'PY'
-import re, sys, csv, json, subprocess
+import re, os, sys, csv, json, subprocess
 model, branch, log_path, csv_path, published, run = sys.argv[1:7]
 counts = json.loads(published or "{}")
 
@@ -173,9 +173,26 @@ if url:
         capture_output=True, text=True,
     ).stdout.strip()
 
+# Quantification imposée à OpenRouter pour ce modèle, et si elle correspond à
+# sa configuration de déploiement réelle. Lues dans la MÊME table que le daemon
+# — les recopier ici les ferait diverger le jour où l'une des deux change.
+#
+# « libre » = modèle absent de la table : OpenRouter route seul, deux tirages
+# peuvent tomber sur deux quantifications différentes. « ? » pour deployable
+# n'est PAS « non » : personne ne s'est prononcé.
+quant, deployable = "libre", "?"
+try:
+    table = json.load(open(os.environ.get("QUANTIZATIONS_FILE", "quantizations.json")))
+    entry = table.get(model)
+    if entry:
+        quant = "+".join(entry["quantizations"])
+        deployable = "oui" if entry["deployable"] else "non"
+except (OSError, ValueError, KeyError, TypeError):
+    pass
+
 with open(csv_path, "a", newline="", encoding="utf-8") as handle:
     csv.writer(handle).writerow([
-        model, branch, run, counts.get("iid", ""), issue, seconds,
+        model, quant, deployable, branch, run, counts.get("iid", ""), issue, seconds,
         counts.get("ligne", ""), counts.get("fichier", ""),
         counts.get("generale", ""), counts.get("suggestions", ""), skills, url,
     ])
@@ -188,6 +205,7 @@ if row:
     total = ligne + counts.get("fichier", 0) + counts.get("generale", 0)
     print(
         f"  {issue} en {seconds} s — {total} remarque(s), dont {ligne} ancrée(s)"
+        + f" — quantif. {quant}" + ("" if deployable == "oui" else f" (déployable : {deployable})")
         + (f" — compétences : {skills}" if skills else "")
     )
 else:

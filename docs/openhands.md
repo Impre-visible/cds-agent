@@ -28,6 +28,7 @@ intacts sur `hardening`.
 - [Lancer une revue](#lancer-une-revue)
 - [Ancrage sur le diff, suggestions, compétences](#ancrage-sur-le-diff-suggestions-compétences)
 - [Où vivent les prompts et les compétences](#où-vivent-les-prompts-et-les-compétences)
+- [Imposer la quantification](#imposer-la-quantification)
 - [Revue à passes multiples](#revue-à-passes-multiples)
 - [Délégation à un sous-agent](#délégation-à-un-sous-agent)
 - [Le bac à sable](#le-bac-à-sable)
@@ -646,6 +647,120 @@ inaperçue : le serveur ne rend jamais la clé, seulement `llm_api_key_set`. La
 seule alternative serait de réécrire les réglages à chaque démarrage, ce qui
 effacerait sans prévenir tout réglage fait à la main. Si vous changez de clé
 sans changer de modèle, passez par l'interface ou le curl ci-dessus.
+
+## Imposer la quantification
+
+### Le problème
+
+OpenRouter route entre fournisseurs, et ils ne servent pas tous la même quantification du
+même modèle. Relevé sur la liste du banc : **kimi-k2.6 est servi en int4 par 7 fournisseurs,
+fp4 par 5, fp8 par 2, bf16 par 1**. Ses trois tirages ont donc pu tourner sur trois
+quantifications différentes, sans que rien ne l'écrive nulle part. Une part de la variance
+attribuée aux modèles vient peut-être de là.
+
+### La chaîne, vérifiée de bout en bout
+
+```
+litellm_extra_body (réglages LLM d'OpenHands)
+  → extra_body de LiteLLM
+    → corps de la requête OpenRouter
+```
+
+**Vérifié, pas supposé.** Une contrainte volontairement impossible
+(`quantizations: ["int4"]` sur nemotron-3-super, qui n'en a pas) a fait échouer l'appel du
+bac à sable avec le message exact d'OpenRouter :
+
+```
+No endpoints found for the request with quantization: int4
+```
+
+Le champ traverse. **Aucun proxy local n'est nécessaire.**
+
+### Pourquoi `allow_fallbacks: false` rend la mesure fiable
+
+La documentation d'OpenRouter décrit `quantizations` comme un filtre qui « déprioritise » les
+fournisseurs non conformes. Avec `allow_fallbacks: false`, c'est un filtre **dur** : mesuré,
+une quantification indisponible rend un 404, pas un repli silencieux.
+
+D'où la propriété qui compte : **un tirage qui aboutit a forcément tourné sur la
+quantification demandée.** L'enforcement est garanti par construction, pas par observation —
+contrairement à la colonne `competences` de la manche 4, qui lisait quelque chose et
+affichait « aucune » sans que personne ne s'en aperçoive.
+
+C'est heureux, car la LIRE après coup n'est pas possible : le fournisseur retenu figure dans
+la réponse de complétion, or ces appels ont lieu dans le bac à sable ; et
+`GET /api/v1/activity` d'OpenRouter exige une « management key » (403 avec la clé
+d'inférence — vérifié).
+
+### La table
+
+`quantizations.json`, à la racine (`QUANTIZATIONS_FILE` pour en changer) :
+
+```json
+{
+  "openrouter/openai/gpt-oss-120b": { "quantizations": ["fp4"], "deployable": true },
+  "openrouter/moonshotai/kimi-k2.6": { "quantizations": ["int4"], "deployable": false }
+}
+```
+
+**Fichier absent ⇒ routage libre, comportement inchangé.** Fichier présent mais invalide ⇒
+le daemon ne démarre pas : quelqu'un a voulu contraindre le routage, le faire à moitié
+serait pire que pas du tout. Une quantification inventée, une clé au singulier, un
+`deployable` non booléen sont refusés au chargement.
+
+Valeurs acceptées, relevées dans la documentation OpenRouter : `int4`, `int8`, `fp4`,
+`mxfp4`, `nvfp4`, `fp6`, `fp8`, `mxfp8`, `fp16`, `bf16`, `fp32`, `unknown`.
+
+`deployable: false` = **borne haute** : OpenRouter ne descend pas assez bas (pas d'IQ2 pour
+glm-5.2, pas de Q2 pour kimi-k2.6, pas de fp4 pour minimax-m2.5 ni mimo-v2.5). Le score
+reste utile — « voici ce que produirait ce modèle en pleine qualité » — mais il ne prédit
+rien sur la machine cible.
+
+### Le piège que la table ferme
+
+Le banc enchaîne les modèles sur **une même instance**, et `agent_settings_diff` fusionne.
+Un modèle absent de la table reçoit donc explicitement `litellm_extra_body: {}` — sans quoi
+la contrainte du modèle précédent resterait en place, et un `fp8` oublié sur un modèle qui
+n'en a pas produirait un 404 sur ses trois tirages.
+
+### Ce qui apparaît dans le CSV
+
+Deux colonnes, `quantification` et `deployable`, juste après `modele` :
+
+```csv
+modele,quantification,deployable,branche,tirage,…
+openrouter/openai/gpt-oss-120b,fp4,oui,bench/gpt-oss-120b,1,…
+openrouter/moonshotai/kimi-k2.6,int4,non,bench/kimi-k2-6-196b-a11b,1,…
+openrouter/inconnu/modele,libre,?,…
+```
+
+`libre` = modèle absent de la table. `?` n'est **pas** `non` : personne ne s'est prononcé, et
+écrire `non` laisserait croire qu'une borne haute a été identifiée comme telle.
+
+Et au démarrage du daemon :
+
+```
+Quantification imposée : fp4 (allow_fallbacks=false). Un tirage qui aboutit a
+forcément tourné dessus ; sinon OpenRouter rend un 404.
+```
+
+### Vérifier à la main
+
+```bash
+# Ce qu'un modèle propose, fournisseur par fournisseur
+curl -s https://openrouter.ai/api/v1/models/moonshotai/kimi-k2.6/endpoints \
+  | python3 -c 'import json,sys; [print(e["provider_name"], e["quantization"])
+                for e in json.load(sys.stdin)["data"]["endpoints"]]'
+
+# Ce que l'instance impose réellement en ce moment
+curl -s http://127.0.0.1:3000/api/v1/settings \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["agent_settings"]["llm"]["litellm_extra_body"])'
+```
+
+⚠ **Fragilité à connaître** : `nemotron-3-super` n'a qu'UN fournisseur en fp4 (Nebius), et
+`qwen3.5-122b` qu'un seul aussi (DeepInfra). Si ce fournisseur est indisponible ou limité,
+`allow_fallbacks: false` fait **échouer** le tirage au lieu de le dégrader en silence. C'est
+le bon compromis pour une mesure, mais il faut s'attendre à des tirages perdus.
 
 ## Revue à passes multiples
 

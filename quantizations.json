@@ -1,0 +1,14 @@
+{
+  "openrouter/qwen/qwen3.6-27b": { "quantizations": ["fp8"], "deployable": true },
+  "openrouter/qwen/qwen3-coder-30b-a3b-instruct": { "quantizations": ["fp8"], "deployable": true },
+  "openrouter/qwen/qwen3.6-35b-a3b": { "quantizations": ["fp8"], "deployable": true },
+  "openrouter/qwen/qwen3-coder-next": { "quantizations": ["fp8"], "deployable": true },
+  "openrouter/openai/gpt-oss-120b": { "quantizations": ["fp4"], "deployable": true },
+  "openrouter/nvidia/nemotron-3-super-120b-a12b": { "quantizations": ["fp4"], "deployable": true },
+  "openrouter/qwen/qwen3.5-122b-a10b": { "quantizations": ["fp4"], "deployable": true },
+  "openrouter/minimax/minimax-m2.5": { "quantizations": ["fp8"], "deployable": false },
+  "openrouter/deepseek/deepseek-v4-flash": { "quantizations": ["fp8"], "deployable": true },
+  "openrouter/xiaomi/mimo-v2.5": { "quantizations": ["fp8"], "deployable": false },
+  "openrouter/z-ai/glm-5.2": { "quantizations": ["fp4"], "deployable": false },
+  "openrouter/moonshotai/kimi-k2.6": { "quantizations": ["int4"], "deployable": false }
+}

@@ -11,6 +11,12 @@ import { ShutdownController, drain } from "./shutdown.ts";
 import { conversations, runOpenHandsTask } from "../tasks/openhands.ts";
 import { applyModel } from "../openhands/model.ts";
 import { OpenHandsClient } from "../openhands/client.ts";
+import {
+  describeQuantization,
+  extraBodyFor,
+  loadQuantizationTable,
+  type QuantizationTable,
+} from "../openhands/quantization.ts";
 import { SeenTracker } from "./seen.ts";
 import { bootstrapIfFresh } from "./bootstrap.ts";
 import { collectTodos as collectTodosWith } from "./todos.ts";
@@ -26,6 +32,18 @@ import {
 } from "../limits.ts";
 
 const store = new RequestStore(config.stateFile);
+
+/**
+ * Table modèle → quantification imposée à OpenRouter. Chargée une fois au
+ * démarrage : contrairement à projects.json, elle ne décide d'aucune
+ * autorisation et n'a pas besoin d'être relue à chaud — et le banc relance un
+ * daemon par tirage de toute façon.
+ *
+ * Fichier absent ⇒ table vide ⇒ routage libre, comportement inchangé.
+ * Fichier présent mais invalide ⇒ le daemon ne démarre pas : quelqu'un a voulu
+ * contraindre le routage, le faire à moitié serait pire que pas du tout.
+ */
+let quantizations: QuantizationTable = {};
 let bot: GitLabUser;
 
 /**
@@ -570,6 +588,18 @@ async function checkOpenHands(): Promise<void> {
       baseUrl: config.openhandsUrl,
       apiKey: config.openhandsApiKey,
     });
+    if (config.agentModel) {
+      const quantization = describeQuantization(config.agentModel, quantizations);
+      log.info(
+        quantization === "libre"
+          ? `Quantification : libre — OpenRouter route seul pour ${config.agentModel}. ` +
+              `Deux tirages peuvent tomber sur deux quantifications différentes ` +
+              `(voir ${config.quantizationsFile}).`
+          : `Quantification imposée : ${quantization} (allow_fallbacks=false). ` +
+              `Un tirage qui aboutit a forcément tourné dessus ; sinon OpenRouter rend un 404.`,
+      );
+    }
+
     const status = await client.health();
     // Un 200 ne prouve pas que c'est OpenHands en face — n'importe quelle
     // application web répond 200 quelque part. Le corps, lui, vaut signature :
@@ -593,6 +623,11 @@ async function checkOpenHands(): Promise<void> {
           model: config.agentModel,
           baseUrl: config.inferenceUrl,
           apiKey: config.inferenceApiKey,
+          // Toujours calculé, même absent de la table : `{}` EFFACE la
+          // contrainte du modèle précédent. Le banc enchaîne les modèles sur
+          // une même instance — un `fp8` oublié sur un modèle qui n'en a pas
+          // produirait un 404 sur ses trois tirages.
+          extraBody: extraBodyFor(config.agentModel, quantizations),
         },
         {
           getLlmSettings: () => client.getLlmSettings(),
@@ -658,6 +693,16 @@ async function main(): Promise<void> {
   } catch (error) {
     log.error(
       `ARRÊT : configuration des projets invalide (${config.projectsFile}) : ${(error as Error).message}`,
+    );
+    process.exit(1);
+  }
+
+  // Même fail-closed, même endroit : avant tout appel réseau.
+  try {
+    quantizations = loadQuantizationTable(config.quantizationsFile);
+  } catch (error) {
+    log.error(
+      `ARRÊT : table de quantification invalide (${config.quantizationsFile}) : ${(error as Error).message}`,
     );
     process.exit(1);
   }

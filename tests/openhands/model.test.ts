@@ -7,6 +7,7 @@ const INTENT = {
   model: "openrouter/xiaomi/mimo-v2.5",
   baseUrl: "https://openrouter.ai/api/v1",
   apiKey: "sk-or-xxx",
+  extraBody: {},
 };
 
 function current(overrides: Partial<LlmSettings> = {}): LlmSettings {
@@ -14,6 +15,7 @@ function current(overrides: Partial<LlmSettings> = {}): LlmSettings {
     model: "openrouter/xiaomi/mimo-v2.5",
     baseUrl: "https://openrouter.ai/api/v1",
     apiKeySet: true,
+    extraBody: {},
     ...overrides,
   };
 }

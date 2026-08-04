@@ -340,6 +340,9 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
      * ProjectsRegistry.
      */
     projectsFile: env.PROJECTS_FILE ?? "./projects.json",
+    // Table modèle → quantification imposée à OpenRouter. Fichier ABSENT =
+    // routage libre, comportement inchangé. Voir openhands/quantization.ts.
+    quantizationsFile: env.QUANTIZATIONS_FILE ?? "./quantizations.json",
 
     /**
      * Défauts globaux injectés dans la résolution par projet

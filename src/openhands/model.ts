@@ -28,6 +28,11 @@ export interface ModelIntent {
   model: string;
   baseUrl: string | undefined;
   apiKey: string | undefined;
+  /**
+   * Contrainte de quantification à imposer, ou `{}` pour laisser OpenRouter
+   * router librement. Voir openhands/quantization.ts.
+   */
+  extraBody: Record<string, unknown>;
 }
 
 export interface ReconcileDecision {
@@ -61,6 +66,11 @@ export function reconcile(
   current: LlmSettings,
 ): ReconcileDecision {
   const modelChanged = current.model !== intent.model;
+  // Comparaison structurelle : les deux côtés viennent d'un JSON, l'ordre des
+  // clés est stable (celui d'insertion) et les valeurs sont scalaires ou des
+  // tableaux de scalaires. Suffisant ici, et ça évite une dépendance.
+  const extraBodyChanged =
+    JSON.stringify(current.extraBody ?? {}) !== JSON.stringify(intent.extraBody);
   const baseUrlChanged =
     intent.baseUrl !== undefined && current.baseUrl !== intent.baseUrl;
   const keyMissing = intent.apiKey !== undefined && !current.apiKeySet;
@@ -70,6 +80,21 @@ export function reconcile(
       apply: true,
       modelChanged: true,
       reason: `modèle : ${current.model ?? "(aucun)"} → ${intent.model}`,
+    };
+  }
+  // AVANT baseUrl et la clé : une contrainte de quantification périmée est le
+  // défaut le plus coûteux des trois. Le banc enchaîne les modèles sur une même
+  // instance ; un `fp8` laissé par le modèle précédent sur un modèle qui n'en a
+  // pas produit un 404 sur ses trois tirages — et `allow_fallbacks: false` fait
+  // que ça échoue au lieu de se replier en silence.
+  //
+  // modelChanged est faux ici : le modèle est le même, seule la contrainte
+  // bouge. Rien à oublier côté conversations, donc.
+  if (extraBodyChanged) {
+    return {
+      apply: true,
+      modelChanged: false,
+      reason: `quantification : ${describeBody(current.extraBody)} → ${describeBody(intent.extraBody)}`,
     };
   }
   if (baseUrlChanged) {
@@ -91,6 +116,14 @@ export function reconcile(
     modelChanged: false,
     reason: `déjà aligné sur ${intent.model}`,
   };
+}
+
+/** "fp8", "int4+fp4" ou "libre" — pour le journal, jamais pour une décision. */
+function describeBody(body: Record<string, unknown> | undefined): string {
+  const provider = body?.provider;
+  if (provider === undefined || provider === null) return "libre";
+  const list = (provider as { quantizations?: unknown }).quantizations;
+  return Array.isArray(list) && list.length > 0 ? list.join("+") : "libre";
 }
 
 /** Ce que applyModel a besoin de savoir faire — injecté pour être testable sans réseau. */
