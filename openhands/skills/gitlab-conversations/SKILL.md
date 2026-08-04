@@ -58,6 +58,30 @@ never.
 
 Conversely, do not split one remark across several comments.
 
+## Read what is already there before you post
+
+List the existing discussions **first**, every time:
+
+```bash
+curl -sS --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+  "$CI_API_V4_URL/projects/$PROJECT/merge_requests/$IID/discussions?per_page=100"
+```
+
+Never raise a defect that already has a thread — including a **resolved** one,
+one worded differently, and one written by someone else. A duplicate makes the
+reader triage the same thing twice, and a duplicate of a *resolved* thread
+reopens a decision someone already made.
+
+Two cases, and only two:
+
+- You have something to add to an existing remark → post it **inside that
+  thread**, not as a new one.
+- You do not → say nothing about that point. Not "as already noted by…" — that
+  is still a second comment about the same defect.
+
+This matters most on a **follow-up**: by then the merge request already carries
+a full review, and everything you re-post is noise on top of it.
+
 ## Never announce what you are doing
 
 Do not post:

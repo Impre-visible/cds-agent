@@ -182,6 +182,36 @@ export function publishingRules(
       "fichier et ligne. Voir la compétence `gitlab-mr-review`.",
   );
 
+  // LES FILS DÉJÀ OUVERTS, sans quoi une deuxième passe republie la première.
+  //
+  // Le message ne transmet AUCUNE discussion existante — décision assumée de
+  // cette branche (voir l'en-tête du module) : l'agent a le dépôt et le
+  // jeton, à lui d'aller chercher ce qui lui manque. Encore faut-il lui dire
+  // qu'il lui manque quelque chose. Rien, jusqu'ici, ne le lui disait.
+  //
+  // La seule protection qui existait est fortuite : une merge request
+  // réutilise sa conversation, donc l'agent retrouve SES remarques dans son
+  // historique. Elle ne couvre ni les fils ouverts par un humain, ni ceux
+  // d'un autre agent, ni le cas où le registre a été vidé entre-temps
+  // (changement de modèle — voir openhands/model.ts) : là, la revue est
+  // refaite intégralement par-dessus l'ancienne.
+  //
+  // Le banc ne pouvait pas le voir : `prepare` efface toutes les notes avant
+  // chaque tirage, il n'y a jamais rien à dédupliquer. Angle mort de la
+  // mesure, pas résultat de la mesure.
+  //
+  // Répondre DANS le fil existant plutôt que d'en ouvrir un second garde
+  // l'échange résolvable d'un seul geste : c'est tout l'intérêt du bouton
+  // Resolve, qu'un doublon casse en deux.
+  lines.push(
+    "- LIS les discussions déjà ouvertes (`GET /projects/:id/merge_requests/:iid/discussions`) " +
+      "AVANT de publier quoi que ce soit. Ne re-signale JAMAIS un défaut qui a déjà " +
+      "un fil, même résolu, même formulé autrement, même par quelqu'un d'autre : " +
+      "un doublon oblige le lecteur à traiter deux fois la même chose. Si tu as à " +
+      "ajouter sur une remarque existante, réponds DANS son fil ; sinon, tais-toi " +
+      "sur ce point.",
+  );
+
   // Rien n'est dit quand la capacité n'est pas accordée : une consigne
   // négative (« n'utilise pas de suggestion ») coûterait du contexte pour
   // interdire un comportement que le modèle n'a de toute façon pas eu

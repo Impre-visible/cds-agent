@@ -418,6 +418,34 @@ describe("publishingRules — ancrage sur le diff", () => {
   });
 });
 
+describe("publishingRules — ne pas republier ce qui a déjà un fil", () => {
+  test("demande de LIRE les discussions existantes avant de publier", () => {
+    // Le message ne transmet aucune discussion : si on ne dit pas à l'agent
+    // d'aller les chercher, il publie sa revue sans savoir ce qui est déjà
+    // là.
+    const rules = publishingRules(null, capabilities({ review: true }));
+    assert.match(rules, /LIS les discussions déjà ouvertes/);
+    assert.match(rules, /merge_requests\/:iid\/discussions/);
+  });
+
+  test("couvre le fil RÉSOLU et le fil d'un autre auteur, pas seulement les siens", () => {
+    // La seule protection existante est fortuite — l'historique de la
+    // conversation réutilisée — et ne couvre que ce que l'agent a écrit
+    // lui-même.
+    const rules = publishingRules(null, capabilities({ review: true }));
+    assert.match(rules, /même résolu/);
+    assert.match(rules, /par quelqu'un d'autre/);
+  });
+
+  test("dit quoi faire à la place : répondre dans le fil, ou se taire", () => {
+    // Une interdiction sans issue de secours pousse le modèle à publier
+    // quand même, en préfixant « comme déjà signalé ».
+    const rules = publishingRules(null, capabilities({ review: true }));
+    assert.match(rules, /réponds DANS son fil/);
+    assert.match(rules, /tais-toi/);
+  });
+});
+
 describe("publishingRules — blocs suggestion", () => {
   test("capacité absente : RIEN n'est dit — une interdiction coûterait du contexte", () => {
     const rules = publishingRules(null, capabilities({ review: true }));
@@ -460,6 +488,9 @@ describe("buildMessage — l'ancrage survit à une relance", () => {
     assert.match(followUp, /ANCRE chaque remarque sur la LIGNE/);
     assert.match(followUp, /```suggestion```/);
     assert.doesNotMatch(followUp, /Tu interviens sur la merge request/);
+    // La relance est justement le cas où des fils existent déjà : c'est là
+    // que la consigne compte le plus, pas au premier passage.
+    assert.match(followUp, /LIS les discussions déjà ouvertes/);
   });
 
   test("le message complet reste court malgré les nouvelles consignes", () => {

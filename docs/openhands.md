@@ -341,6 +341,34 @@ commentaire général »). Elle est désormais un impératif isolé, avec son
 critère d'échec (« une remarque au niveau de la MR n'apparaît pas dans
 l'onglet Changes : c'est une remarque ratée »).
 
+### Les fils déjà ouverts — un angle mort du banc
+
+Le message ne transmet **aucune** discussion existante : c'est la décision de
+cette branche, l'agent a le dépôt et le jeton, à lui d'aller chercher ce qui
+lui manque. Encore faut-il lui dire qu'il lui manque quelque chose — rien ne
+le disait jusqu'ici.
+
+La seule protection qui existait est **fortuite** : une merge request réutilise
+sa conversation, l'agent retrouve donc ses propres remarques dans son
+historique. Elle ne couvre ni un fil ouvert par un humain, ni celui d'un autre
+agent, ni le cas où le registre a été vidé entre-temps (changement de modèle,
+voir [Changer de modèle](#changer-de-modèle)) : là, la revue est refaite
+intégralement par-dessus l'ancienne.
+
+**Le banc ne pouvait pas le détecter** : `prepare` efface toutes les notes de
+la merge request avant chaque tirage, il n'y a jamais rien à dédupliquer. C'est
+un angle mort de la mesure, pas un résultat de la mesure — mentionné ici parce
+que c'est le genre de trou qu'on ne retrouve pas deux fois.
+
+`publishingRules` demande désormais de lire `GET …/discussions` avant de
+publier, de ne re-signaler aucun défaut ayant déjà un fil — même résolu, même
+formulé autrement, même écrit par quelqu'un d'autre — et donne l'issue de
+secours sans laquelle un modèle republie en préfixant « comme déjà signalé » :
+répondre dans le fil existant, ou se taire sur ce point.
+
+⚠ Cette consigne **change le message**. Les tirages faits avant ne sont pas
+comparables à ceux d'après.
+
 ### Il n'y a rien à installer depuis le registre
 
 **Les 55 compétences du registre officiel sont déjà embarquées dans l'image**
