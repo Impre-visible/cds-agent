@@ -1,8 +1,8 @@
 /**
  * LE worker de cette branche. Il n'y en a pas d'autre.
  *
- * Pas de clone, pas de conteneur maison, pas de passes multiples, pas
- * d'arbitre, pas d'extraction JSON, pas de garde-fou de périmètre, pas de
+ * Pas de clone, pas de conteneur maison, pas d'arbitre, pas d'extraction
+ * JSON, pas de garde-fou de périmètre, pas de
  * tests rejoués côté hôte, pas de publication vérifiée : les modules qui
  * faisaient tout ça (agent/sandbox.ts, agent/workspace.ts, tasks/review.ts,
  * tasks/implement.ts, tasks/guard.ts, tasks/publish.ts, tasks/context.ts…)
@@ -13,6 +13,13 @@
  *   1. il traduit la demande GitLab en un message pour OpenHands ;
  *   2. il démarre une conversation et attend qu'elle finisse ;
  *   3. il rapporte dans la merge request ce qui s'est passé, avec le lien.
+ *
+ * La seule exception est la revue à PASSES MULTIPLES (`review.passes` dans
+ * projects.json, 1 par défaut) : il enchaîne alors N conversations en
+ * transmettant à chacune ce que GitLab a déjà accepté. La logique — quoi
+ * transmettre, sous quelle forme, et comment compter le neuf — vit dans
+ * tasks/passes.ts ; ici il ne reste que l'enchaînement. À `passes: 1`, rien
+ * de tout ça ne s'exécute et le message envoyé est celui d'avant.
  *
  * Ce qu'il ne fait PAS, délibérément : reconstruire le contexte standard
  * (diff numéroté, ticket lié, commentaires humains récents). OpenHands clone
@@ -30,6 +37,14 @@ import { OpenHandsClient, type CompletionOutcome } from "../openhands/client.ts"
 import { ConversationStore, conversationKey } from "../openhands/conversations.ts";
 import { report, type TaskOutcome } from "./report.ts";
 import type { AgentRequest, Discussion } from "../types.ts";
+import {
+  buildPassAddendum,
+  countFresh,
+  extractRemarks,
+  summarizePasses,
+  type PassOutcome,
+  type PublishedRemark,
+} from "./passes.ts";
 import type {
   DelegationConfig,
   MergeRequestCapabilities,
@@ -673,18 +688,26 @@ async function resumeConversation(
   return known.conversationId;
 }
 
-/** Ouvre une conversation neuve et l'enregistre pour les relances suivantes. */
+/**
+ * Ouvre une conversation neuve et l'enregistre pour les relances suivantes.
+ *
+ * `addendum` est vide pour la passe 1 et pour toute revue à `passes: 1` : le
+ * message est alors identique AU CARACTÈRE PRÈS à celui d'avant le chantier
+ * des passes multiples, ce qui garde comparables les manches déjà mesurées.
+ */
 async function openConversation(
   openhands: OpenHandsClient,
   key: string,
   request: AgentRequest,
   project: ResolvedProject,
   thread: ThreadContext | null,
+  addendum = "",
 ): Promise<string> {
   const branch = await resolveSourceBranch(request);
 
   const task = await openhands.startConversation({
-    message: buildMessage(request, project, request.targetUrl, false, thread),
+    message:
+      buildMessage(request, project, request.targetUrl, false, thread) + addendum,
     repository: request.projectPath,
     branch,
     title: `cds-agent ${request.projectPath}!${request.iid}`,
@@ -702,6 +725,70 @@ async function openConversation(
   // ferait échouer toutes les relances suivantes avant de repartir de zéro.
   conversations.set(key, { conversationId, sandboxId: task.sandbox_id });
   return conversationId;
+}
+
+/**
+ * Les remarques que le BOT a publiées sur la merge request depuis `since`.
+ *
+ * Best-effort assumé : si GitLab refuse, la revue continue avec une liste
+ * vide. La passe suivante refait alors une partie du travail — c'est
+ * regrettable, ce n'est pas une raison d'abandonner une revue déjà à moitié
+ * faite et déjà payée.
+ */
+async function fetchBotRemarks(
+  request: AgentRequest,
+  since: number,
+): Promise<PublishedRemark[]> {
+  const discussions: Discussion[] = [];
+  try {
+    let page: number | null = 1;
+    for (let visited = 0; page !== null && visited < MAX_LIST_PAGES; visited++) {
+      const result = await gitlab.discussionsPage(
+        request.projectId,
+        request.kind,
+        request.iid,
+        page,
+      );
+      discussions.push(...result.items);
+      page = result.nextPage;
+    }
+  } catch (error) {
+    log.warn(
+      `[openhands] discussions illisibles (${(error as Error).message}) — ` +
+        "la passe suivante repart sans liste d'exclusion",
+    );
+    return [];
+  }
+  return extractRemarks(discussions, config.botUsername, since);
+}
+
+/**
+ * Supprime le bac à sable d'une conversation terminée, et oublie celle-ci.
+ *
+ * Le `sandbox_id` est lu EN DIRECT sur la conversation, jamais dans le
+ * registre : la tâche de démarrage le rend encore nul au statut WORKING —
+ * défaut déjà rencontré et corrigé au même endroit dans resumeConversation.
+ *
+ * Best-effort : un nettoyage raté ne doit pas faire échouer une revue qui a
+ * abouti. Il est journalisé, parce qu'un conteneur qui survit finit par
+ * coûter la campagne suivante.
+ */
+async function releaseSandbox(
+  openhands: OpenHandsClient,
+  conversationId: string,
+): Promise<void> {
+  try {
+    const conversation = await openhands.getConversation(conversationId);
+    const sandboxId = conversation?.sandbox_id;
+    if (!sandboxId) return;
+    const result = await openhands.deleteSandbox(sandboxId);
+    log.info(`[openhands] bac à sable ${sandboxId} ${result}`);
+  } catch (error) {
+    log.warn(
+      `[openhands] bac à sable non supprimé (${(error as Error).message}) — ` +
+        "à vérifier avec `docker ps --filter name=oh-agent-server`",
+    );
+  }
 }
 
 /**
@@ -785,14 +872,76 @@ export async function runOpenHandsTask(
         `[openhands] demande posée dans le fil ${thread.discussionId}${thread.location ? ` (${thread.location})` : ""}`,
       );
     }
-    const conversationId =
-      (await resumeConversation(openhands, key, request, project, thread)) ??
-      (await openConversation(openhands, key, request, project, thread));
+    // Repère temporel pris AVANT la première passe : sans lui, une revue
+    // antérieure — celle d'hier, celle d'un autre modèle — entrerait dans la
+    // liste d'exclusion et interdirait à la passe 1 de signaler ce qu'elle
+    // est censée signaler. Voir extractRemarks.
+    const since = Date.now();
+    const { passes, passMode } = project.review;
+    const seen = new Set<string>();
+    const outcomes: PassOutcome[] = [];
+    let addendum = "";
+    let outcome!: CompletionOutcome;
+    let conversationId = "";
 
-    const outcome = await openhands.waitForCompletion(conversationId, {
-      timeoutMs: config.openhandsTimeoutMs,
-      pollIntervalMs: OPENHANDS_POLL_MS,
-    });
+    for (let pass = 1; pass <= passes; pass++) {
+      if (passes > 1) {
+        log.info(`[openhands] passe ${pass}/${passes} (mode=${passMode})`);
+      }
+
+      // La passe 1 garde le chemin d'avant : reprise de la conversation de
+      // cette merge request si elle existe, sinon ouverture. Les passes
+      // suivantes ouvrent TOUJOURS une conversation neuve — reprendre la
+      // précédente donnerait au modèle sa propre revue dans l'historique,
+      // c'est-à-dire `chained` déguisé, le mode qui produit l'ancrage.
+      conversationId =
+        pass === 1
+          ? ((await resumeConversation(openhands, key, request, project, thread)) ??
+            (await openConversation(openhands, key, request, project, thread)))
+          : await openConversation(
+              openhands,
+              key,
+              request,
+              project,
+              thread,
+              addendum,
+            );
+
+      outcome = await openhands.waitForCompletion(conversationId, {
+        timeoutMs: config.openhandsTimeoutMs,
+        pollIntervalMs: OPENHANDS_POLL_MS,
+      });
+
+      if (passes === 1) break;
+
+      // Ce que GitLab a RÉELLEMENT accepté depuis le début de la revue — pas
+      // ce que l'agent a tenté. Voir l'en-tête de tasks/passes.ts pour
+      // pourquoi la source est GitLab et non les événements OpenHands.
+      const published = await fetchBotRemarks(request, since);
+      const fresh = countFresh(published, seen);
+      const seconds = Math.round(outcome.elapsedMs / 1000);
+      outcomes.push({
+        pass,
+        published: published.length,
+        fresh,
+        seconds,
+        result: outcome.result,
+      });
+      log.info(
+        `[openhands] passe ${pass}/${passes} — ${outcome.result} en ${seconds} s — ` +
+          `${published.length} remarque(s) au total, dont ${fresh} nouvelle(s)`,
+      );
+
+      // Le bac à sable de la passe qui vient de finir n'a plus d'usage : la
+      // passe suivante ouvre une conversation neuve. Sans cette suppression,
+      // N passes laisseraient N conteneurs — le défaut exact qui a saturé la
+      // VM Docker et coûté la manche 4.
+      await releaseSandbox(openhands, conversationId);
+
+      if (pass < passes) {
+        addendum = buildPassAddendum(passMode, published);
+      }
+    }
 
     const { body, outcome: taskOutcome } = buildReport(
       outcome,
@@ -807,6 +956,9 @@ export async function runOpenHandsTask(
       `[worker] terminé ${request.key} — ${outcome.result} en ${Math.round(outcome.elapsedMs / 1000)} s — ` +
         `${openhands.conversationUrl(conversationId)}`,
     );
+    if (passes > 1) {
+      log.info(`[openhands] ${summarizePasses(outcomes, passMode)}`);
+    }
   } catch (error) {
     const message = (error as Error).message;
     log.error(`[worker] échec ${request.key} : ${message}`);

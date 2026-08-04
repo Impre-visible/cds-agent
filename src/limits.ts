@@ -113,6 +113,39 @@ export const OPENHANDS_START_TIMEOUT_MS = 5 * 60_000;
 export const OPENHANDS_POLL_MS = 10_000;
 
 // ---------------------------------------------------------------------------
+// Revue à passes multiples — taille de l'addendum d'exclusion
+// ---------------------------------------------------------------------------
+
+/**
+ * Nombre de remarques antérieures listées dans l'addendum d'une passe.
+ *
+ * Mesuré sur `hardening` : un addendum long fait PERDRE des passes (mode
+ * exclusion, 2 passes utiles sur 3 contre 3 sur 3 en independent). La liste
+ * sert à dire « pas ça », pas à transmettre la revue — au-delà, elle occupe
+ * le contexte que la passe devrait dépenser à chercher ailleurs.
+ */
+export const MAX_PREVIOUS_REMARKS_LISTED = 40;
+
+/**
+ * Longueur de la formulation courte d'une remarque antérieure. Assez pour
+ * reconnaître le défaut, trop peu pour le re-expliquer — ce qui est exactement
+ * l'effet recherché.
+ */
+export const MAX_PREVIOUS_REMARK_CHARS = 120;
+
+/**
+ * Plafond de `review.passes` dans projects.json.
+ *
+ * Chaque passe est une conversation complète : un bac à sable, un délai
+ * d'attente entier, un coût de modèle. Le worker traite les demandes EN SÉRIE
+ * (voir daemon/queue.ts), donc un `"passes": 30` posé par erreur immobiliserait
+ * le bot des heures sans que rien ne le signale. Cinq laisse largement de quoi
+ * mesurer un protocole dont on sait déjà que la troisième passe est la
+ * dernière à rapporter quelque chose.
+ */
+export const MAX_REVIEW_PASSES = 5;
+
+// ---------------------------------------------------------------------------
 // Pagination GitLab — plafonds de sécurité sur les collections paginées
 // ---------------------------------------------------------------------------
 

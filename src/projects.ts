@@ -1,5 +1,11 @@
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { MAX_REVIEW_PASSES } from "./limits.ts";
+import {
+  isReviewPassMode,
+  REVIEW_PASS_MODES,
+  type ReviewPassMode,
+} from "./tasks/passes.ts";
 
 // ---------------------------------------------------------------------------
 // Chantier "projects.json" — remplace la configuration par projet éclatée
@@ -168,6 +174,30 @@ export interface DelegationConfig {
   planFirst: boolean;
 }
 
+/**
+ * Revue à passes multiples : N conversations OpenHands successives sur la même
+ * merge request, la passe K recevant ce que les précédentes ont publié.
+ *
+ * À NE PAS CONFONDRE avec les tirages du banc (`bench.sh --runs N`), qui sont
+ * N revues INDÉPENDANTES avec remise à zéro entre chaque et mesurent la
+ * variance. Ici on ne remet rien à zéro et on mesure l'accumulation. Voir
+ * l'en-tête de tasks/passes.ts.
+ *
+ * `passes: 1` par défaut : le message envoyé est alors identique AU CARACTÈRE
+ * PRÈS à celui d'avant ce chantier (buildPassAddendum rend "" et rien n'est
+ * concaténé), ce qui garde comparables les manches déjà mesurées.
+ */
+export interface ReviewConfig {
+  /** Nombre de passes. 1 = comportement actuel, strictement inchangé. */
+  passes: number;
+  /**
+   * Ce qu'on transmet à la passe suivante. `exclusion` par défaut — c'est le
+   * seul des trois qui ait fait mieux que la passe unique dans la mesure ;
+   * sans effet tant que `passes` vaut 1.
+   */
+  passMode: ReviewPassMode;
+}
+
 export interface ResolvedCapabilities {
   issue: IssueCapabilities;
   mergeRequest: MergeRequestCapabilities;
@@ -201,6 +231,8 @@ export interface ResolvedProject {
   docker: DockerConfig;
   /** Flux à deux niveaux — voir DelegationConfig. Toujours résolu. */
   delegation: DelegationConfig;
+  /** Revue à passes multiples — voir ReviewConfig. Toujours résolu. */
+  review: ReviewConfig;
   /** Répertoires de test maison. NON LUS sur cette branche (le daemon ne reconnaît plus les chemins de test lui-même) ; acceptés pour rester compatible avec `hardening`. */
   testDirectories: string[];
 }
@@ -301,6 +333,61 @@ function parseDelegationBlock(
   return block;
 }
 
+/**
+ * Bloc "review", validé comme les autres.
+ *
+ * `passes` doit être un entier de 1 à MAX_REVIEW_PASSES. Le plafond n'est pas
+ * de la prudence rituelle : chaque passe est une conversation complète, donc
+ * un bac à sable, un délai d'attente et un coût de modèle de plus. Un
+ * `"passes": 30` posé par erreur bloquerait le worker des heures — il traite
+ * les demandes en série.
+ *
+ * `passMode` est validé contre la liste exacte : un mode inconnu ferait
+ * silencieusement autre chose que ce qui est écrit, et c'est précisément la
+ * différence entre `chained` et `exclusion` qui décide du résultat.
+ */
+function parseReviewBlock(
+  raw: unknown,
+  path: string,
+): Partial<ReviewConfig> | undefined {
+  if (raw === undefined) return undefined;
+  if (!isPlainObject(raw)) {
+    throw new Error(`projects.json invalide : "${path}" doit être un objet`);
+  }
+  assertOnlyKeys(raw, ["passes", "passMode"], path);
+
+  const block: Partial<ReviewConfig> = {};
+
+  if (raw.passes !== undefined) {
+    const passes = raw.passes;
+    if (
+      typeof passes !== "number" ||
+      !Number.isInteger(passes) ||
+      passes < 1 ||
+      passes > MAX_REVIEW_PASSES
+    ) {
+      throw new Error(
+        `projects.json invalide : "${path}.passes" doit être un entier entre 1 et ` +
+          `${MAX_REVIEW_PASSES} (reçu ${JSON.stringify(passes)})`,
+      );
+    }
+    block.passes = passes;
+  }
+
+  if (raw.passMode !== undefined) {
+    if (!isReviewPassMode(raw.passMode)) {
+      throw new Error(
+        `projects.json invalide : "${path}.passMode" doit valoir ` +
+          `${REVIEW_PASS_MODES.map((mode) => `"${mode}"`).join(", ")} ` +
+          `(reçu ${JSON.stringify(raw.passMode)})`,
+      );
+    }
+    block.passMode = raw.passMode;
+  }
+
+  return block;
+}
+
 type PartialCapabilities<K extends string> = Partial<Record<K, boolean>>;
 
 /** Bloc "mergeRequest" tel que parsé : les booléens (partiels), plus "writablePaths" (partiel lui aussi — absent tant que non déclaré, ni par defaults ni par le projet). */
@@ -330,6 +417,7 @@ interface ParsedCommonFields {
   docker: ParsedDockerBlock;
   testDirectories?: string[];
   delegation?: Partial<DelegationConfig> | undefined;
+  review?: Partial<ReviewConfig> | undefined;
 }
 
 interface ParsedEntry extends ParsedCommonFields {
@@ -571,7 +659,7 @@ export function parseProjectsFile(raw: unknown): ProjectsFile {
   if (isPlainObject(defaultsRaw)) {
     assertOnlyKeys(
       defaultsRaw,
-      ["capabilities", "commands", "docker", "testDirectories", "delegation"],
+      ["capabilities", "commands", "docker", "testDirectories", "delegation", "review"],
       "defaults",
     );
   }
@@ -592,6 +680,10 @@ export function parseProjectsFile(raw: unknown): ProjectsFile {
     delegation: parseDelegationBlock(
       isPlainObject(defaultsRaw) ? defaultsRaw.delegation : undefined,
       "defaults.delegation",
+    ),
+    review: parseReviewBlock(
+      isPlainObject(defaultsRaw) ? defaultsRaw.review : undefined,
+      "defaults.review",
     ),
     testDirectories: parseStringArray(
       isPlainObject(defaultsRaw) ? defaultsRaw.testDirectories : undefined,
@@ -624,7 +716,7 @@ export function parseProjectsFile(raw: unknown): ProjectsFile {
     }
     assertOnlyKeys(
       entryRaw,
-      ["users", "capabilities", "commands", "docker", "testDirectories", "delegation"],
+      ["users", "capabilities", "commands", "docker", "testDirectories", "delegation", "review"],
       path,
     );
 
@@ -656,6 +748,7 @@ export function parseProjectsFile(raw: unknown): ProjectsFile {
       docker: parseDockerBlock(entryRaw.docker, `${path}.docker`),
       testDirectories: parseStringArray(entryRaw.testDirectories, `${path}.testDirectories`, "noms de répertoire"),
       delegation: parseDelegationBlock(entryRaw.delegation, `${path}.delegation`),
+      review: parseReviewBlock(entryRaw.review, `${path}.review`),
     });
   }
 
@@ -713,6 +806,14 @@ export function resolveProject(
         entry.delegation?.enabled ?? file.defaults.delegation?.enabled ?? false,
       planFirst:
         entry.delegation?.planFirst ?? file.defaults.delegation?.planFirst ?? false,
+    },
+    review: {
+      // 1 par défaut : le message envoyé reste identique au caractère près à
+      // celui d'avant ce chantier, ce qui garde comparables les manches déjà
+      // mesurées. Voir ReviewConfig.
+      passes: entry.review?.passes ?? file.defaults.review?.passes ?? 1,
+      passMode:
+        entry.review?.passMode ?? file.defaults.review?.passMode ?? "exclusion",
     },
   };
 }

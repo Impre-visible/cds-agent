@@ -841,3 +841,79 @@ describe("delegation — flux à deux niveaux, fail-closed", () => {
     );
   });
 });
+
+describe("bloc review — passes multiples, et le défaut qui garde la comparabilité", () => {
+  test("absent : 1 passe, mode exclusion — comportement actuel strictement inchangé", () => {
+    // LE défaut qui compte. À passes:1, buildPassAddendum n'est jamais appelé
+    // et le message envoyé est celui d'avant ce chantier, au caractère près :
+    // c'est la condition pour que la manche 4 reste comparable à la suite.
+    const file = parseProjectsFile({ projects: { "g/p": { users: ["alice"] } } });
+    const resolved = resolveProject(file, "g/p", BASELINE)!;
+    assert.equal(resolved.review.passes, 1);
+    assert.equal(resolved.review.passMode, "exclusion");
+  });
+
+  test("le bloc du projet l'emporte sur celui de defaults", () => {
+    const file = parseProjectsFile({
+      defaults: { review: { passes: 2, passMode: "chained" } },
+      projects: { "g/p": { users: ["alice"], review: { passes: 3 } } },
+    });
+    const resolved = resolveProject(file, "g/p", BASELINE)!;
+    assert.equal(resolved.review.passes, 3);
+    // passMode non redéclaré par le projet : celui de defaults subsiste.
+    assert.equal(resolved.review.passMode, "chained");
+  });
+
+  test("defaults seul s'applique à un projet qui ne dit rien", () => {
+    const file = parseProjectsFile({
+      defaults: { review: { passes: 3, passMode: "exclusion" } },
+      projects: { "g/p": { users: ["alice"] } },
+    });
+    const resolved = resolveProject(file, "g/p", BASELINE)!;
+    assert.equal(resolved.review.passes, 3);
+  });
+
+  test("passes hors bornes : refusé au chargement, pas au bout de trois heures", () => {
+    // Chaque passe est une conversation, donc un bac à sable et un délai
+    // d'attente entiers, et le worker traite en série.
+    for (const passes of [0, -1, 6, 1.5]) {
+      assert.throws(
+        () => parseProjectsFile({ projects: { "g/p": { review: { passes } } } }),
+        /review\.passes.*entier entre 1 et 5/s,
+        `passes=${passes} aurait dû être refusé`,
+      );
+    }
+  });
+
+  test("passMode inconnu : refusé, et les modes valides sont nommés", () => {
+    // Un mode inconnu ferait silencieusement autre chose que ce qui est écrit
+    // — or c'est le choix chained/exclusion qui décide du résultat.
+    assert.throws(
+      () => parseProjectsFile({ projects: { "g/p": { review: { passMode: "exclude" } } } }),
+      /review\.passMode.*"independent", "chained", "exclusion"/s,
+    );
+  });
+
+  test("clé inconnue dans le bloc : refusée plutôt qu'ignorée en silence", () => {
+    assert.throws(
+      () => parseProjectsFile({ projects: { "g/p": { review: { pass: 3 } } } }),
+      /review/,
+    );
+  });
+
+  test("bloc non objet : refusé", () => {
+    assert.throws(
+      () => parseProjectsFile({ projects: { "g/p": { review: 3 } } }),
+      /review.*objet/s,
+    );
+  });
+
+  test("les trois modes sont acceptés — independent sert de témoin", () => {
+    for (const passMode of ["independent", "chained", "exclusion"]) {
+      const file = parseProjectsFile({
+        projects: { "g/p": { users: ["alice"], review: { passes: 2, passMode } } },
+      });
+      assert.equal(resolveProject(file, "g/p", BASELINE)!.review.passMode, passMode);
+    }
+  });
+});

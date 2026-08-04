@@ -50,6 +50,7 @@ function capabilities(
 function project(
   mergeRequest: MergeRequestCapabilities,
   delegation = { enabled: false, planFirst: false },
+  review: ResolvedProject["review"] = { passes: 1, passMode: "exclusion" },
 ): ResolvedProject {
   return {
     users: ["alice"],
@@ -66,6 +67,7 @@ function project(
     docker: { image: "node:22" },
     testDirectories: [],
     delegation,
+    review,
   };
 }
 

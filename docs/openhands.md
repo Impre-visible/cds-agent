@@ -28,6 +28,7 @@ intacts sur `hardening`.
 - [Lancer une revue](#lancer-une-revue)
 - [Ancrage sur le diff, suggestions, compétences](#ancrage-sur-le-diff-suggestions-compétences)
 - [Où vivent les prompts et les compétences](#où-vivent-les-prompts-et-les-compétences)
+- [Revue à passes multiples](#revue-à-passes-multiples)
 - [Délégation à un sous-agent](#délégation-à-un-sous-agent)
 - [Le bac à sable](#le-bac-à-sable)
 - [Ce qui a été vérifié, et où](#ce-qui-a-été-vérifié-et-où)
@@ -645,6 +646,120 @@ inaperçue : le serveur ne rend jamais la clé, seulement `llm_api_key_set`. La
 seule alternative serait de réécrire les réglages à chaque démarrage, ce qui
 effacerait sans prévenir tout réglage fait à la main. Si vous changez de clé
 sans changer de modèle, passez par l'interface ou le curl ci-dessus.
+
+## Revue à passes multiples
+
+### Deux choses portent le mot « passe »
+
+| | Ce que c'est | Ce que ça mesure |
+|---|---|---|
+| **Tirage** (`bench.sh --runs N`) | N revues indépendantes, merge request remise à zéro entre chaque | la **variance** d'un modèle |
+| **Passe** (`review.passes`) | N conversations successives dans **une même** revue, sans remise à zéro | l'**accumulation** |
+
+Les deux se cumulent : `--runs 3` avec `passes: 3` fait neuf conversations.
+
+⚠ **La manche 3 (`cds-agent`, trois passes en exclusion) et la manche 4 (OpenHands,
+passe unique) ne sont pas comparables.** La baisse de couverture observée sur Kimi et
+DeepSeek entre les deux s'explique peut-être entièrement par là.
+
+### Le mode, et pourquoi `exclusion`
+
+Mesuré sur `hardening`, même modèle, même merge request, trois passes :
+
+| Mode | Distinctes | Nouvelles par passe | Doublons |
+|---|:--:|---|:--:|
+| `independent` | 10 | 6 + 3 + 1 | 7 |
+| `chained` | 7 | 5 + 1 + 1 | 10 |
+| **`exclusion`** | **15** | **6 + 5 + 4** | **3** |
+
+`chained` produit de l'**ancrage** : montrer les remarques précédentes invite le modèle à
+les confirmer — la passe 3 a répondu « les 6 remarques précédentes sont confirmées, aucun
+nouveau défaut ». `exclusion` dit la même chose à l'envers et la passe 3 rapporte encore
+4 remarques neuves.
+
+`independent` est conservé comme **témoin**, et il n'équivaut pas à N tirages : les N
+conversations publient sur la même merge request, sans remise à zéro.
+
+### Configuration
+
+```json
+"review": { "passes": 3, "passMode": "exclusion" }
+```
+
+Accepté au niveau `defaults` comme au niveau d'un projet, le projet l'emportant. `passes`
+est un entier de 1 à 5 ; `passMode` vaut `independent`, `chained` ou `exclusion`. Toute
+autre valeur, ou une clé mal orthographiée, **empêche le daemon de démarrer** — un réglage
+muet ici changerait le résultat sans que rien ne le dise.
+
+**Le défaut est `passes: 1`**, et le message envoyé est alors identique **au caractère
+près** à celui d'avant ce chantier : `buildPassAddendum` rend `""` et rien n'est
+concaténé. C'est ce qui garde les manches déjà mesurées comparables à la suite.
+
+### D'où viennent les remarques transmises
+
+De **GitLab**, pas des événements OpenHands. `GET /api/v1/conversation/<id>/events/search`
+existe pourtant, survit à la disparition du bac à sable, et contient bien les `curl` de
+l'agent — vérifié sur une conversation de la manche 4 : 49 événements, 45 occurrences de
+« discussions », 24 de « position ». Trois raisons de ne pas s'en servir :
+
+1. Ce sont des **tentatives**, pas des résultats. Un `POST` refusé par GitLab (400 sur une
+   `position` invalide, le cas le plus fréquent) laisse la même trace qu'un `POST` accepté.
+   La liste d'exclusion masquerait un défaut jamais signalé à personne.
+2. Il faudrait analyser des lignes de shell **composées par le modèle**, dont la forme
+   change d'un modèle et d'un run à l'autre. Un échec d'analyse rendrait une liste vide,
+   c'est-à-dire une passe 2 qui refait la passe 1, en silence.
+3. L'agent **continue de publier après l'expiration du délai d'attente** du daemon. GitLab
+   le voit ; la conversation que le daemon a cessé de suivre, non.
+
+GitLab rend `position.new_path` / `position.new_line` structurés, dans une API que le daemon
+utilise déjà. Coût : un GET paginé par passe, négligeable devant une passe qui dure des
+minutes.
+
+Un repère temporel est pris **avant la passe 1** : sans lui, une revue antérieure entrerait
+dans l'exclusion et la passe 1 n'aurait plus rien à signaler.
+
+### Lire le journal
+
+```
+[openhands] passe 2/3 (mode=exclusion)
+[openhands] passe 2/3 — finished en 15 s — 11 remarque(s) au total, dont 5 nouvelle(s)
+[openhands] bac à sable oh-agent-server-xY7 supprimé
+[openhands] 3 passe(s) (mode=exclusion) : 6 + 5 + 4 remarque(s) nouvelle(s), 41 s
+```
+
+**« dont N nouvelle(s) » est la métrique centrale.** Elle compte les remarques dont
+l'emplacement `fichier:ligne` n'avait jamais été vu. Une passe qui n'apporte rien s'écrit
+`0` — et trois campagnes avec un `0` en dernière position disent que le protocole est à
+deux passes.
+
+Le total est celui de **toute la revue**, pas de la passe : il peut donc monter pendant que
+les nouvelles descendent, ce qui est exactement le signe d'un modèle qui recommence.
+
+### Le délai d'attente s'applique PAR PASSE
+
+`OPENHANDS_TIMEOUT_MINUTES` borne chaque passe séparément, pas la revue entière. Trois
+raisons : une passe est une conversation complète et autonome ; une borne globale ferait
+dépendre le temps laissé à la passe 3 de la lenteur de la passe 1 ; et le compte rendu ne
+distinguerait plus « le modèle est lent » de « il reste deux passes à faire ».
+
+Conséquence à assumer : trois passes peuvent durer trois fois la borne.
+
+### Les bacs à sable sont supprimés entre passes
+
+Le bac à sable de chaque passe est **supprimé** dès qu'elle finit
+(`DELETE /api/v1/sandboxes/{id}`, relevé dans le schéma OpenAPI de l'instance). C'est
+indispensable ici : `OH_SANDBOX_MAX_NUM_SANDBOXES` se contente de **mettre en pause** les
+anciens, et 23 conteneurs en pause ont saturé la VM Docker pendant la manche 4 — serveur
+d'application tué, deux `port is already allocated`. Une revue à N passes sans ce nettoyage
+multiplierait ce défaut par N.
+
+⚠ Dans cette route, `sandbox_id` est un paramètre de **requête**, pas de chemin, alors que
+la route s'écrit `/sandboxes/{id}`. Les deux sont envoyés.
+
+### Une seule réaction, un seul compte rendu
+
+L'accusé de réception est posé une fois, au début, par le daemon — pas une fois par passe.
+Le compte rendu final couvre l'ensemble et n'est publié qu'à la fin.
 
 ## Délégation à un sous-agent
 

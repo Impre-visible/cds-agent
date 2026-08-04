@@ -48,6 +48,7 @@ function makeProject(overrides: Partial<ResolvedProject> = {}): ResolvedProject 
     docker: { image: "node:22-bookworm-slim" },
     testDirectories: [],
     delegation: { enabled: false, planFirst: false },
+    review: { passes: 1, passMode: "exclusion" },
     ...overrides,
   };
 }

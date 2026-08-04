@@ -439,6 +439,43 @@ export class OpenHandsClient {
   }
 
   /**
+   * `DELETE /api/v1/sandboxes/{id}` — supprime réellement le conteneur, là où
+   * `OH_SANDBOX_MAX_NUM_SANDBOXES` se contente de METTRE EN PAUSE les anciens.
+   *
+   * La distinction est ce qui a fait tomber la manche 4 : 23 conteneurs en
+   * pause ont saturé la VM Docker (8 Go), tué le serveur d'application, et
+   * produit deux `Bind for 0.0.0.0:<port> failed: port is already allocated`.
+   * Une revue à N passes ouvre N conversations, donc N bacs à sable — sans
+   * cette suppression, le chantier « passes multiples » multiplierait
+   * exactement le défaut qui a coûté la manche précédente.
+   *
+   * ⚠ `sandbox_id` est un paramètre de REQUÊTE, pas de chemin, alors même que
+   * la route s'écrit `/sandboxes/{id}`. Relevé dans le schéma OpenAPI de
+   * l'instance (`GET /openapi.json` → `paths./api/v1/sandboxes/{id}.delete`,
+   * `parameters: [{name: "sandbox_id", in: "query", required: true}]`), pas
+   * deviné. Les deux sont donc envoyés : le chemin pour la route, la requête
+   * pour la validation.
+   *
+   * Ne lève PAS sur 404 : un bac à sable déjà disparu est le résultat
+   * recherché, pas une panne. Toute autre erreur remonte — un nettoyage qui
+   * échoue en silence est précisément ce qu'on cherche à ne plus avoir.
+   */
+  async deleteSandbox(sandboxId: string): Promise<"supprimé" | "déjà absent"> {
+    const id = encodeURIComponent(sandboxId);
+    try {
+      await this.#v1<void>(`/sandboxes/${id}?sandbox_id=${id}`, {
+        method: "DELETE",
+      });
+      return "supprimé";
+    } catch (error) {
+      if (error instanceof OpenHandsError && error.status === 404) {
+        return "déjà absent";
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Sonde la conversation jusqu'à ce que son bac à sable soit RUNNING, après
    * un resume. Rend `false` si le délai expire ou si le bac à sable part en
    * ERROR/MISSING — l'appelant repart alors sur une conversation neuve plutôt
