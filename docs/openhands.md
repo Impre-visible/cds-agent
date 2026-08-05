@@ -757,6 +757,42 @@ curl -s http://127.0.0.1:3000/api/v1/settings \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["agent_settings"]["llm"]["litellm_extra_body"])'
 ```
 
+### Écarter un fournisseur cassé
+
+L'entrée réservée `"*"` s'applique à tous les modèles :
+
+```json
+{
+  "*": { "ignore": ["inceptron"] },
+  "openrouter/z-ai/glm-5.2": { "quantizations": ["fp4"], "deployable": false }
+}
+```
+
+**Pourquoi elle existe.** Le 4 août 2026, minimax et kimi ont échoué en 26 s et 35 s sur
+les trois passes, avec le même message :
+
+```
+Provider returned error, code 422 — "Failed to deserialize the JSON body into the
+target type: messages[4]: missing field `content`"     provider_name: Inceptron
+```
+
+Inceptron refuse un message d'assistant qui ne porte que des appels d'outils — donc
+n'importe quelle revue, sur n'importe quel modèle qu'il sert. Rien à voir avec la
+quantification : les deux pins retestés passent. Mais `allow_fallbacks: false` interdit à
+OpenRouter de **contourner un fournisseur défectueux**, pas seulement indisponible.
+
+Il servait la quantification épinglée de **trois** modèles de la liste (minimax fp8,
+glm-5.2 fp4, kimi int4), d'où l'entrée globale plutôt qu'une répétition par modèle — et
+d'où le fait qu'elle s'applique aussi à un modèle absent de la table : un fournisseur cassé
+l'est indépendamment de la quantification demandée.
+
+Après exclusion, vérifié par un appel réel : minimax → AtlasCloud, kimi → Chutes,
+glm-5.2 → Decart. Les trois avaient 5 à 7 fournisseurs de repli.
+
+⚠ C'est le **slug** qui compte (`inceptron`), pas le nom affiché (`Inceptron`) — relevé dans
+`GET /api/v1/providers`. Un slug mal orthographié serait un `ignore` silencieusement
+inopérant ; le chargement refuse au moins ce qui n'est pas une chaîne non vide.
+
 ⚠ **Fragilité à connaître** : `nemotron-3-super` n'a qu'UN fournisseur en fp4 (Nebius), et
 `qwen3.5-122b` qu'un seul aussi (DeepInfra). Si ce fournisseur est indisponible ou limité,
 `allow_fallbacks: false` fait **échouer** le tirage au lieu de le dégrader en silence. C'est

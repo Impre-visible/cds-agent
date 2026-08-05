@@ -14,8 +14,9 @@ import { OpenHandsClient } from "../openhands/client.ts";
 import {
   describeQuantization,
   extraBodyFor,
+  ignoredProvidersFor,
   loadQuantizationTable,
-  type QuantizationTable,
+  type Quantizations,
 } from "../openhands/quantization.ts";
 import { SeenTracker } from "./seen.ts";
 import { bootstrapIfFresh } from "./bootstrap.ts";
@@ -43,7 +44,7 @@ const store = new RequestStore(config.stateFile);
  * Fichier présent mais invalide ⇒ le daemon ne démarre pas : quelqu'un a voulu
  * contraindre le routage, le faire à moitié serait pire que pas du tout.
  */
-let quantizations: QuantizationTable = {};
+let quantizations: Quantizations = { models: {}, global: { ignore: [] } };
 let bot: GitLabUser;
 
 /**
@@ -590,13 +591,16 @@ async function checkOpenHands(): Promise<void> {
     });
     if (config.agentModel) {
       const quantization = describeQuantization(config.agentModel, quantizations);
+      const ignored = ignoredProvidersFor(config.agentModel, quantizations);
+      const written = ignored.length > 0 ? ` Fournisseur(s) écarté(s) : ${ignored.join(", ")}.` : "";
       log.info(
-        quantization === "libre"
+        (quantization === "libre"
           ? `Quantification : libre — OpenRouter route seul pour ${config.agentModel}. ` +
-              `Deux tirages peuvent tomber sur deux quantifications différentes ` +
-              `(voir ${config.quantizationsFile}).`
+            `Deux tirages peuvent tomber sur deux quantifications différentes ` +
+            `(voir ${config.quantizationsFile}).`
           : `Quantification imposée : ${quantization} (allow_fallbacks=false). ` +
-              `Un tirage qui aboutit a forcément tourné dessus ; sinon OpenRouter rend un 404.`,
+            `Un tirage qui aboutit a forcément tourné dessus ; sinon OpenRouter rend un 404.`) +
+          written,
       );
     }
 
