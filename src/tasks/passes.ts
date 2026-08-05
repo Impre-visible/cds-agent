@@ -88,6 +88,17 @@ export function isReviewPassMode(value: unknown): value is ReviewPassMode {
   );
 }
 
+/**
+ * Signature que report() (tasks/report.ts) appose à TOUTE note du daemon.
+ *
+ * Un compte rendu — « ⏱️ cessé d'attendre », « ❌ OpenHands a échoué » — n'est
+ * pas une remarque de revue : le faire entrer dans la liste d'exclusion
+ * apprendrait à la passe suivante à ne pas parler d'un fichier dont personne
+ * n'a parlé. Reconnu par cette signature plutôt que par un emoji de tête : elle
+ * ne dépend d'aucune formulation.
+ */
+const DAEMON_SIGNATURE = "<sub>cds-agent</sub>";
+
 /** Une remarque déjà publiée sur la merge request, réduite à ce qui sert. */
 export interface PublishedRemark {
   /** Chemin du fichier, quand il est connu. */
@@ -177,6 +188,7 @@ export function extractRemarks(
     const opener = discussion.notes[0];
     if (!opener || opener.system) continue;
     if (opener.author.username !== botUsername) continue;
+    if (opener.body.includes(DAEMON_SIGNATURE)) continue;
     if (Date.parse(opener.created_at) < since) continue;
 
     const { file, line } = positionOf(opener);

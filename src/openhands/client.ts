@@ -468,6 +468,34 @@ export class OpenHandsClient {
   }
 
   /**
+   * `GET /api/v1/app-conversations/{id}/skills` — les compétences RÉELLEMENT
+   * livrées à cette conversation.
+   *
+   * À APPELER TANT QUE LE BAC À SABLE VIT. L'endpoint est servi par le bac à
+   * sable : une fois celui-ci supprimé, il rend
+   * `404 {"error":"Sandbox not found for conversation …"}`. C'est ce qui a
+   * rendu la colonne `competences` du banc illisible dès que le nettoyage
+   * entre passes est arrivé — elle est passée de « aucune » (une information)
+   * à « ? » (aucune).
+   *
+   * Rend `null` sur toute erreur : cette lecture est de l'instrumentation, elle
+   * ne doit jamais faire échouer une revue.
+   */
+  async listConversationSkills(conversationId: string): Promise<string[] | null> {
+    try {
+      const payload = await this.#request<{ skills?: { name?: string }[] }>(
+        `/${encodeURIComponent(conversationId)}/skills`,
+      );
+      const names = (payload?.skills ?? [])
+        .map((skill) => skill.name)
+        .filter((name): name is string => typeof name === "string");
+      return names;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * `DELETE /api/v1/sandboxes/{id}` — supprime réellement le conteneur, là où
    * `OH_SANDBOX_MAX_NUM_SANDBOXES` se contente de METTRE EN PAUSE les anciens.
    *

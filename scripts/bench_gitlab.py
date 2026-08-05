@@ -294,6 +294,22 @@ def purge_todos(project):
     return purged
 
 
+# Signature que report() (src/tasks/report.ts) appose à TOUTE note du daemon.
+# Plus fiable qu'un emoji de tête : elle ne dépend pas de la formulation, et
+# aucune remarque de revue ne la porte.
+DAEMON_SIGNATURE = "<sub>cds-agent</sub>"
+
+
+def is_daemon_report(body):
+    """Le compte rendu du daemon n'est PAS une remarque de revue.
+
+    Sans ce filtre, un tirage en échec affichait « 1 remarque » — la note
+    « ❌ » du bot — et un tirage qui ne trouve légitimement rien devenait
+    indiscernable d'un tirage raté. Constaté sur minimax et kimi le 4 août
+    2026, où les deux modèles n'avaient rien publié du tout."""
+    return DAEMON_SIGNATURE in body
+
+
 def skills_of(conversation_url):
     """Les compétences maison que l'agent a RÉELLEMENT reçues.
 
@@ -483,7 +499,9 @@ def main():
         notes = [
             n
             for n in discussion.get("notes", [])
-            if not n.get("system") and n["author"]["username"] == BOT
+            if not n.get("system")
+            and n["author"]["username"] == BOT
+            and not is_daemon_report(n.get("body", ""))
         ]
         if not notes:
             continue

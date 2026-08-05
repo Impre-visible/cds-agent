@@ -168,6 +168,39 @@ describe("extractRemarks — ce que le bot a réellement publié", () => {
     assert.equal(remarks.length, 0);
   });
 
+  test("le COMPTE RENDU DU DAEMON n'est pas une remarque", () => {
+    // Sans ce filtre, « ⏱️ le daemon a cessé d'attendre » entrait dans la
+    // liste d'exclusion : la passe suivante apprenait à ne pas parler d'un
+    // fichier dont personne n'avait parlé. Et côté banc, un tirage en échec
+    // affichait « 1 remarque » — constaté sur minimax et kimi le 4 août 2026,
+    // qui n'avaient rien publié du tout.
+    const remarks = extractRemarks(
+      [
+        discussion([
+          note({
+            id: 1,
+            body: "⏱️ Le daemon a cessé d'attendre après 20 min.\n\n<sub>cds-agent</sub>",
+          }),
+        ]),
+        anchored(2, "src/a.js", 10, "Vraie remarque."),
+      ],
+      "cds-bot",
+      T0,
+    );
+    assert.deepEqual(remarks.map((r) => r.file), ["src/a.js"]);
+  });
+
+  test("la signature est reconnue où qu'elle soit dans le corps", () => {
+    // Reconnue par la signature, pas par un emoji de tête : la formulation
+    // change d'un cas à l'autre (⏱️, ❌, 🤖), la signature non.
+    const remarks = extractRemarks(
+      [discussion([note({ id: 1, body: "❌ OpenHands a échoué\n\n<sub>cds-agent</sub>" })])],
+      "cds-bot",
+      T0,
+    );
+    assert.deepEqual(remarks, []);
+  });
+
   test("aucune discussion : liste vide, pas d'exception", () => {
     assert.deepEqual(extractRemarks([], "cds-bot", T0), []);
   });

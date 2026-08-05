@@ -147,7 +147,7 @@ for i in "${!models[@]}"; do
   [ -n "$branch" ] && published=$(python3 "$HELPER" collect "$branch" 2>/dev/null || echo '{}')
 
   python3 - "$model" "$branch" "$log" "$CSV" "$published" "$run" <<'PY'
-import re, os, sys, csv, json, subprocess
+import re, os, sys, csv, json
 model, branch, log_path, csv_path, published, run = sys.argv[1:7]
 counts = json.loads(published or "{}")
 
@@ -166,12 +166,18 @@ url = (row[3] or "") if row else ""
 # Les compétences réellement reçues par l'agent : sans cette colonne, un run
 # où elles ne se chargent pas est indiscernable d'un run où elles se chargent
 # et ne servent à rien.
+#
+# LUES DANS LE JOURNAL, plus via l'API. L'endpoint des compétences est servi
+# par le bac à sable : depuis que le daemon le supprime entre les passes, il
+# rend 404 au moment du dépouillement et la colonne affichait « ? » sur les
+# douze tirages — une information remplacée par rien. Le daemon les relève
+# désormais pendant que le bac à sable vit (logDeliveredSkills) et les écrit
+# dans son journal ; il n'y a plus qu'à les y lire.
 skills = ""
-if url:
-    skills = subprocess.run(
-        [sys.executable, "scripts/bench_gitlab.py", "skills", url],
-        capture_output=True, text=True,
-    ).stdout.strip()
+with open(log_path, encoding="utf-8", errors="replace") as handle:
+    found = re.search(r"compétences livrées : \d+ au total, maison : (\S+)", handle.read())
+    if found:
+        skills = found.group(1)
 
 # Quantification imposée à OpenRouter pour ce modèle, et si elle correspond à
 # sa configuration de déploiement réelle. Lues dans la MÊME table que le daemon

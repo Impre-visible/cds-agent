@@ -763,6 +763,44 @@ async function fetchBotRemarks(
 }
 
 /**
+ * Les compétences MAISON de ce dépôt — celles sous `openhands/skills/`.
+ *
+ * Écrites ici plutôt que déduites : le daemon ne voit pas ce répertoire en
+ * exploitation, et le catalogue livré ne distingue plus la source (les 57
+ * compétences d'une conversation ont toutes `source: null` — relevé).
+ * Comparer par NOM est donc le seul repère.
+ */
+const HOUSE_SKILLS = ["gitlab-mr-review", "gitlab-conversations", "revue-methode"];
+
+/**
+ * Journalise les compétences maison réellement reçues par l'agent.
+ *
+ * LE MOMENT COMPTE : appelée pendant que le bac à sable vit, avant
+ * releaseSandbox. L'endpoint est servi par le bac à sable et rend 404 dès
+ * qu'il a disparu — c'est ce qui a fait passer la colonne `competences` du
+ * banc de « aucune » à « ? » sur les douze tirages du 4 août 2026, en
+ * remplaçant une information par rien.
+ *
+ * Une seule fois par revue : les compétences ne dépendent pas de la passe,
+ * elles dépendent du dépôt.
+ */
+async function logDeliveredSkills(
+  openhands: OpenHandsClient,
+  conversationId: string,
+): Promise<void> {
+  const names = await openhands.listConversationSkills(conversationId);
+  if (names === null) {
+    log.warn("[openhands] compétences illisibles — bac à sable déjà disparu ?");
+    return;
+  }
+  const ours = HOUSE_SKILLS.filter((name) => names.includes(name));
+  log.info(
+    `[openhands] compétences livrées : ${names.length} au total, maison : ` +
+      `${ours.length > 0 ? ours.join("+") : "aucune"}`,
+  );
+}
+
+/**
  * Supprime le bac à sable d'une conversation terminée, et oublie celle-ci.
  *
  * Le `sandbox_id` est lu EN DIRECT sur la conversation, jamais dans le
@@ -883,6 +921,12 @@ export async function runOpenHandsTask(
     let addendum = "";
     let outcome!: CompletionOutcome;
     let conversationId = "";
+    // Cumul sur TOUTES les passes. `outcome.elapsedMs` ne porte que la
+    // dernière : le 4 août 2026, gpt-oss a rapporté 65 s dans le CSV pour
+    // 2 221 s réellement passées, et qwen3.6-27b 1 205 s pour 3 617 s. Un banc
+    // qui sous-estime d'un facteur 34 rend le dimensionnement impossible —
+    // BENCH_MAX_WAIT_SECONDS se règle sur ce chiffre.
+    let totalMs = 0;
 
     for (let pass = 1; pass <= passes; pass++) {
       if (passes > 1) {
@@ -911,6 +955,11 @@ export async function runOpenHandsTask(
         timeoutMs: config.openhandsTimeoutMs,
         pollIntervalMs: OPENHANDS_POLL_MS,
       });
+      totalMs += outcome.elapsedMs;
+
+      // Avant tout nettoyage, et une seule fois : l'endpoint des compétences
+      // meurt avec le bac à sable.
+      if (pass === 1) await logDeliveredSkills(openhands, conversationId);
 
       if (passes === 1) break;
 
@@ -952,8 +1001,11 @@ export async function runOpenHandsTask(
     // L'adresse de la conversation vit ICI, dans le journal, et nulle part
     // ailleurs : c'est une adresse d'outil interne, elle n'a rien à faire
     // dans une merge request que d'autres liront (voir buildReport).
+    // La durée annoncée est celle de la REVUE, toutes passes comprises — c'est
+    // elle que scripts/bench.sh relève. Le statut, lui, reste celui de la
+    // dernière passe : c'est le résultat de la revue.
     log.info(
-      `[worker] terminé ${request.key} — ${outcome.result} en ${Math.round(outcome.elapsedMs / 1000)} s — ` +
+      `[worker] terminé ${request.key} — ${outcome.result} en ${Math.round(totalMs / 1000)} s — ` +
         `${openhands.conversationUrl(conversationId)}`,
     );
     if (passes > 1) {
